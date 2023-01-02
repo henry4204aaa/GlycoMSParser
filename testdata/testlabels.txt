@@ -1,0 +1,1 @@
+here is pre-defined list [(Neu5Ac-OMe B ion, 344.17), (Neu5Gc-OMe B ion, 374.18), (Neu5AcB ion, 376.20), (Neu5Gc B ion, 406.21), (LacNAc-OMe B ion, 432.22), (LacNAc-BY ion, 450.23), (LacNAc-B ion, 464.25), (Neu5AcHex B ion, 580.30), (SiaLacNAc-OMe B ion, 793.38), (SiaLacNAc B ion, 825.42)]
