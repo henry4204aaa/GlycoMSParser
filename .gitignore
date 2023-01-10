@@ -2,3 +2,5 @@
 *.pyc
 *.csv
 *.tsv
+testdata/thermo_convert.py
+.tmp.driveupload/
