@@ -4,14 +4,28 @@ import os
 import pathlib
 import numpy as np
 from pymsfilereader import MSFileReader
+#import datetime
 import time  #for calculating efficiency
 from collections import namedtuple
 rawfile = MSFileReader("zf_sPerMeNG_brain")
-
+rawname = "zf_sPerMeNG_brain"
 ###to supress warning
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 #####
+
+#copied from comparepeaklist.py
+def calcproton(isolatedmass, charge):
+    if abs(charge) == 1 :
+        return isolatedmass
+    elif charge >= 2:
+        conv = (isolatedmass * charge - (charge - 1) * 1.00784)
+        return conv
+    elif charge == 0:
+        return 0
+    elif charge < -1:
+        negconv = (isolatedmass * charge + (charge - 1) * 1.00784)
+        return negconv
 
 ### initialize
 
@@ -24,67 +38,68 @@ ms2list = {}
 ms3list = {}
 errlist = {}
 b = []
+#ms3
+c = []
 #headtitle = ('MS2scan no', 'Isolation mass', 'monoIsomass','chargeState','parentScanNo')
 #b.append(headtitle)
 header = ('entry no','MS1scan no', 'MS1Isolation mass', 'MS1monoIsomass','chargeState','in [H+]',
           'intensityN\/A','StructureN\/A', 'MS2 Scan no', 'peaklist')
 b.append(header)
-ms1no = 1
+ms3header =  ('entry no','MS3scan no', 'MS2Isolation mass', 'MS2monoIsomass', 'MS2 Scan no', 'peaklist')
+c.append(ms3header)
 MS2peaklist = namedtuple('MS2peaklist', ('dMass', 'dIntensity'))
+MS3peaklist = namedtuple('MS3peaklist', ('dMass', 'dIntensity'))
+ms1no = 1
+ms2no = 1
 
-
-
-def extractionlist():
-    #see the implemention in another file
-    pass
+#prevent error
+if scan_number > maxn:
+    print('you\'re trying to get more than what the file has')
+    scan_number = maxn
+    print('set scan_number to', maxn)
 
 #running search throughout the spectra you called
 for i in range(scan_number):
     j = i+1
-    #prevent error
-    if scan_number > maxn:
-        print('you\'re trying to get more than what the file has')
-        scan_number = maxn
-        print('set scan_number to,' maxn)
-    elif i > maxn:
+    if i > maxn:
         break
     elif rawfile.GetMSOrderForScanNum(j) == 1:
         ms1list[i] = j
         #shooud I keep this? the list is totally referred from MS2
     elif rawfile.GetMSOrderForScanNum(j) == 2:
         peaklist = MS2peaklist((rawfile.GetLabelData(j)[0][0]), (rawfile.GetLabelData(j)[0][1]))
+        isolationmass = rawfile.GetPrecursorInfoFromScanNum(j)[1]
+        chargestate = rawfile.GetPrecursorInfoFromScanNum(j)[2]
+        inHmass = calcproton(isolationmass,chargestate)
         a = (ms1no,
              rawfile.GetPrecursorInfoFromScanNum(j)[3],#parentScanNo
              rawfile.GetPrecursorInfoFromScanNum(j)[0],#Isolation mass
-             rawfile.GetPrecursorInfoFromScanNum(j)[1],#monoIsomass
-             rawfile.GetPrecursorInfoFromScanNum(j)[2],#chargeState
-             'in H', #calculate
+             isolationmass,#monoIsomass
+             chargestate,#chargeState
+             inHmass, #calculate calcproton(isolatedmass, charge)
              'ext from peak list',
              'structure na',
              j, #MS2scan no
-             peaklist #surely will have error
+             peaklist
              )
         b.append(a)
         ms1no +=1
     elif rawfile.GetMSOrderForScanNum(j) == 3:
         ms3list[i] = j
+        peaklist = MS3peaklist((rawfile.GetMassListFromScanNum(j)[0][0]), (rawfile.GetMassListFromScanNum(j)[0][1]))
+        d = (ms2no,
+             rawfile.GetPrecursorInfoFromScanNum(j)[3],#parentScanNo
+             rawfile.GetPrecursorInfoFromScanNum(j)[0],#Isolation mass
+             rawfile.GetPrecursorInfoFromScanNum(j)[1],#monoIsomass
+             j, #MS2scan no
+             peaklist #surely will have error
+             )
+        c.append(d)
+        ms2no +=1
     else:
         errlist[i] = j        
     i+=1
-    ############## useless
-    #elif rawfile.GetMSOrderForScanNum(j) == 1:
-    #    ms1list[i] = j
 
-    #headtitle = ('MS2scan no', 'Isolation mass', 'monoIsomass','chargeState','parentScanNo')
-    ''' block A
-    elif rawfile.GetMSOrderForScanNum(j) == 2:
-        a = ( j,rawfile.GetPrecursorInfoFromScanNum(j)[0],
-              rawfile.GetPrecursorInfoFromScanNum(j)[1],
-              rawfile.GetPrecursorInfoFromScanNum(j)[2],
-              rawfile.GetPrecursorInfoFromScanNum(j)[3])
-        b.append(a)
-    '''
-    ###new
 rawfile.Close()
 
 print('MS1 list is skipped,see next')
@@ -92,14 +107,38 @@ print('MS1 list is skipped,see next')
 for key,value in ms1list.items():
     print(value)
 '''
-print('MS2')
+print('MS2 detection')
 #extract MS2 info into csv
-fileext = 'the MS2 summary from' + str(scan_number) +  '.csv'
-print(b, 'is also saved in ', fileext)
+
+print('MS3 detection')
+#extract MS2 info into csv
+timestamp = time.strftime("%Y%m%d-%H%M%S") #datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+save_ms2filename= input("Please enter the file name or leave it blank to generate a filename with datetime")
+if len(save_ms2filename) ==0:
+    fileext = rawname + ' MS2 summary from ' + str(scan_number) + " at " + timestamp + '.csv'
+else:
+    fileext = rawname + save_ms2filename + " at " + timestamp + ".csv"
+print(f"Filename output:{fileext}")
 with open(fileext, 'wt') as g:
+    print("writing to csv...")
     for q in range(len(b)):
         print('\t'.join(map(str, (b[q]))), file = g)
-print("MS1 from MS2")
+print(b, 'is saved in ', fileext)
+print("MS1 will be quiried from MS2")
+timestamp = time.strftime("%Y%m%d-%H%M%S") 
+save_ms3filename= input("Please enter the MS3 file name or leave it blank to generate a filename with datetime")
+if len(save_ms3filename) ==0 :
+    fileext = rawname + ' MS3 summary from ' + str(scan_number) + " at " + timestamp + '.csv'
+else:
+    fileext = rawname + save_ms3filename + " at " + timestamp + ".csv"
+print(f"Filename output:{fileext}")
+with open(fileext, 'wt') as g:
+    print("writing to csv...")
+    for q in range(len(c)):
+        print('\t'.join(map(str, (c[q]))), file = g)
+print(c, 'is saved in ', fileext)
+print("MS3 from MS2")
+
 
 #exclude the first items "parentScanno"
 ''' this works for blockA 
@@ -119,19 +158,19 @@ for q in range(len(b)):
 
 
 '''
-print('MS1 list from MS2')
 '''
 print('MS2 list')
 for key,value in ms2list.items():
     print(value)
 '''
-print('MS3 list')
-for key,value in ms3list.items():
-    print(value)
+#print('MS3 list')
+#for key,value in ms3list.items():
+#    print(value)
 print('err list')
 for key,value in errlist.items():
     print(value)
 
+print("dump finished")
 #native python pseudocode
 
 #test OG in 100 (only to ms2)

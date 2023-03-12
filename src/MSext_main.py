@@ -1,10 +1,52 @@
+'''
 from pymsfilereader import MSFileReader
 import glob
 import pandas as pd
 import os
+'''
 #import needed file
 
 
+#2023/2/15
+
+#load file and run tkinter, if no then enter command line interface
+def missingpackage(name):
+    def init(self, *args, **kwargs):
+        raise ImportError(
+            f'Missing {name} package so the program cannot be executed\n'
+            f'Please install it and run this tool again.'
+        )
+    return type(name, (), {'__init__':init})
+
+try:
+    import glob
+except ImportError:
+    globerr = missingpackage('glob')
+try:
+    import os
+except ImportError:
+    globerr = missingpackage('os')
+try:
+    import pandas as pd
+except ImportError:
+    globerr = missingpackage('pandas')
+
+
+try:
+    from pymsfilereader import MSFileReader
+except ImportError:
+    print('You need pymsfilereader installed to extract raw files')
+    msglyco = False
+
+try:
+    import tkinter as tk
+    root = tk.Tk()
+    root.title('GlycoMSParser GUI version 0.1')
+    root.geometry('640x360')
+    root.gameloop()
+except ImportError:
+    print('Install tkinter to activate GUI function or ')
+    gui_available = False
 #load file  -- it has been moved to DetermineMSLevel.py #####
 '''
 try:
