@@ -168,7 +168,9 @@ def main_loop():
             break
 
 
-
+#load settings in each file?
+#or make an global setting for one pipeline
+#such as nested variables?????
 
 function_dlist = {'1': rawextractor(), '2': filterms2(), '3': annotationhelper(), '4': "miscellaneous in DEV", 'q': "quit", 'g': 'GUI'}
 
