@@ -97,7 +97,7 @@ def comparepeaklistppm(inputlist, comparelist, ppm, inputintensitylist):
         pass
     if (comparelist == []):
         comparelist = [344.17, 374.18, 376.20, 406.21, 432.22, 450.23, 464.25, 580.30, 793.38, 825.42]
-        #print('use default comparelist', comparelist)
+        print('use default comparelist', comparelist)
     else:
         #print('comparelist is', comparelist)
         pass

@@ -73,3 +73,31 @@ def insilico():
         writer = csv.writer(z)
         for row in rowlists:
             writer.writerow(row)
+
+
+
+def glycancompositionver2(a, b, c, d, e, f):
+    M =  a * 174.08921 + b * 204.09977 + c * 245.12632 + d * 361.17367 + e * 391.18423 + f * 335.1700 +  46.04186 + 1.0073
+    # M = a x Fucose (triangle) + b x Hexose (circle) + c x HexNAc (Square) + d * Neu5Ac (purple diamond) + 
+    # e * Neu5Gc (aqua diamond) + f * KDN (green diamond) reducing end + [H+]
+    # a, b, c, d, e, f>=0, is integer
+    return(M)
+
+def insilicover2():
+    compositionlist = []
+    mass = []
+    for F in range (6):
+        for H in range(3,10):
+            for N in range(2,11):
+                for S in range(5):
+                    for G in range(5):
+                        for K in range(4):
+                            compositionlist.append((F, H, N, S, G, K))
+                            calcmass = glycancompositionver2(F, H, N, S, G, K)
+                            mass.append(Decimal(str(calcmass)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP))
+    with open('glycaninsilicowithkdn.csv', 'w', encoding = 'utf-8', newline='') as z:
+        rowlists = zip(tuple(compositionlist), mass)
+        writer = csv.writer(z)
+        for row in rowlists:
+            writer.writerow(row)
+#F1H5N4S1G
