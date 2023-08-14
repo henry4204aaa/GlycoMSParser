@@ -1,3 +1,39 @@
+cell 01:
+version change logs
+
+cell 02:
+import needed packages
+
+cell 03:
+
+import glycotope_deducer.csv
+which is planned to include: glycotope information is comma-separated csv file
+if the file does not exist, set it to empty.
+
+Cells below are made for "manually" examining and testing in dev stage.
+
+cell 04:
+define header
+[0] name, str
+[1] used unit, dict  (may become depreciated in future if the calculation method changes)
+[2] enzyme list and presence 0,1 or ?, str  (may be changed to float in future, if the expression level can be normalized to predict the glycan expression...)
+[3] ion list observed from MS spctra, list  (may become list in list if we expand the pipeline to other types than perMe)
+[4] groups defining the glycotope position (stem - exclusive, extensive or terminal), str
+
+
+
+function calcmassinepitope:
+under developement
+
+
+
+
+
+
+
+
+
+
 first define the sets of glycotope available for the analysis
 
 Use findpossibleepitope(input epitope list, define species) to get possible glycotopes being searched in the enumeration step.
@@ -15,7 +51,31 @@ In current demo version (beta2) we're bypassing it and define
 
 directly for the iteration
 
+******************************************
+functions:
 
+****
+testzero: examine if a calculated composition dict contains non-zero value:
+
+only return True if all values are zero
+
+(functionality validated: see testzero_test.ipynb)
+
+
+****
+NGcorearms:
+
+version 2 of core enumeration (from beta3)
+Only return dict as "input - H3N2" for further structural enumeration
+
+
+
+
+
+
+
+
+******************************************
 the enumeration structure looks like:
 
 
@@ -32,12 +92,15 @@ for loop in NG core descending:
 	if none of invalid flags found in list: remaining unit:
 		set the flag to valid and append the core information to logs
 		! corededuce[0] to save only name to reduce output log size
+
+	if the valdict reach zero: continue (skip this loop)
 	get arms number from core
 	**pseudo2nd loop**
 	when arms number > 0 do the loop:
 		for loop calculate: average units and save to dict avgunit
 		for loop to find any avgunit >1 and do the following:
 			? should the loop be at next level?
+			if the valdict2 reach zero: continue (skip this loop)
 			for loop in NG terminal units:
 				do the iteration from group terminal
 				get if possible as a (boolean)
@@ -63,3 +126,11 @@ debug record:
 bug to be fixed:
 not correctly end with the addition of extensive and final outputs
 also if we're having extra 10H+10N on 4 arms, extremly out from assumption but it should be possible to add "n times of certain glycotopes" one time at least in the extensive part
+
+
+
+
+
+def NGcorearms(spectrapredcomp):
+first have core 3H 2N always, 
+and then calculate possibility to add arms as much as possible
