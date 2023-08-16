@@ -1,6 +1,6 @@
 {\rtf1\ansi\ansicpg950\deff0\nouicompat\deflang1033\deflangfe1028{\fonttbl{\f0\fswiss\fprq2\fcharset0 Arial;}}
-{\colortbl ;\red102\green102\blue102;\red0\green234\blue234;\red192\green192\blue192;\red255\green0\blue0;\red0\green128\blue192;\red128\green0\blue255;\red247\green150\blue70;\red0\green176\blue80;\red128\green0\blue0;\red255\green255\blue0;\red0\green0\blue255;\red165\green165\blue165;\red0\green255\blue255;}
-{\*\generator Riched20 10.0.19041}{\*\mmathPr\mnaryLim0\mdispDef1\mwrapIndent1440 }\viewkind4\uc1 
+{\colortbl ;\red102\green102\blue102;\red0\green234\blue234;\red192\green192\blue192;\red255\green0\blue0;\red0\green128\blue192;\red128\green0\blue255;\red247\green150\blue70;\red0\green176\blue80;\red128\green0\blue0;\red255\green255\blue0;\red0\green0\blue255;\red165\green165\blue165;\red255\green0\blue255;\red0\green255\blue255;}
+{\*\generator Riched20 10.0.19041}{\*\mmathPr\mdispDef1\mwrapIndent1440 }\viewkind4\uc1 
 \pard\nowidctlpar\sa200\sl276\slmult1\b\f0\fs22 cell 01:\b0\line version change logs\par
 \b cell 02:\b0\line import needed packages\par
 \par
@@ -47,16 +47,56 @@ define demo epitopes for current testing (regardless of glycoT and fragment)\par
 \cf11\i function \cf8\i0 testzero\cf0 (dict input): examine if a calculated composition dict \line contains non-zero value:\line\cf4 only return True if all values are zero\line\cf0 (functionality validated: see testzero_test.ipynb)\par
 \par
 \cf11\i function \cf8\i0 NGcorearms\cf0 (spectrapredcomp):\line version 2 of core enumeration (from beta3)\line\line Only return dict as "input - H3N2" for further structural enumeration\par
-\cf11\i function \cf8\i0 deducer\cf0 (specific_epitopes, speccompositions):\par
-In current demo version (beta4) we're bypassing it and define some epitopes from sorted by group in "total units by descending order" \highlight13 from cell 9\highlight0\par
+\cf11\highlight13\i function \cf8\i0 deducer\cf0 (specific_epitopes, speccompositions):\par
+\highlight0 In current demo version (beta4) we're bypassing it and define some epitopes from sorted by group in "total units by descending order" \highlight14 from cell 9\highlight0\par
 \par
     #group_NGcore #first level replaced with NGcorearms from v4\par
     group_terminal = sorted_terelements #second level\par
     group_extensive = sorted_extelements #final level\par
+\cf2\ul\i define\cf0\ulnone\i0  calc_comp = input spectrapredcomp (store composition for enumeration)\par
+\cf2\ul\i define\cf0\ulnone\i0  complog = enumeration result output, list?\par
+\cf2\ul\i define\cf0\ulnone\i0  finalresults for saving final output list or dict\par
+\cf2\ul\i define\cf0\ulnone\i0  armsno = maximum arm no from NG core enumeration\par
+\cf2\ul\i define\cf0\ulnone\i0  forcalcomp = composition after subtracting NG core (H3N2)\par
+\b level 1 nested loop\par
+\b0 ***********111111111111111111111111111111111111111*************\par
+for armsdeduce in corearms (iterate all type of N glycan cores):\par
+- if armsno is -1:  #means none of NG arm types fits, may be corrupted NG \par
+do a unittest to check if there's negative value (invalid calculation)\line\tab - if passed validation: do the following loop (level2a nested loop)\par
+\tab - if not passed: means the core even makes the composition negative, break and leave the loop\par
+\cf2\ul\i define\cf0\ulnone\i0  loopoverflag = True, make sure the looping to use up units can be performed\line\cf2\ul\i define\cf0\ulnone\i0  compforloop = forcalcomp, and then we use compforloop for enumeration (keep original value clean)\par
+************22222222222222222222222222222222222*******************\par
+for leftovers in cor_epitopes  \line #cor_epitopes: corrupted epitope list, need definition before running\par
+calculate compforloop  - corrupted epitopes\line update compforloop  \par
+do a unit test to check if there's neg value\line if passed:\par
+add the epitope to log and\par
+\tab - check if it reaches zero, if yes:\line\tab\tab - set loop flag to false and add exit signal (debug feature), break loop\line if not passed:\par
+means the calculation is invalid, set flag to False and break the loop, leave nothing\par
 \par
-directly for the iteration\par
+question: define corrupted epitope list well...\par
+only one more LacNAc (1H1N) + max 7 HexNAc stands for 3 arms + 1 bisecting (7N) and 4SA (G+S=4), 5Fuc (5F)\line even w/ 1 more H will make it biantennary annotation\par
+************22222222222222222222222222222222222*******************\par
+************11111111111111111111111111111111111*******************\par
+- else if armsno is 0: \par
+means the arms are reduced to 0 (finished enumeration) \line break \par
+- else (arms no = 4, 3, 2, 1)\line\tab -if curremt arms no (input) < enumerating arms no (compare):\par
+\tab continue to next comparing arms no (it's in descending order, 4->3->2->1)\par
+\tab -if  curremt arms no =  enumerating arms no: (for example: 2 arms testing 2):\par
+\tab\tab calculate valdict = forcalcomp - current arm composition\line\tab\tab (for example biantennary takes extra 2H and 2N)\tab\tab\par
+->\par
+do unit test on valdict:\par
+if not passed (statement in the end): armsno -1 and print "exception" since we should never enter this part. (that's why we tested and figured out NG arm numbers)\par
+\par
+if passed:\par
+\tab - if the calculated composition fits zero (core+antenna  = the composition):\line\tab\tab append arms info\line\tab\tab armsno - 1 and continue to next iteration (start from arms -1 )\par
+\tab - else: \par
+\tab\tab start enumeration\par
 \par
 \par
+\par
+\par
+\par
+sdojkqpw3fiohweu8oigvhwilaefhjq93oprubhnq3ol4fghvolqeaieuw3r9ogvhwaeliekfcnxvoergvhw4or8ug5ihy42o98wghbuiltvfjqeycyefwhilcrygutvreqwajlwkf3qot;gbhnrusirfh3;\par
 first define the sets of glycotope available for the analysis\par
 \par
 Use findpossibleepitope(input epitope list, define species) to get possible glycotopes being searched in the enumeration step.\par
