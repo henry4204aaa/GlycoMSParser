@@ -1,0 +1,660 @@
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:17:370.6b220231120
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:18:550.6b220231120[debug] input infomration: arms -1, Composition for calculation (original comp -H3N2) {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+[debug] armsno = -1, start corrupted NG searching
+[epitope added]: LacNAc attached on core
+[epitope added]: GlcNAc attached on core
+[enumeration no:]1
+The composition reaches zero. Composition log is ['[enumeration no:]1', ['LacNAc attached on core', 'GlcNAc attached on core']]
+[debug] Finished deducing corrupted NG core structure
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:18:550.6b220231120[debug] input infomration: arms -1, Composition for calculation (original comp -H3N2) {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}
+[debug] armsno = -1, start corrupted NG searching
+[debug] Finished deducing corrupted NG core structure
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:19:030.6b220231120[debug] input infomration: arms 2, Composition for calculation (original comp -H3N2) {'F': 0, 'H': 2, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+arms testing and now the valdict is {'F': 0, 'H': 0, 'N': 0, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on {'H': 2, 'N': 2}
+Emumeration exits with 0 when fitting basic structures
+skipping impossible arms enumeration current:1 vs ref: 2
+arms testing and now the valdict is {'F': 0, 'H': -5, 'N': -1, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on {'H': 7, 'N': 3}
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:19:060.6b220231120
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:22:200.6b220231120[debug] input infomration: arms -1, Composition for calculation (original comp -H3N2) {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+[debug] armsno = -1, start corrupted NG searching
+[epitope added]: LacNAc attached on core
+[epitope added]: GlcNAc attached on core
+[enumeration no:]1
+The composition reaches zero. Composition log is ['[enumeration no:]1', ['LacNAc attached on core', 'GlcNAc attached on core']]
+[debug] Finished deducing corrupted NG core structure
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:22:200.6b220231120[debug] input infomration: arms -1, Composition for calculation (original comp -H3N2) {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}
+[debug] armsno = -1, start corrupted NG searching
+[debug] Finished deducing corrupted NG core structure
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:22:270.6b220231120[debug] input infomration: arms 2, Composition for calculation (original comp -H3N2) {'F': 0, 'H': 2, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+arms testing and now the valdict is {'F': 0, 'H': 0, 'N': 0, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on {'H': 2, 'N': 2}
+Emumeration exits with 0 when fitting basic structures
+skipping impossible arms enumeration current:1 vs ref: 2
+arms testing and now the valdict is {'F': 0, 'H': -5, 'N': -1, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on {'H': 7, 'N': 3}
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:22:300.6b220231120
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:26:180.6b220231120[debug] input infomration: arms 2, Composition for calculation (original comp -H3N2) {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+arms testing and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 1, 'G': 0} with enumerating on {'H': 2, 'N': 2}
+Start looping terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  1, global = 2
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 1.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 1.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0}, locater = 0
+Sialyl-Lewis AX antigencan be added and the epitopes count is1
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration']should be output []
+skipping impossible arms enumeration current:1 vs ref: 2
+arms testing and now the valdict is {'F': 1, 'H': -5, 'N': -1, 'S': 1, 'G': 0} with enumerating on {'H': 7, 'N': 3}
+
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 18:26:230.6b220231120
+ ---Debug mode on--- 
+version 20231120 copilot supported 
+2023-11-20 22:04:270.6b220231120
+ ---Debug mode on--- 
+[debug]mporting grouped epitope definition: group_terminal, group_extensive 
+version 20231121 beta7c copilot supported 
+2023-11-21 16:44:060.6b220231120[debug] input arms number -1, original comp{'F': 0, 'H': 4, 'N': 4, 'S': 0, 'G': 0, 'KDN': 0}, Composition for calculation (-H3N2) {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+[debug] armsno = -1, start corrupted NG searching
+[epitope added]: LacNAc attached on core
+[epitope added]: GlcNAc attached on core
+[enumeration no:]1
+The composition reaches zero. Composition log is ['[enumeration no:]1', ['LacNAc attached on core', 'GlcNAc attached on core']]
+[debug] Finished deducing corrupted NG core structure
+Finished deducing. Final results are: 
+[['[enumeration no:]1', ['LacNAc attached on core', 'GlcNAc attached on core']]]
+
+ ---Debug mode on--- 
+[debug]mporting grouped epitope definition: group_terminal, group_extensive 
+version 20231121 beta7c copilot supported 
+2023-11-21 16:44:060.6b220231120[debug] input arms number -1, original comp{'F': 0, 'H': 3, 'N': 2, 'S': 1, 'G': 0, 'KDN': 1}, Composition for calculation (-H3N2) {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}
+[debug] armsno = -1, start corrupted NG searching
+[debug] Finished deducing corrupted NG core structure
+Finished deducing. Final results are: 
+[[]]
+
+ ---Debug mode on--- 
+[debug]mporting grouped epitope definition: group_terminal, group_extensive 
+version 20231121 beta7c copilot supported 
+2023-11-21 16:44:150.6b220231120[debug] input arms number 2, original comp{'F': 0, 'H': 5, 'N': 4, 'S': 0, 'G': 0, 'KDN': 0}, Composition for calculation (-H3N2) {'F': 0, 'H': 2, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+2arms enumerating and now the valdict is {'F': 0, 'H': 0, 'N': 0, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary N-glycan core
+Enumeration exits when fitting basic structures
+skipping impossible arms enumeration current:1 vs ref: 2
+1arms enumerating and now the valdict is {'F': 0, 'H': -5, 'N': -1, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary hybrid N-glycan core
+No composition possible for current arms1
+Finished deducing. Final results are: 
+[['[enumeration no:]1', 'Bi-antennary N-glycan core', '0']]
+
+ ---Debug mode on--- 
+[debug]mporting grouped epitope definition: group_terminal, group_extensive 
+version 20231121 beta7c copilot supported 
+2023-11-21 16:44:200.6b220231120[debug] input arms number 2, original comp{'F': 1, 'H': 5, 'N': 4, 'S': 1, 'G': 0}, Composition for calculation (-H3N2) {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+2arms enumerating and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 1, 'G': 0} with enumerating on Bi-antennary N-glycan core
+now the temp looping arms = 2. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  2, global = 2
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.5, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Bi-antennary N-glycan core']should be output []
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  1, global = 2
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 1.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 1.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0}, locater = 0
+Sialyl-Lewis AX antigencan be added and the epitopes count is1
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration']should be output []
+skipping impossible arms enumeration current:1 vs ref: 2
+1arms enumerating and now the valdict is {'F': 1, 'H': -5, 'N': -1, 'S': 1, 'G': 0} with enumerating on Bi-antennary hybrid N-glycan core
+No composition possible for current arms1
+Finished deducing. Final results are: 
+[[['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]]
+
+ ---Debug mode on--- 
+[debug]mporting grouped epitope definition: group_terminal, group_extensive 
+version 20231121 beta7c copilot supported 
+2023-11-21 16:44:260.6b220231120[debug] input arms number 4, original comp{'F': 1, 'H': 7, 'N': 6, 'S': 4, 'G': 0, 'KDN': 0}, Composition for calculation (-H3N2) {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0}
+4arms enumerating and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Tetra-antennary N-glycan core
+now the temp looping arms = 4. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  4, global = 4
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.25, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.25, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.25, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.25, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.25, 'H': 0.0, 'N': 0.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.25, 'H': 0.0, 'N': 0.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.25, 'H': 0.0, 'N': 0.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.25, 'H': 0.0, 'N': 0.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.25, 'H': 0.0, 'N': 0.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tetra-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output []
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  3, global = 4
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tetra-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output []
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 4
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Neu5Ac sialic acidcan be added and the epitopes count is2
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tetra-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration']should be output []
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 4
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 1.0, 'H': 4.0, 'N': 4.0, 'S': 4.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 1.0, 'H': 4.0, 'N': 4.0, 'S': 4.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialyl-Lewis AX antigencan be added and the epitopes count is1
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 3.0, 'N': 3.0, 'S': 3.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 3.0, 'N': 3.0, 'S': 3.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is2
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Neu5Ac sialic acidcan be added and the epitopes count is3
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output []
+3arms enumerating and now the valdict is {'F': 1, 'H': 1, 'N': 1, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Tri-antennary N-glycan core
+now the temp looping arms = 3. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  3, global = 3
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.3333333333333333, 'H': 1.3333333333333333, 'N': 1.3333333333333333, 'S': 1.3333333333333333, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.3333333333333333, 'H': 0.33333333333333326, 'N': 0.33333333333333326, 'S': 0.33333333333333326, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tri-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 3
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Neu5Ac sialic acidcan be added and the epitopes count is2
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tri-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 3
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 1.0, 'H': 4.0, 'N': 4.0, 'S': 4.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 1.0, 'H': 4.0, 'N': 4.0, 'S': 4.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialyl-Lewis AX antigencan be added and the epitopes count is1
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 3.0, 'N': 3.0, 'S': 3.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 3.0, 'N': 3.0, 'S': 3.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is2
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Neu5Ac sialic acidcan be added and the epitopes count is3
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+2arms enumerating and now the valdict is {'F': 1, 'H': 2, 'N': 2, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary N-glycan core
+now the temp looping arms = 2. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 2
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Neu5Ac sialic acidcan be added and the epitopes count is2
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.5, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Bi-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.'], ['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 2
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 1.0, 'H': 4.0, 'N': 4.0, 'S': 4.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 1.0, 'H': 4.0, 'N': 4.0, 'S': 4.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialyl-Lewis AX antigencan be added and the epitopes count is1
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 3.0, 'N': 3.0, 'S': 3.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 3.0, 'N': 3.0, 'S': 3.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is2
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 2.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Neu5Ac sialic acidcan be added and the epitopes count is3
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 2.0, 'N': 2.0, 'S': 1.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+Sialylated LNAccan be added and the epitopes count is1
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Lewis BY antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialyl-Lewis AX antigen, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Htype1 2 LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Sialylated LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedGc LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: SialylatedKDN LNAc, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: N-glycan core Fucosylation, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Ac sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+Looping in terminal: Neu5Gc sialic acid, avg unit = {'F': 0.0, 'H': 1.0, 'N': 1.0, 'S': 0.0, 'G': 0.0, 'KDN': 0.0}, locater = 0
+tried to add epitope but failed
+current tempcomp['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.'], ['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+skipping impossible arms enumeration current:1 vs ref: 2
+1arms enumerating and now the valdict is {'F': 1, 'H': -3, 'N': 1, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary hybrid N-glycan core
+No composition possible for current arms1
+Finished deducing. Final results are: 
+[[['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.'], ['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.'], ['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]]
+[debug] input arms number -1, original comp{'F': 0, 'H': 4, 'N': 4, 'S': 0, 'G': 0, 'KDN': 0}, Composition for calculation (-H3N2) {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+[debug] armsno = -1, start corrupted NG searching
+[epitope added]: LacNAc attached on core
+[epitope added]: GlcNAc attached on core
+[enumeration no:]1
+The composition reaches zero. Composition log is ['[enumeration no:]1', ['LacNAc attached on core', 'GlcNAc attached on core']]
+[debug] Finished deducing corrupted NG core structure
+Finished deducing. Final results are: 
+[['[enumeration no:]1', ['LacNAc attached on core', 'GlcNAc attached on core']]]
+[debug] input arms number -1, original comp{'F': 0, 'H': 3, 'N': 2, 'S': 1, 'G': 0, 'KDN': 1}, Composition for calculation (-H3N2) {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}
+[debug] armsno = -1, start corrupted NG searching
+[debug] Finished deducing corrupted NG core structure
+Finished deducing. Final results are: 
+[[]]
+[debug] input arms number 2, original comp{'F': 0, 'H': 5, 'N': 4, 'S': 0, 'G': 0, 'KDN': 0}, Composition for calculation (-H3N2) {'F': 0, 'H': 2, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+2arms enumerating and now the valdict is {'F': 0, 'H': 0, 'N': 0, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary N-glycan core
+Enumeration exits when fitting basic structures
+skipping impossible arms enumeration current:1 vs ref: 2
+1arms enumerating and now the valdict is {'F': 0, 'H': -5, 'N': -1, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary hybrid N-glycan core
+No composition possible for current arms1
+Finished deducing. Final results are: 
+[['[enumeration no:]1', 'Bi-antennary N-glycan core', '0']]
+[debug] input arms number 2, original comp{'F': 1, 'H': 5, 'N': 4, 'S': 1, 'G': 0}, Composition for calculation (-H3N2) {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+2arms enumerating and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 1, 'G': 0} with enumerating on Bi-antennary N-glycan core
+now the temp looping arms = 2. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  2, global = 2
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  1, global = 2
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+skipping impossible arms enumeration current:1 vs ref: 2
+1arms enumerating and now the valdict is {'F': 1, 'H': -5, 'N': -1, 'S': 1, 'G': 0} with enumerating on Bi-antennary hybrid N-glycan core
+No composition possible for current arms1
+Finished deducing. Final results are: 
+[[]]
+[debug] input arms number 4, original comp{'F': 1, 'H': 7, 'N': 6, 'S': 4, 'G': 0, 'KDN': 0}, Composition for calculation (-H3N2) {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0}
+4arms enumerating and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Tetra-antennary N-glycan core
+now the temp looping arms = 4. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  4, global = 4
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  3, global = 4
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 4
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 4
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+3arms enumerating and now the valdict is {'F': 1, 'H': 1, 'N': 1, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Tri-antennary N-glycan core
+now the temp looping arms = 3. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  3, global = 3
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 3
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 3
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+2arms enumerating and now the valdict is {'F': 1, 'H': 2, 'N': 2, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary N-glycan core
+now the temp looping arms = 2. Start terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 2
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 2
+avgunit isn't able to do enumeration, break it
+armsforepitopes = -1, go to the the loop
+skipping impossible arms enumeration current:1 vs ref: 2
+1arms enumerating and now the valdict is {'F': 1, 'H': -3, 'N': 1, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on Bi-antennary hybrid N-glycan core
+No composition possible for current arms1
+Finished deducing. Final results are: 
+[[]]

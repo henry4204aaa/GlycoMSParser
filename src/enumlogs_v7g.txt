@@ -1,0 +1,69 @@
+
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:23:300.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:23:300.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:23:300.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:23:300.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:30:410.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:30:410.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:30:480.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 15:30:510.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:19:180.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:19:180.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:19:350.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:19:380.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:22:230.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:22:230.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:22:230.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:22:230.6b220231122
+ ---Debug mode on--- 
+[dev]importing grouped epitope definition: group_terminal, group_extensive 
+version 20231127 beta8 copilot supported 
+2023-11-28 16:22:230.6b220231122

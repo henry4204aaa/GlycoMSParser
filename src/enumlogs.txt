@@ -1,1 +1,50 @@
-1696495343.8441031696495343.847105---Debug mode on---2023-10-05 18:00:56---Debug mode on---2023-10-05 18:00:56---Debug mode on---2023-10-05 18:03:45[debug] input infomration: arms -1, forcalcomp {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}[debug] armsno = -1---Debug mode on---2023-10-05 18:03:45[debug] input infomration: arms -1, forcalcomp {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}[debug] armsno = -1
+1696495343.8441031696495343.847105---Debug mode on---2023-10-05 18:00:56---Debug mode on---2023-10-05 18:00:56---Debug mode on---2023-10-05 18:03:45[debug] input infomration: arms -1, forcalcomp {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}[debug] armsno = -1---Debug mode on---2023-10-05 18:03:45[debug] input infomration: arms -1, forcalcomp {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}[debug] armsno = -1---Debug mode on---2023-10-26 21:18:450.6b20231005[debug] input infomration: arms -1, forcalcomp(origin comp -H3N2) {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}[debug] armsno = -1, start corrupted NG searchingadd epitopes log LacNAc attached on coreadd epitopes log GlcNAc attached on coreThe composition reaches zero---Debug mode on---2023-10-26 21:18:450.6b20231005[debug] input infomration: arms -1, forcalcomp(origin comp -H3N2) {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}[debug] armsno = -1, start corrupted NG searching---Debug mode on---2023-10-27 19:28:200.6b20231005---Debug mode on---2023-10-27 19:29:530.6b20231005---Debug mode on---2023-10-27 19:31:510.6b20231005[debug] input infomration: arms -1, forcalcomp(origin comp -H3N2) {'F': 0, 'H': 1, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+[debug] armsno = -1, start corrupted NG searching
+add epitopes log LacNAc attached on coreadd epitopes log GlcNAc attached on coreThe composition reaches zero
+---Debug mode on---2023-10-27 19:31:510.6b20231005[debug] input infomration: arms -1, forcalcomp(origin comp -H3N2) {'F': 0, 'H': 0, 'N': 0, 'S': 1, 'G': 0, 'KDN': 1}
+[debug] armsno = -1, start corrupted NG searching
+---Debug mode on---2023-10-27 19:32:310.6b20231005[debug] input infomration: arms 2, forcalcomp(origin comp -H3N2) {'F': 0, 'H': 2, 'N': 2, 'S': 0, 'G': 0, 'KDN': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+arms testing and now the valdict is {'F': 0, 'H': 0, 'N': 0, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on {'H': 2, 'N': 2}
+Emumeration exits with 0 when fitting basic structures
+skipping impossible arms enumeration current:1 vs ref: 2
+arms testing and now the valdict is {'F': 0, 'H': -5, 'N': -1, 'S': 0, 'G': 0, 'KDN': 0} with enumerating on {'H': 7, 'N': 3}
+---Debug mode on---2023-10-27 19:32:450.6b20231005[debug] input infomration: arms 2, forcalcomp(origin comp -H3N2) {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0}
+skipping impossible arms enumeration current:2 vs ref: 4
+skipping impossible arms enumeration current:2 vs ref: 3
+arms testing and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 1, 'G': 0} with enumerating on {'H': 2, 'N': 2}
+Start looping terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  2, global = 2
+current tempcomp['Bi-antennary N-glycan core']should be output []
+after reset {}, composition {'F': 1, 'H': 2, 'N': 2, 'S': 1, 'G': 0} and arms no local =  1, global = 2
+current tempcomp['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration']should be output []
+skipping impossible arms enumeration current:1 vs ref: 2
+arms testing and now the valdict is {'F': 1, 'H': -5, 'N': -1, 'S': 1, 'G': 0} with enumerating on {'H': 7, 'N': 3}
+---Debug mode on---2023-10-27 19:32:520.6b20231005[debug] input infomration: arms 4, forcalcomp(origin comp -H3N2) {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0}
+arms testing and now the valdict is {'F': 1, 'H': 0, 'N': 0, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on {'H': 4, 'N': 4}
+Start looping terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  4, global = 4
+current tempcomp['Tetra-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output []
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  3, global = 4
+current tempcomp['Tetra-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output []
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 4
+current tempcomp['Tetra-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration']should be output []
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 4
+current tempcomp['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output []
+arms testing and now the valdict is {'F': 1, 'H': 1, 'N': 1, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on {'H': 3, 'N': 3}
+Start looping terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  3, global = 3
+current tempcomp['Tri-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 3
+current tempcomp['Tri-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 3
+current tempcomp['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+arms testing and now the valdict is {'F': 1, 'H': 2, 'N': 2, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on {'H': 2, 'N': 2}
+Start looping terminal enumeration.
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  2, global = 2
+current tempcomp['Bi-antennary N-glycan core', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.'], ['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+after reset {}, composition {'F': 1, 'H': 4, 'N': 4, 'S': 4, 'G': 0, 'KDN': 0} and arms no local =  1, global = 2
+current tempcomp['Bi-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration']should be output [['Tetra-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.'], ['Tri-antennary N-glycan core', 'Sialyl-Lewis AX antigen', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'Neu5Ac sialic acid', 'terminal not zero, continue enumeration', 'Sialylated LNAc', 'terminal not zero, continue enumeration', 'LacNAc', 'extensive units fits zero.']]
+skipping impossible arms enumeration current:1 vs ref: 2
+arms testing and now the valdict is {'F': 1, 'H': -3, 'N': 1, 'S': 4, 'G': 0, 'KDN': 0} with enumerating on {'H': 7, 'N': 3}
