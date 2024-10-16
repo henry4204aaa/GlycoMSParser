@@ -1,7 +1,10 @@
 import os
-version = 0.2
-last_update = 20240730
+version = 0.3
+last_update = 20240810
 
+
+# version: 0.3
+# added excel reader for annotated file. Will add validation here or in annotationreader.py
 # version: 0.2
 # date: 20240730
 # about this file: original trytolistoutheaders.py and GlycoMSP_demo.py modulated to support future standardized processing workflow
@@ -65,6 +68,21 @@ def select_project_file():
 
     return csvfile_path
 
+def select_annotate_file():
+    root = create_tkinter_root()
+    excelfile_path = filedialog.askopenfilename(filetypes=[("Annotated excel file", "*.xls *.xlsx")])
+
+    if excelfile_path:
+        if validate_file_path(excelfile_path):
+            print(f"Selected excel file: {excelfile_path}")
+        else:
+            excelfile_path = None
+    else:
+        print("No excel file has been selected!")
+
+    return excelfile_path
+
+
 # Dealing with loading functions
 def fileloader(filetype):
     if not has_tkinter:
@@ -75,6 +93,8 @@ def fileloader(filetype):
             filepath = select_raw_file()
         elif filetype == "csv":
             filepath = select_project_file()
+        elif filetype == "excel":
+            filepath = select_annotate_file()
     return filepath
 
 

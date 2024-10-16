@@ -1,0 +1,59 @@
+brainstorming
+
+
+ref list compare list = 5, 10, 15, 20, 25  ([0:4] elements)
+
+input list = 0.2, .... 23.2, 24.2, 24.8, 25.2  ([0:25] 26 elements)
+
+old method
+
+for i in input list:
+    #loop through 0.2~25.2
+    for j in ref list:
+        if find i~j delta is small enough and copy the index of i, store the peak of i and intensity of i
+            del the index of j currently we have
+
+        elif  find i>j and delta is too large enough (ex: 6.2>5) 
+            del the current index of j (del compare list[0])
+        elif  i<j too far not reaching (ex: 3.2 << 5)  
+            break #don't loop up, go to next input value
+
+
+real run will be like
+
+
+> for i in input list: (delta = 0.2)
+        0.2 << 5 -> break
+        1.2 << 5 -> break
+        2.2 << 5 -> break
+        3.2 << 5 -> break
+        4.2 << 5 -> break
+        5.2 > 5 -> add to the list  [peak 5.2, peakintensity of 5.2]
+        del 5
+        #6.2 >> 5 -> del 5
+        6.2 << 10 -> break
+        7.2 << 10
+........
+        23.2 << 25 -> break
+        24.2 << 25 -> break
+        24.8 < 25 add to the list  [peak 5.2, peakintensity of 5.2]
+        del 25
+        25.2 ... -> no list 
+
+solution? (20240820)
+
+for i in list(ref) (delta = ppm default=10):
+    for j in list(peaks):
+         if j << i then pass
+         elif j ~ i (<) then record j (index of j -> i (of fixed ion mass), intensity)
+         elif j ~ i (>) then record j 
+         elif j >> i then del list until j-1 (1 previous, should be > a bit or < a bit whatever) and then break
+after dealing with the list ref
+seen = set()
+dupes = [x for x in a if x in seen or seen.add(x)]  
+create duplicate list and print it out
+defalut action will fill larger value?   
+
+if there are close values MIGHT belongs to same ion?
+should not happen but in case it happened
+
