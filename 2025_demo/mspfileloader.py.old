@@ -1,0 +1,161 @@
+import os
+version = 0.5
+last_update = 20250403
+import msprawextractor as mspext
+import threading
+
+
+# version: 0.5
+# test of adding tkinter windows with the help of GPT4o
+
+# version: 0.4
+# added mzml support function (waiting mzml extractor implementation - will be noted as v0.5 then, while MSP will be v0.6)
+# version: 0.3
+# added excel reader for annotated file. Will add validation here or in annotationreader.py
+# version: 0.2
+# date: 20240730
+# about this file: original trytolistoutheaders.py and GlycoMSP_demo.py modulated to support future standardized processing workflow
+# import tkinter part
+#mind that we plan to add GUI support in project managing, the tkinter detection may be moved to funtion: GUI in MSPinit.py in future
+# re-organized the code structure and readability using copilot and ChatGPT4-o
+# no sensitive contents were sent to the server for this part
+
+try: 
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+except ImportError:
+    raise ImportError('Please install tkinter to enable GUI-based file selection')
+else:
+    has_tkinter = True
+
+selected_files = {}  # Dictionary to keep track of selected files
+
+
+# Function to create and hide Tkinter root window
+# If future version supports GUI fully available, please reconstruct this part (not hiding main window, but think about what should be there)
+def create_tkinter_root():
+    root = tk.Tk()
+    root.withdraw() # hide main window
+    return root
+
+# Function to validate file path
+def validate_file_path(file_path):
+    if not os.path.exists(file_path):
+        print(f"Error: The file {file_path} does not exist.")
+        return False
+    if not os.path.isfile(file_path):
+        print(f"Error: The path {file_path} is not a file.")
+        return False
+    return True
+
+def update_display():
+    text_widget.delete(1.0, tk.END)
+    for ftype, path in selected_files.items():
+        text_widget.insert(tk.END, f"{ftype}: {path}\n")
+
+def clear_files():
+    # Placeholder for your implementation
+    selected_files.clear()
+    update_display()
+
+
+# Function to select raw file for further pre-processing
+def select_file(filetype):
+    filetypes_dict = {
+        "raw": [("Raw file", "*.raw")],
+        "mzml": [("mzML file", "*.mzML")],
+        "csv": [("CSV file", "*.csv")],
+        "excel": [("Excel file", "*.xls *.xlsx")]
+    }
+
+    #filepath = filedialog.askopenfilename(filetypes=filetypes_dict.get(filetype, [("All files", "*.*")]))
+    filepaths = filedialog.askopenfilenames(filetypes=filetypes_dict.get(filetype, [("All files", "*.*")]))
+    if filepaths:
+        valid_paths = [fp for fp in filepaths if validate_file_path(fp)]
+        selected_files.setdefault(filetype, []).extend(valid_paths)
+        update_display()
+        #validation of values
+        #file_contents_validation
+    elif not filepaths:
+        print(f"No valid {filetype} file selected.")
+
+
+def threaded_convert_raw_to_csv():
+    if "raw" not in selected_files or not selected_files["raw"]:
+        messagebox.showwarning("No Raw File", "Please select at least one raw file.")
+        return
+
+    raw_file = selected_files["raw"][0]
+    status_var.set("Converting... Please wait.")
+
+    # Define what happens in the background
+    def background_task():
+        try:
+            print("mock code running extractor.py")
+            #subprocess.run(["python", "msprawextractor.py", raw_file], check=True)
+            status_var.set("Conversion complete.")
+            messagebox.showinfo("Success", "Raw file converted successfully.")
+        except: #subprocess.CalledProcessError:
+            status_var.set("Error during conversion.")
+            messagebox.showerror("Error", "Conversion failed. Check the log.")
+
+    # Start the thread
+    threading.Thread(target=background_task, daemon=True).start()
+
+def open_prepare_dataset_window():
+    subwin = tk.Toplevel(root)
+    subwin.title("Prepare Dataset")
+    subwin.geometry("400x200")
+    tk.Label(subwin, text="This is a placeholder for dataset preparation.").pack(pady=20)
+    tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
+
+def open_ml_analysis_window():
+    subwin = tk.Toplevel(root)
+    subwin.title("ML Analysis")
+    subwin.geometry("400x200")
+    tk.Label(subwin, text="This is a placeholder for ML analysis options.").pack(pady=20)
+    tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
+
+
+# Initialize GUI
+root = tk.Tk()
+root.title("GlycoMSP File Manager")
+root.geometry("600x400")
+
+# Buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=10)
+
+tk.Button(button_frame, text="Select Raw File", command=lambda: select_file("raw")).grid(row=0, column=0, padx=5)
+tk.Button(button_frame, text="Select mzML File", command=lambda: select_file("mzml")).grid(row=0, column=1, padx=5)
+tk.Button(button_frame, text="Select CSV File", command=lambda: select_file("csv")).grid(row=0, column=2, padx=5)
+tk.Button(button_frame, text="Select Excel File", command=lambda: select_file("excel")).grid(row=0, column=3, padx=5)
+tk.Button(button_frame, text="Clear All", command=clear_files).grid(row=0, column=4, padx=5)
+
+# Text widget to log selected files
+text_widget = tk.Text(root, height=15, width=80)
+text_widget.pack(pady=10)
+
+
+#status bar?
+status_var = tk.StringVar()
+status_var.set("Idle")
+status_label = tk.Label(root, textvariable=status_var, fg="blue")
+status_label.pack(pady=5)
+
+
+# --- Add Analysis Tools Frame ---
+
+analysis_frame = tk.LabelFrame(root, text="Analysis Tools", padx=10, pady=10)
+analysis_frame.pack(padx=10, pady=10, fill="x")
+
+tk.Button(analysis_frame, text="Convert Raw to CSV", command=threaded_convert_raw_to_csv).pack(side="left", padx=5)
+tk.Button(analysis_frame, text="Prepare Dataset", command=open_prepare_dataset_window).pack(side="left", padx=5)
+tk.Button(analysis_frame, text="Run ML Analysis", command=open_ml_analysis_window).pack(side="left", padx=5)
+
+
+# Run the GUI
+root.mainloop()
+
+
+

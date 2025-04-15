@@ -1,0 +1,13 @@
+{
+    "experiment": "zebrafish extracted glycans",
+    "samples": {
+        "zf_sPerMeNG_intestine": {
+            "csv": "ms2_zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.csv",
+            "excel": "20240922_temp_zf_intestine_1.xlsx",
+            "metadata": "zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.json",
+            "raw_file": "G:/zf_sPerMeNG_intestine",
+            "validated": true
+        }
+    },
+    "generated_on": "2025-04-13 19:05"
+}

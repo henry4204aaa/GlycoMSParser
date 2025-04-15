@@ -1,0 +1,13 @@
+{
+    "experiment": "Unassigned",
+    "samples": {
+        "zf_sPerMeOG_intestine": {
+            "csv": "G:/\u5176\u4ed6\u96fb\u8166/My Computer/GlycoMSParser/ms2_zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.csv",
+            "excel": "G:/\u5176\u4ed6\u96fb\u8166/My Computer/GlycoMSParser/src/OG_int_online_annotation_revised_2024_glycan_zf_OG.xlsx",
+            "metadata": "O:/DS223/MainBackup/Khoolab_clone/KhooLab/LCMS data/LC_zf_20190506\\GUI test zf OG_20250414_zf_sPerMeOG_intestine.json",
+            "raw_file": "not linked",
+            "validated": true
+        }
+    },
+    "generated_on": "2025-04-14 00:34"
+}

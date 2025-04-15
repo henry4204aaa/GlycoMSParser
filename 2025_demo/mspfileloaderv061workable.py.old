@@ -1,0 +1,730 @@
+import os
+version = "0.61"
+last_update = 20250408
+import msprawextractor as mspext
+import threading
+from tkinter import ttk
+import time #for testing
+import random #for random failure
+import datetime
+import configparser #load config
+import json
+import tkinter.simpledialog as simpledialog
+from tkinter import filedialog
+import shutil
+import traceback
+# v0.61: build functional dataset management window (if new version failed, rollback to this)
+# v0.6: support saving converted files by selecting user defined folders
+# for trace errors
+# v0.58: UI refine. (v0.57 works perfectly)
+# v0.56: trace errors and also delete temp csv while metadata assingment and rename csv process failed
+# v0.56  change the logic to avoid main window freeze during conversion
+# v0.55: refine the logic. Go to simulation before real run.
+# version: 0.54
+# add persistent metadata edit window
+# version: 0.53
+# add metadata class
+# version: 0.52
+# add quit destroy function
+# version: 0.51
+# add logger
+# test of adding tkinter windows with the help of GPT4o
+# add GUI, add progress bar and making buttons work
+
+# version: 0.4
+# added mzml support function (waiting mzml extractor implementation - will be noted as v0.5 then, while MSP will be v0.6)
+# version: 0.3
+# added excel reader for annotated file. Will add validation here or in annotationreader.py
+# version: 0.2
+# date: 20240730
+# about this file: original trytolistoutheaders.py and GlycoMSP_demo.py modulated to support future standardized processing workflow
+# import tkinter part
+#mind that we plan to add GUI support in project managing, the tkinter detection may be moved to funtion: GUI in MSPinit.py in future
+# re-organized the code structure and readability using copilot and ChatGPT4-o
+# no sensitive contents were sent to the server for this part
+
+try: 
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+except ImportError:
+    raise ImportError('Please install tkinter to enable GUI-based file selection')
+else:
+    has_tkinter = True
+
+selected_files = {}  # Dictionary to keep track of selected files
+
+
+#logger
+class AppLogger:
+    def __init__(self):
+        self.entries = []
+        self.debug_logs = []
+        self.gui_writer = None  # Optional live display hook
+
+    def log(self, message):
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        entry = f"[{timestamp}] {message}"
+        print(entry)
+        self.entries.append(entry)
+        if self.gui_writer:
+            self.gui_writer(entry)
+
+    def debug(self, message):
+        self.debug_logs.append(f"[DEBUG] {message}")
+
+    def save(self, filename, include_debug=False):
+        with open(filename, "w", encoding="utf-8") as f: #add utf-8 encode to get arrow supported
+            for line in self.entries:
+                f.write(line + "\n")
+            if include_debug and self.debug_logs:
+                f.write("-----\ndebug enabled-----\n")
+                for line in self.debug_logs:
+                    f.write(line + "\n")
+                f.write("-----\ndebug log ends-----\n")
+        return filename
+
+logger = AppLogger()
+
+
+#metadata class 
+
+class MetadataEditorWindow:
+    def __init__(self, parent, raw_file_list, on_each_metadata_ready_callback, on_finish=None, output_dir=None):
+        self.parent = parent
+        self.raw_file_list = raw_file_list
+        self.callback = on_each_metadata_ready_callback
+        self.on_finish = on_finish
+        self.current_index = 0
+        self.last_metadata = None
+        self.metadata = {}
+        self.output_dir = output_dir
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("Enter Experiment Metadata")
+        self.window.geometry("600x500")
+        # Row 0: Status label placeholder (spans both columns)
+        self.status_label = tk.Label(self.window, text="", fg="blue")
+        self.status_label.grid(row=0, column=0, columnspan=2, pady=(10, 5))
+
+        self.entries = {}
+        fields = [
+            "Experiment Title", "Experiment Description", "Author running this analysis",
+            "Raw data acquired date", "Glycan Type", "Mass Analyzer charge mode"
+        ]
+        for i, field in enumerate(fields, start=1):
+            label = tk.Label(self.window, text=field)
+            label.grid(row=i, column=0, padx=10, pady=5, sticky="w")
+
+            if field == "Mass Analyzer charge mode":
+                var = tk.StringVar()
+                entry = ttk.Combobox(self.window, textvariable=var, values=["+", "-"], state="readonly", width=10)
+                entry.current(0)
+            elif field == "Glycan Type":
+                var = tk.StringVar()
+                entry = ttk.Combobox(self.window, textvariable=var, values=["N", "O", "N+O"], state="readonly", width=10) #add the values when going to support new glycan types
+                entry.current(0)
+            else:
+                entry = tk.Entry(self.window, width=50)
+
+            entry.grid(row=i, column=1, padx=10, pady=5)
+            self.entries[field] = entry
+
+        # Buttons
+        button_frame = tk.Frame(self.window)
+        button_row = len(fields) + 1 #so the button adjusted itself in future if we add more contents into metadata
+        button_frame.grid(row=button_row, column=0, columnspan=2, pady=10)
+        tk.Button(button_frame, text="Import Metadata", command=self.import_metadata).grid(row=0, column=0, padx=5)
+        tk.Button(button_frame, text="Use Last Metadata", command=self.use_last_metadata).grid(row=0, column=1, padx=5)
+        tk.Button(button_frame, text="Clear", command=self.clear_fields).grid(row=0, column=2, padx=5)
+        tk.Button(button_frame, text="Generate Dataset", command=self.generate).grid(row=0, column=3, padx=5)
+        tk.Button(button_frame, text="Cancel", command=self.window.destroy).grid(row=0, column=4, padx=5)
+
+        self.load_file(self.raw_file_list[self.current_index])
+
+
+    def on_conversion_complete(self):
+        self.status_label.config(text="Conversion complete. Ready for metadata.", fg="green")
+
+        # Extract filename base for use in renaming
+        self.rawfilename = os.path.splitext(os.path.basename(self.current_raw_file))[0]
+
+        # Re-enable entries and buttons
+        for entry in self.entries.values():
+            entry.config(state="normal")
+        for child in self.window.winfo_children():
+            if isinstance(child, tk.Button):
+                child.config(state="normal")
+
+        # Pre-fill if last used
+        if self.last_metadata:
+            self.fill_fields_from_metadata(self.last_metadata)
+
+        self.window.title(f"Metadata for: {os.path.basename(self.current_raw_file)}")
+
+    def load_file(self, raw_file):
+        self.current_raw_file = raw_file
+        self.window.title(f"Converting: {os.path.basename(raw_file)}")
+        self.clear_fields()
+
+        # Add status label if not already there
+        if not hasattr(self, "status_label"):
+            self.status_label = tk.Label(self.window, text="", fg="blue")
+            self.status_label.grid(row=0, columnspan=2, pady=10)
+        self.status_label.config(text="Converting raw file... please wait.", fg="blue")
+
+        # Disable form and buttons temporarily
+        for entry in self.entries.values():
+            entry.config(state="disabled")
+        for child in self.window.winfo_children():
+            if isinstance(child, tk.Button):
+                child.config(state="disabled")
+
+        def background_conversion():
+            try:
+                success = mspext.convert_raw_to_csv(raw_file, debug=True)
+                if success:
+                    self.window.after(0, self.on_conversion_complete)
+                else:
+                    # Clean up temp files
+                    rawfilename = os.path.splitext(os.path.basename(raw_file))[0]
+                    temp_ms2 = f"ms2tmp_{rawfilename}.csv"
+                    temp_ms3 = f"ms3tmp_{rawfilename}.csv"
+
+                    for temp_file in [temp_ms2, temp_ms3]:
+                        if os.path.exists(temp_file):
+                            try:
+                                os.remove(temp_file)
+                                logger.log(f"[Cleanup] Removed leftover temp file: {temp_file}")
+                            except Exception as e:
+                                logger.log(f"[WARNING] Failed to delete temp file: {temp_file} — {e}")
+                    err_msg = str(success) if isinstance(success, Exception) else "Unknown error"
+                    self.window.after(0, lambda: messagebox.showerror("Conversion Failed", f"The raw file could not be converted:\n{err_msg}"))
+                    traceback.print_exc()
+            except Exception as e:
+                logger.log(f"[FATAL] Exception during raw file conversion: {e}")
+                self.window.after(0, lambda: messagebox.showerror("Thermo Library Error",f"Raw file could not be processed.\n\nDetails:\n{e}"))
+        threading.Thread(target=background_conversion, daemon=True).start()
+
+    def import_metadata(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if path:
+            with open(path, "r") as f:
+                self.metadata = json.load(f)
+            self.fill_fields_from_metadata(self.metadata)
+
+    def use_last_metadata(self):
+        if self.last_metadata:
+            self.fill_fields_from_metadata(self.last_metadata)
+        else:
+            messagebox.showinfo("No previous metadata", "You haven't submitted any metadata yet.")
+
+    def fill_fields_from_metadata(self, meta):
+        for field, entry in self.entries.items():
+            entry.delete(0, tk.END)
+            entry.insert(0, meta.get(field, ""))
+
+    def clear_fields(self):
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+
+    def generate(self):
+        if self.output_dir is None:
+            selected_dir = filedialog.askdirectory(
+                title="Select folder to save metadata and output files",
+                initialdir=os.getcwd()
+            )
+            if not selected_dir:
+                messagebox.showwarning("Cancelled", "You must select an output folder.")
+                return
+            self.output_dir = selected_dir
+            logger.log(f"[Metadata] Output will be saved to: {self.output_dir}")
+
+        for field, entry in self.entries.items():
+            self.metadata[field] = entry.get()
+
+        extractdate = time.strftime("%Y%m%d")
+        self.metadata["Parameters when GlycoMSP launched"] = ["Autofilled by GUI"]
+        self.metadata["Date of file extracted from raw file"] = extractdate
+        self.metadata["Original raw file path"] = self.current_raw_file
+        self.metadata["Raw filename"] = os.path.splitext(self.current_raw_file)[0]
+
+        mansavename = simpledialog.askstring("Project Name", "Enter a name for this batch/project:")
+        if not mansavename:
+            messagebox.showwarning("Missing Name", "You must enter a project/batch name.")
+            return
+
+        self.rawfilename = os.path.splitext(os.path.basename(self.current_raw_file))[0]
+        savename = f"{mansavename}_{extractdate}_{self.rawfilename}"
+
+        output_json_path = os.path.join(self.output_dir, savename + ".json")
+        jsonfile = mspext.savemetadata(self.metadata, output_json_path)
+        
+        logger.log(f"Metadata saved to {jsonfile}")
+        
+        # Store last metadata
+        self.last_metadata = self.metadata.copy()
+
+
+        #temp_ms2 = f"ms2tmp_{self.rawfilename}.csv"
+
+        raw_stem = os.path.splitext(os.path.basename(self.current_raw_file))[0]
+        temp_ms2 = f"ms2tmp_{raw_stem}.csv"
+        temp_ms3 = f"ms3tmp_{raw_stem}.csv"
+        final_ms2 = os.path.join(self.output_dir, f"ms2_{savename}.csv")
+        final_ms3 = os.path.join(self.output_dir, f"ms3_{savename}.csv")
+        success = True
+        try:
+            if os.path.exists(temp_ms2):
+                shutil.move(temp_ms2, final_ms2)
+                logger.log(f"Renamed {temp_ms2} → {final_ms2} and move to {self.output_dir}")
+            else:
+                logger.log(f"[WARNING] Missing temp MS2 file: {temp_ms2}")
+                success = False
+
+            if os.path.exists(temp_ms3):
+                shutil.move(temp_ms3, final_ms3)
+                logger.log(f"Renamed {temp_ms3} → {final_ms3} and move to {self.output_dir}")
+            else:
+                logger.log(f"[WARNING] Missing temp MS3 file: {temp_ms3}")
+                success = False
+        except Exception as e:
+            logger.log(f"[ERROR] Failed during file renaming: {e}")
+            success = False
+
+        except Exception as e:
+            logger.log(f"[ERROR] Failed during file renaming: {e}")
+            success = False
+
+        if success:
+            mspext.finalize_extraction(self.current_raw_file, self.metadata, savename)
+            logname = logger.save(os.path.join(self.output_dir, savename + ".log"), include_debug=True)
+            logger.log(f"Saved log to: {logname}")
+
+        self.current_index += 1
+        if self.current_index < len(self.raw_file_list):
+            self.load_file(self.raw_file_list[self.current_index])
+        else:
+            messagebox.showinfo("Metadata", "All metadata have been completed.")
+            self.window.destroy()
+            if self.on_finish:
+                self.on_finish()
+
+def write_to_gui(message):
+    text_widget.insert(tk.END, message + "\n")
+    text_widget.see(tk.END)
+
+logger.gui_writer = write_to_gui
+
+#version info reader
+#will add same one in extractor but may depreciate after moving metadata editing part to GUI
+def get_version_info_for(module_name, manifest_path="project_version_manifest.ini"):
+    config = configparser.ConfigParser()
+    config.read(manifest_path)
+
+    if module_name in config:
+        version = config[module_name].get("version", "N/A")
+        last_update = config[module_name].get("last_update", "N/A")
+        return version, last_update
+    return None, None
+
+
+# Function to create and hide Tkinter root window
+# If future version supports GUI fully available, please reconstruct this part (not hiding main window, but think about what should be there)
+def create_tkinter_root():
+    root = tk.Tk()
+    root.withdraw() # hide main window
+    return root
+
+#about tab showing the version info
+def open_about_window():
+    about_win = tk.Toplevel(root)
+    about_win.title("About GlycoMSP")
+    about_win.geometry("500x400")
+
+    tk.Label(about_win, text="About GlycoMSP GUI", font=("Arial", 14, "bold")).pack(pady=10)
+    tk.Label(about_win, text="Made by Huan-Chuan TSENG", font=("Arial", 10)).pack(pady=5)
+    
+    # Create a scrollable text box
+    about_text = tk.Text(about_win, wrap=tk.WORD, height=20, width=60)
+    about_text.pack(padx=10, pady=5, fill="both", expand=True)
+
+    scrollbar = tk.Scrollbar(about_text)
+    scrollbar.pack(side="right", fill="y")
+    about_text.config(yscrollcommand=scrollbar.set)
+    scrollbar.config(command=about_text.yview)
+
+    # Load version info from manifest, mind the path issues (on demo folder now)
+    config = configparser.ConfigParser()
+    config.read(".\\2025_demo\\project_version_manifest.ini")
+    #config.read("project_version_manifest.ini")
+
+    if "version_check" in config:
+        ts = config["version_check"].get("checked_on", "Unknown")
+        about_text.insert(tk.END, f"Version manifest generated on: {ts}\n\n")
+
+    for section in config.sections():
+        if section != "version_check":
+            version = config[section].get("version", "N/A")
+            updated = config[section].get("last_update", "N/A")
+            about_text.insert(tk.END, f"[{section}]\n  Version: {version}\n  Last Update: {updated}\n\n")
+
+    about_text.config(state=tk.DISABLED)
+
+    tk.Label(about_win, text="Component version listed above", font=("Arial", 10)).pack(pady=5)
+
+    tk.Button(about_win, text="Close", command=about_win.destroy).pack(pady=10)
+
+# Function to validate file path
+def validate_file_path(file_path):
+    if not os.path.exists(file_path):
+        print(f"Error: The file {file_path} does not exist.")
+        return False
+    if not os.path.isfile(file_path):
+        print(f"Error: The path {file_path} is not a file.")
+        return False
+    return True
+
+def update_display():
+    text_widget.delete(1.0, tk.END)
+    for ftype, path in selected_files.items():
+        text_widget.insert(tk.END, f"{ftype}: {path}\n")
+
+def clear_files():
+    # Placeholder for your implementation
+    selected_files.clear()
+    update_display()
+
+def reset_main_status():
+    status_var.set("Idle")
+    progress.stop()
+    convert_button.config(state="normal")
+
+
+def on_metadata_ready(raw_file, metadata, savename):
+    logger.log(f"Confirmed metadata for {raw_file}")
+    # Pass to peak extractor
+    mspext.convert_raw_to_csv(raw_file, debug=False)
+
+def launch_metadata_for_all(files):
+    MetadataEditorWindow(root, files, on_metadata_ready, on_finish=reset_main_status)
+
+# Function to select raw file for further pre-processing
+def select_file(filetype):
+    filetypes_dict = {
+        "raw": [("Raw file", "*.raw")],
+        "mzml": [("mzML file", "*.mzML")],
+        "csv": [("CSV file", "*.csv")],
+        "excel": [("Excel file", "*.xls *.xlsx")]
+    }
+
+    #filepath = filedialog.askopenfilename(filetypes=filetypes_dict.get(filetype, [("All files", "*.*")]))
+    filepaths = filedialog.askopenfilenames(filetypes=filetypes_dict.get(filetype, [("All files", "*.*")]))
+    if filepaths:
+        valid_paths = [fp for fp in filepaths if validate_file_path(fp)]
+        selected_files.setdefault(filetype, []).extend(valid_paths)
+        update_display()
+        #validation of values
+        #file_contents_validation
+    elif not filepaths:
+        print(f"No valid {filetype} file selected.")
+
+
+# generic select file (20250407)
+def select_files_generic(filetype_key, allow_multiple=False, on_select_callback=None):
+    filetypes_dict = {
+        "csv": [("CSV files", "*.csv")],
+        "excel": [("Excel files", "*.xls *.xlsx")],
+        "json": [("JSON files", "*.json")],
+        "all": [("All files", "*.*")]
+    }
+
+    filetypes = filetypes_dict.get(filetype_key, filetypes_dict["all"])
+
+    if allow_multiple:
+        filepaths = filedialog.askopenfilenames(filetypes=filetypes)
+    else:
+        filepath = filedialog.askopenfilename(filetypes=filetypes)
+        filepaths = [filepath] if filepath else []
+
+    if filepaths and on_select_callback:
+        on_select_callback(filepaths)
+
+
+def launch_metadata_batch():
+    if not mspext.pymsreader:
+        logger.log("[ERROR] Raw file conversion is not available — pymsfilereader missing.")
+        messagebox.showerror(
+            "Raw Conversion Not Available",
+            "Thermo MSFileReader or pymsfilereader is not installed.\n"
+            "Please run on a compatible Windows system with the required libraries."
+        )
+        return
+
+    if "raw" not in selected_files or not selected_files["raw"]:
+        messagebox.showwarning("No Raw File", "Please select at least one raw file.")
+        return
+
+    rawfilelist = selected_files["raw"]
+    status_var.set("Converting raw file to csv...check the metadata assignment window.")
+    progress.start()
+    MetadataEditorWindow(root, rawfilelist, on_metadata_ready, on_finish=reset_main_status)
+
+
+
+def on_batch_conversion_complete(converted_raws):
+    progress.stop()
+    convert_button.config(state="normal")
+    status_var.set("Raw file conversions complete. Proceeding to metadata entry...")
+    messagebox.showinfo("Conversion Complete", "Raw file conversion finished.\nNow entering metadata for each file.")
+    
+    launch_metadata_for_all(converted_raws)
+
+
+def open_prepare_dataset_window():
+    subwin = tk.Toplevel(root)
+    subwin.title("Prepare Dataset")
+    subwin.geometry("750x500")
+
+    experiment_projects = {}  # Key: Experiment Title, Value: {"csv": [...], "excel": ..., "json": ...}
+    # Treeview driven functions
+    def move_file_to_experiment(filetype, filename, from_exp_label, to_exp_title):
+        from_exp = from_exp_label.replace("Experiment: ", "")
+        if from_exp not in experiment_projects or to_exp_title not in experiment_projects:
+            return
+
+        # Remove from original
+        current = experiment_projects[from_exp].get(filetype)
+        if isinstance(current, list):
+            for i in current:
+                if os.path.basename(i) == filename:
+                    current.remove(i)
+                    break
+        elif isinstance(current, str) and os.path.basename(current) == filename:
+            experiment_projects[from_exp][filetype] = None
+
+        # Add to new project
+        if filetype == "csv":
+            experiment_projects[to_exp_title].setdefault("csv", []).append(filename)
+        else:
+            experiment_projects[to_exp_title][filetype] = filename
+
+        refresh_tree()
+
+
+    def on_right_click(event):
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        selected_text = tree.item(item_id, "text")
+        parent_id = tree.parent(item_id)
+        parent_text = tree.item(parent_id, "text") if parent_id else None
+
+        # Only apply to CSV, Excel, or Metadata entries
+        if not any(selected_text.startswith(prefix) for prefix in ["CSV:", "Excel:", "Metadata:"]):
+            return
+
+        # Determine filetype and filename
+        filetype = selected_text.split(":")[0].lower()
+        filename = selected_text.split(":")[1].strip()
+
+        # Build right-click menu
+        menu = tk.Menu(subwin, tearoff=0)
+        move_menu = tk.Menu(menu, tearoff=0)
+
+        for exp_name in experiment_projects.keys():
+            if exp_name != parent_text.replace("Experiment: ", ""):
+                move_menu.add_command(
+                    label=exp_name,
+                    command=lambda exp=exp_name: move_file_to_experiment(filetype, filename, parent_text, exp)
+                )
+
+        if move_menu.index("end") is not None:
+            menu.add_cascade(label="Move to...", menu=move_menu)
+
+        menu.post(event.x_root, event.y_root)
+    def create_new_experiment():
+        def create():
+            name = entry.get().strip()
+            if not name:
+                messagebox.showwarning("Missing Name", "Please enter a name for the experiment.")
+                return
+            if name in experiment_projects:
+                messagebox.showwarning("Duplicate", f"Experiment '{name}' already exists.")
+                return
+            experiment_projects[name] = {"csv": [], "excel": None, "json": None}
+            refresh_tree()
+            popup.destroy()
+
+        popup = tk.Toplevel(subwin)
+        popup.title("New Experiment")
+        popup.geometry("300x120")
+        tk.Label(popup, text="Enter new experiment title:").pack(pady=5)
+        entry = tk.Entry(popup, width=30)
+        entry.pack(pady=5)
+        tk.Button(popup, text="Create", command=create).pack(pady=10)
+
+
+    # --- Treeview Display ---
+    tree = ttk.Treeview(subwin)
+    tree.heading("#0", text="Dataset Explorer", anchor="w")
+    tree.pack(expand=True, fill="both", padx=10, pady=10)
+    tree.bind("<Button-3>", lambda event: on_right_click(event))
+
+    # --- Tree Update Logic ---
+    def refresh_tree():
+        tree.delete(*tree.get_children())
+        for exp_title, files in experiment_projects.items():
+            exp_node = tree.insert("", "end", text=f"Experiment: {exp_title}", open=True)
+            for csv in files.get("csv", []):
+                tree.insert(exp_node, "end", text=f"CSV: {os.path.basename(csv)}")
+            if files.get("excel"):
+                tree.insert(exp_node, "end", text=f"Excel: {os.path.basename(files['excel'])}")
+            if files.get("json"):
+                tree.insert(exp_node, "end", text=f"Metadata: {os.path.basename(files['json'])}")
+
+    # --- Utility: Add file to experiment ---
+    def assign_to_project(title, filetype, value):
+        if title not in experiment_projects:
+            experiment_projects[title] = {"csv": [], "excel": None, "json": None}
+        if filetype == "csv":
+            experiment_projects[title]["csv"].extend(value)
+        else:
+            experiment_projects[title][filetype] = value
+        refresh_tree()
+
+    # --- Metadata Extractor ---
+    def extract_title_from_metadata(json_path):
+        try:
+            with open(json_path, "r") as f:
+                meta = json.load(f)
+            return meta.get("Experiment Title")
+        except:
+            return None
+
+    # --- File handler callbacks ---
+    def handle_csv_selection(filepaths):
+        if not filepaths:
+            return
+        assign_to_project("Unassigned", "csv", filepaths)
+
+    def handle_excel_selection(filepaths):
+        if not filepaths:
+            return
+        assign_to_project("Unassigned", "excel", filepaths[0])
+
+    def handle_json_selection(filepaths):
+        if not filepaths:
+            return
+        meta_path = filepaths[0]
+        title = extract_title_from_metadata(meta_path)
+        if not title:
+            title = "Unassigned"
+            messagebox.showinfo("Missing Title", "No 'Experiment Title' found. File added to 'Unassigned'.")
+        assign_to_project(title, "json", meta_path)
+
+    # --- Generic file selector ---
+    def select_files_generic(filetype_key, allow_multiple=False, on_select_callback=None):
+        filetypes_dict = {
+            "csv": [("CSV files", "*.csv")],
+            "excel": [("Excel files", "*.xls *.xlsx")],
+            "json": [("JSON files", "*.json")],
+            "all": [("All files", "*.*")]
+        }
+        filetypes = filetypes_dict.get(filetype_key, filetypes_dict["all"])
+        if allow_multiple:
+            filepaths = filedialog.askopenfilenames(filetypes=filetypes)
+        else:
+            filepath = filedialog.askopenfilename(filetypes=filetypes)
+            filepaths = [filepath] if filepath else []
+        if filepaths and on_select_callback:
+            on_select_callback(filepaths)
+    # --- File Selector Buttons ---
+    button_frame = tk.Frame(subwin)
+    button_frame.pack(pady=5)
+    tk.Button(button_frame, text="Select MS2 CSV(s)", command=lambda: select_files_generic("csv", True, handle_csv_selection)).grid(row=0, column=0, padx=5)
+    tk.Button(button_frame, text="Select Annotation Excel", command=lambda: select_files_generic("excel", False, handle_excel_selection)).grid(row=0, column=1, padx=5)
+    tk.Button(button_frame, text="Select Metadata JSON", command=lambda: select_files_generic("json", False, handle_json_selection)).grid(row=0, column=2, padx=5)
+    tk.Button(button_frame, text="New Project", command=lambda: create_new_experiment()).grid(row=0, column=3, padx=5)
+
+    # Close
+    tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
+
+def open_ml_analysis_window():
+    subwin = tk.Toplevel(root)
+    subwin.title("ML Analysis")
+    subwin.geometry("400x200")
+    tk.Label(subwin, text="This is a placeholder for ML analysis options.").pack(pady=20)
+    tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
+
+
+def on_closing():
+    if messagebox.askokcancel("Quit", "Do you really want to quit?"):
+        logger.log("Application closed by user.")
+        root.destroy()  # Clean exit
+    #if logger.entries:
+        #logger.save("autosave.log", include_debug=True)
+        #print("Log saved to autosave.log")
+
+def save_log_to_file():
+    filename = filedialog.asksaveasfilename(defaultextension=".log", filetypes=[("Log files", "*.log")])
+    if filename:
+        logger.save(filename, include_debug=True)
+        messagebox.showinfo("Log Saved", f"Log saved to:\n{filename}")
+
+
+#icon
+ico_path = os.path.join(os.path.dirname(__file__), 'GlycoMSPlogo.ico')
+
+# Initialize GUI
+root = tk.Tk()
+root.iconbitmap(default=ico_path)
+root.protocol("WM_DELETE_WINDOW", on_closing)
+root.title("GlycoMSP File Manager GUI v0.4a")
+root.geometry("840x600")
+root.minsize(840, 600)
+
+
+
+# Buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=10)
+
+tk.Button(button_frame, text="Select Raw File", command=lambda: select_file("raw")).grid(row=0, column=0, padx=5)
+tk.Button(button_frame, text="Select mzML File", command=lambda: select_file("mzml")).grid(row=0, column=1, padx=5)
+tk.Button(button_frame, text="Select CSV File", command=lambda: select_file("csv")).grid(row=0, column=2, padx=5)
+tk.Button(button_frame, text="Select Excel File", command=lambda: select_file("excel")).grid(row=0, column=3, padx=5)
+tk.Button(button_frame, text="Clear All", command=clear_files).grid(row=0, column=4, padx=5)
+tk.Button(root, text="Save Log", command=save_log_to_file).pack(pady=5)
+tk.Button(root, text="About", command=open_about_window).pack(pady=5)
+# Text widget to log selected files
+text_widget = tk.Text(root, height=15, width=80)
+text_widget.pack(pady=10)
+
+
+#status bar?
+status_var = tk.StringVar()
+status_var.set("Idle")
+status_label = tk.Label(root, textvariable=status_var, fg="blue")
+status_label.pack(pady=5)
+#progress bar?
+progress = ttk.Progressbar(root, orient="horizontal", mode="indeterminate", length=250)
+progress.pack(pady=5)
+
+
+# --- Add Analysis Tools Frame ---
+
+analysis_frame = tk.LabelFrame(root, text="Analysis Tools", padx=10, pady=10)
+analysis_frame.pack(padx=10, pady=10, fill="x")
+
+convert_button = tk.Button(analysis_frame, text="Convert Raw to CSV",command=launch_metadata_batch)
+convert_button.pack(side="left", padx=5)
+tk.Button(analysis_frame, text="Prepare Dataset", command=open_prepare_dataset_window).pack(side="left", padx=5)
+tk.Button(analysis_frame, text="Run ML Analysis", command=open_ml_analysis_window).pack(side="left", padx=5)
+
+
+# Run the GUI
+root.mainloop()
+
+
+

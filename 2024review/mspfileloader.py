@@ -1,8 +1,9 @@
 import os
-version = 0.3
-last_update = 20240810
+version = 0.4
+last_update = 20241104
 
-
+# version: 0.4
+# added mzml support function (waiting mzml extractor implementation - will be noted as v0.5 then, while MSP will be v0.6)
 # version: 0.3
 # added excel reader for annotated file. Will add validation here or in annotationreader.py
 # version: 0.2
@@ -53,6 +54,22 @@ def select_raw_file():
 
     return rawfile_path
 
+
+def select_mzml_file():
+    #another file extraction method
+    root = create_tkinter_root()
+    mzml_path = filedialog.askopenfilename(filetypes=[("mzml files", "*.mzml *.mzxml *.mzML *.mzXML")])
+
+    if mzml_path:
+        if validate_file_path(mzml_path):
+            print(f"Selected raw file: {mzml_path}")
+        else:
+            mzml_path = None
+    else:
+        print("No raw file has been selected!")
+
+    return mzml_path
+
 # Function to select csv files (annotation file OR processed/analyse-in-progress project file stored as csv)
 def select_project_file():
     root = create_tkinter_root()
@@ -91,6 +108,8 @@ def fileloader(filetype):
     else:
         if filetype == "raw":
             filepath = select_raw_file()
+        elif filetype == "mzml":
+            filepath = select_mzml_file()
         elif filetype == "csv":
             filepath = select_project_file()
         elif filetype == "excel":

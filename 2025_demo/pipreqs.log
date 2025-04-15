@@ -1,0 +1,11 @@
+Microsoft Windows [版本 10.0.19045.5737]
+(c) Microsoft Corporation. 著作權所有，並保留一切權利。
+
+G:\其他電腦\My Computer\GlycoMSParser\2025_demo>pipreqs .
+INFO: Not scanning for jupyter notebooks.
+WARNING: Import named "pymsfilereader" not found locally. Trying to resolve it at the PyPI server.
+WARNING: Import named "pymsfilereader" was resolved to "pymsfilereader:1.0.1" package (https://pypi.org/project/pymsfilereader/).
+Please, verify manually the final list of requirements.txt to avoid possible dependency confusions.
+INFO: Successfully saved requirements file in .\requirements.txt
+
+G:\其他電腦\My Computer\GlycoMSParser\2025_demo>

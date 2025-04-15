@@ -1,0 +1,20 @@
+{
+    "experiment": "zebrafish extracted glycans",
+    "generated_on": "2025-04-13 19:05",
+    "samples": {
+        "zf_sPerMeOG_intestine": {
+            "csv": "ms2_zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.csv",
+            "excel": "OG_int_online_annotation_revised_2024_glycan_zf_OG.xlsx",
+            "metadata": "zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.json",
+            "raw_file": "E:/rawfiles/zf_sPerMeOG_intestine",
+            "validated": true
+        },
+        "zf_sPerMeNG_intestine": {
+            "csv": "ms2_zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.csv",
+            "excel": "20240922_temp_zf_intestine_1.xlsx",
+            "metadata": "zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.json",
+            "raw_file": "G:/zf_sPerMeNG_intestine",
+            "validated": true
+        }
+    }
+}

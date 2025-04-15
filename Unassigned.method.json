@@ -1,0 +1,13 @@
+{
+    "experiment": "Unassigned",
+    "generated_on": "2025-04-10 12:43",
+    "samples": {
+        "(not linked)": {
+            "csv": "testoutput.csv",
+            "excel": "liteforPCA20221213v2_trytofix.xlsx",
+            "metadata": "0410unassignedtest_20250410_no_raw.json",
+            "raw_file": "(not linked)",
+            "validated": false
+        }
+    }
+}
