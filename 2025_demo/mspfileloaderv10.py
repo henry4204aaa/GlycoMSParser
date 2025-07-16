@@ -103,6 +103,36 @@ class AppLogger:
 logger = AppLogger()
 
 
+class GlycanCompositionWindow(tk.Toplevel):
+    def __init__(self, master, on_submit):
+        super().__init__(master)
+        self.title("Define Glycan Composition")
+        self.geometry("350x300")
+        self.resizable(False, False)
+        self.on_submit = on_submit
+
+        self.composition_fields = {
+            "Hex": tk.IntVar(value=0),
+            "HexNAc": tk.IntVar(value=0),
+            "Fuc": tk.IntVar(value=0),
+            "NeuAc": tk.IntVar(value=0),
+            "NeuGc": tk.IntVar(value=0),
+            "KDN": tk.IntVar(value=0)
+        }
+
+        row = 0
+        for comp, var in self.composition_fields.items():
+            ttk.Label(self, text=f"Max {comp}:").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            ttk.Entry(self, textvariable=var, width=10).grid(row=row, column=1, padx=10, pady=5)
+            row += 1
+
+        ttk.Button(self, text="Generate & Assign", command=self.submit).grid(row=row, column=0, columnspan=2, pady=10)
+
+    def submit(self):
+        config = {k: v.get() for k, v in self.composition_fields.items()}
+        self.on_submit(config)
+        self.destroy()
+
 #metadata class 
 
 class MetadataEditorWindow:
@@ -1355,6 +1385,94 @@ def open_prepare_dataset_window():
         widget.bind("<Button-3>", callback)  # Windows & Linux
         widget.bind("<Control-Button-1>", callback)  # macOS trackpad
 
+    def get_selected_csv_path():
+        selected = tree.focus()
+        print(selected)
+        node_info = experiment_projects.get(selected)
+        print(f"node info: {node_info}")
+        if node_info and node_info["type"] == "csv":
+            exp = node_info["exp"]
+            sample = node_info["sample"]
+            path = experiment_projects[exp]["samples"][sample]["csv"]
+            return path
+        else:
+            return None
+
+        # Reuse the metadata stored in TreeView tags or descriptions
+        #item_info = tree.item(selected_item)
+        #values = item_info.get("values", [])
+        
+        # Sample: ["File", "Unassigned", "Sample_XYZ", "csv"]
+        #if len(values) >= 4:
+        #    node_type = values[0].lower()
+        #    exp = values[1]
+        #    sample = values[2]
+        #    filetype = values[3].lower()
+        #    
+        #    if node_type in ("sample", "file") and filetype == "csv":
+        #        return experiment_projects[exp]["samples"][sample].get("csv")
+
+        return None
+
+    #-- pseudo labeling --#
+    def launch_pseudo_labeling():
+        print("[debug] only work on single file selection?")
+        sel = tree.selection()
+        if sel:
+            print(f"selected {sel}")
+            sample_id = sel[0]
+            exp_id = tree.parent(sample_id)
+            sample_name = clean_sample_name(tree.item(sel[0], "text"))
+            print(sample_name)
+            debugaaaaa = []
+            for exp_title, exp_data in experiment_projects.items():
+                for sample_name, files in exp_data.get("samples", {}).items():
+                    print(f"[debug] files are {files} make sure no multiple sample can be selected once")
+                    debugaaaaa.append(files.get("csv"))
+                    debugaaaaa.append(files.get("json"))
+                    csv = files.get("csv")
+                    meta = files.get("json")
+
+        print(f"debug get file {debugaaaaa}")
+           # selected_id = sel[0]
+            #node_type = tree.item(selected_id, "values")[0]  # type info
+            #sample_id = selected_id if node_type == "sample" else tree.parent(selected_id)
+            #exp_id = tree.parent(sample_id)
+            #exp_name = tree.item(exp_id, "text")
+            #sample_name = tree.item(sample_id, "text")
+            #files = experiment_projects[exp_name]["samples"][sample_name]
+            #csv_path = files.get("csv")
+            #if not csv_path:
+            #    messagebox.showerror("Error", "Sample is missing required csv.")
+            #    return
+            #print(f"csv selected: {csv_path}")
+        #sample_id = tree.parent(item_id)
+        #exp_id = tree.parent(sample_id)
+        #sample_id = sel[0]
+        #print(f"sample_id is {sample_id}")
+        #exp_id = tree.parent(sample_id)
+        #sample_name = clean_sample_name(tree.item(sel[0], "text"))
+        #sample_name = clean_sample_name(sample_name)
+        #if sample_name not in experiment_projects[exp_name]["samples"]:
+        #    logger.log(f"[ERROR] Cleaned sample name '{sample_name}' not found under '{exp_name}'")
+        #    messagebox.showerror("Invalid Sample", f"Sample not found in experiment: {sample_name}")
+        #    return
+        #sample = experiment_projects[exp_name]["samples"][sample_name]
+        #selected_csv = get_selected_csv(tree)
+        #if not sample["csv"]:#selected_csv:
+        #    messagebox.showwarning("No CSV File Selected", "Please select a CSV file in the tree before continuing.")
+        #    return
+        #print(f"seleceted csv is {selected_csv}")
+        def on_composition_ready(config):
+            import mspcomposition as mspcomp
+            mspcomp.fit_composition(config, csv, meta, debug=True)
+
+            #messagebox.showinfo("Done", "Pseudo-labels have been assigned and glycan list generated.")
+            refresh_tree()
+
+        GlycanCompositionWindow(root, on_submit=on_composition_ready)
+
+
     # --- Button panel ---
     button_frame = tk.Frame(subwin)
     button_frame.pack(pady=5)
@@ -1365,10 +1483,12 @@ def open_prepare_dataset_window():
     tk.Button(button_frame, text="Add Sample (missing metadata)", command=add_sample).grid(row=1, column=1, padx=5)
     tk.Button(button_frame, text="Clean up empty unassigned sample tags", command=clean_unassigned_samples).grid(row=1, column=2, padx=5)
     link_button = tk.Button(button_frame, text="Link Sample", state="disabled", command=lambda: try_link_selected_sample())
-    link_button.grid(row=2, column=0, padx=5)
+    link_button.grid
     merge_button = tk.Button(button_frame, text="Merge Sample", state="disabled", command=lambda: try_merge_selected_sample())
     merge_button.grid(row=2, column=1, padx=5)
     tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=2, column=2, padx=5)
+    ttk.Button(button_frame, text="Assign Pseudo-Labels by Glycan Composition", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
+    #GPT said without () it only passes the function, and work only if clicked
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
 
 
