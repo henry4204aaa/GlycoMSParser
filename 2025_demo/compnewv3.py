@@ -28,9 +28,12 @@
 #--- able to write manuscript for this part ---
 #v1.0 for finished O-glycan
 #v1.1 for finished O-glycan integration with mspcomposition.py -> code will move there
-version = "0.35"
-last_update = 20250709
+version = "0.36"
+last_update = 20250716
 #version changelog:
+#v0.48 export composition
+#v0.4 add fragment calculator beta (fixed for perMe, will need to link to metadata to get proper mass)
+#v0.36 add function calling whole flow
 #v0.35 cleanup v2
 #v0.2
 #compnew v2.py new file > find duplicate funtions removed in v2
@@ -39,13 +42,47 @@ last_update = 20250709
 
 
 #N-glycan settings (need revision)
-glycanbuild = ["highman", "hybrid", "bian", "trian", "tetraan"]
-flags = ["alphagal_like", "allowldnc", "allowleby", "allow5ac", "allow5gc", "allowkdn", "allowfuc", "allowpsa", "allowldnf"]
+NG_flags = {
+        #monitoring flags
+         "debug": True,
+         "dev": False,
+         "force_exit": False,
+        #common settings for terminal and internal permutations
+         "alphagal_like":   False,
+         "allowldnc":       False, 
+         "allowleby":       False,
+         "allow5ac":        True,
+         "allow5gc":        True,
+         "allowkdn":        False,
+         "allowfuc":        True,
+         "allowpsa":        0,
+         "allowldnf":       False,
+        #iteration logic flags
+         "arm_count":       2,
+         "internal_minrep": 0,
+         "internal_maxrep": 2,
+         "topology":        False,
+        #core flags
+         "corefuc":         True,
+         "bicorefuc":       False,
+         "highman":         True,
+         "perman":          False,
+         "hybrid":          False,
+        #optional composition check
+        # "customboundary":  None, <- deactivated since we define range below
+         "compcheck":       True,
+         "Hex_range":       [2,15],
+         "HexNAc_range":    [2,10],
+         "Neu5Ac_range":    [0,2],
+         "Neu5Gc_range":    [0,2],
+         "KDN_range":       [0,2],
+         "Fucose_range":    [0,2],     
+        #hybrid NG arguments for calculating composition it's PLACEHOLDER 
+         "termi_comp":      None,
+         "internal_comp":   None,
+         }
+#O-glycan will share a portion of N-glycan flags, thinking if I should mix them together or not
 
-#placeholder, haven't made up my mind
-flags_attr = {"alphagal_like": ["NG", "OG", "terminal", "enzymes?"],
-              "allowldnc": [["NG", "internal", "terminal", "enzymes?"], ["OG", "enzymes?"]],
-              }
 
 #for v0.51 apply this to all functions
 #catch errors and allow force_quit or silent revision when invalid value is assigned
@@ -60,7 +97,7 @@ def error_watcher(errmsg):
 
 
 #20250604 tank tank tank ... __ __ __
-from itertools import product
+from itertools import product, combinations_with_replacement
 
 # flags: alphagal_like, allowldnc, allowleby (2Fuc), allow5ac default as True, allow5gc, allowkdn, allowfuc(has Fut, default as True)
 #run for terminal
@@ -166,11 +203,8 @@ def internal_NG(allowldnc=False, allowldnf = False, allowfuc = True):
     print(f"[debug]internal combinations: {len(composition)} and results are {composition}")
     return composition
 
-#allowkdn false -> true 
-terminal_comb = terminal_NG(allow5ac=True, allow5gc=True, allowkdn=True, allowfuc = True)
-internal_comb = internal_NG()
 
-from itertools import product, combinations_with_replacement
+
 def generate_arm_combinations(terminal_list, internal_list, arm_count=2, internal_repeat_range=(0, 2)):
     #init empty arms storage
     arms = []
@@ -204,17 +238,6 @@ def generate_arm_combinations(terminal_list, internal_list, arm_count=2, interna
 
 
 
-tmp = generate_arm_combinations(terminal_comb, internal_comb)
-#print(f"TESTING OUTPUTS FOR DOCS {tmp[0][20]}")
-#print(f"Information of tmp first element: \n {type(tmp[0])},\n {tmp[0]}")
-#GPT suggestion: it seems to be a nested list
-#print(type(tmp))              # Should be <class 'list'>
-#print(type(tmp[0]))           # If this prints <class 'list'> → nested
-#print(type(tmp[0][0]))        # This should be <class 'dict'>
-    
-
-
-
 def get_unique_total_compositions(arms,topology=False):
     #init empty set for storing unique? values
     with_topology = set()
@@ -234,16 +257,8 @@ def get_unique_total_compositions(arms,topology=False):
     else:
         return without_topology, len(without_topology)
 
-
-
-#print(f"With topology: {len(results['with_topology'])}")
-#print(f"Without topology: {len(results['without_topology'])}")
-
-a = get_unique_total_compositions(tmp)
-print(f"[debug] The unique compositions (w/o stem) counts are {a[1]} and the details are: \n {a[0]}")
-
 #20250709 fixed extra NG range bug
-def NGcore(corefuc = True, bicorefuc = False, highman = True, perman = False, hybrid = False, debug = False, customboundary = False):#bicorefuc for insects
+def NGcore(corefuc = True, bicorefuc = False, highman = True, perman = False, hybrid = False, debug = False, customboundary = None, termi_comp = None, internal_comp = None):#bicorefuc for insects
     #highman - use another predefined set
     extraNG, corebase = [], [(3, 2, 0, 0, 0, 0)]
     if customboundary:
@@ -271,6 +286,7 @@ def NGcore(corefuc = True, bicorefuc = False, highman = True, perman = False, hy
         #equal to Man5 (right, alpha 6 arm has 2 extra mannose w/o MAN2A1/2 enzyme)
         #suppose Man5 w/ or w/o corefuc + 1 terminal only
         print("allow core as N2H3-H3~5 + single arm w/ or w/o coreFuc. Need to call the function separately to avoid contamination")
+        #use termi_comp and internal_comp that call terminal and internal composition generator for hybrid glycan calculation
 
     #normal core (trimannosyl core part)
     if corefuc:
@@ -282,10 +298,6 @@ def NGcore(corefuc = True, bicorefuc = False, highman = True, perman = False, hy
     #corebase will be used for adding back to internalxterminal combinations
     #extraNG is independent from the calculation
     return corebase, extraNG
-
-c = NGcore(debug=True)
-
-
 
 
 def combine_with_core(arms, corebase, extraNG, keep_topology=False):
@@ -326,8 +338,6 @@ def combine_with_core(arms, corebase, extraNG, keep_topology=False):
 
     return final_compositions
 
-final_set = combine_with_core(tmp, c[0], c[1], keep_topology=False)
-print(f"Total final compositions: {len(final_set)} \n {final_set}")
 
 
 def compcheck(final_set, a, b, c, d, e, f, debug=False):
@@ -361,11 +371,84 @@ def compcheck(final_set, a, b, c, d, e, f, debug=False):
     #    print(f"[debug] Count of passed composition {len(passed_set)}, and failed composition {len(failed_set)}")
     return (passed_set, failed_set) if debug else passed_set
 
+#flag dealer
+def select_flags(flag_dict, keys):
+    return {k: flag_dict[k] for k in keys if k in flag_dict}
 
-test111 = compcheck(final_set, (2,15), (2,10), (0, 2), (0, 2), (0, 2), (0, 6), True)
-test222_wokdn = compcheck(final_set, (2,15), (2,10), (0, 2), (0, 2), (0, 0), (0, 6), True)
-print(f"[debug] Count of passed composition {len(test111[0])}, and failed composition {len(test111[1])}")
-print(f"[debug] so with the test of composition boundry, the final results are \n {test111[0]} \n and failed composition for ? reasons are \n {test111[1]}")
-#print(f"[debug] Count of passed composition {len(test222_wokdn[0])}, and failed composition {len(test222_wokdn[1])}")
-#print(f"[debug] so with the test of composition boundry, the final results are \n {test222_wokdn[0]} \n and failed composition for ? reasons are \n {test222_wokdn[1]}")
+#preview viewer (mainly for debug)
+import random
+def debug_preview(obj, limit=10, sort_if_set=True, random_sample=False, label="Preview"):
+    """
+    Print a preview of `limit` items from an iterable (set, list, tuple, etc.)
+    - Automatically handles sets
+    - Optionally returns a sorted or randomly sampled preview
+    """
+    try:
+        if isinstance(obj, set):
+            items = sorted(obj) if sort_if_set and not random_sample else list(obj)
+        elif isinstance(obj, (list, tuple)):
+            items = list(obj)
+        else:
+            items = list(obj)  # fallback
 
+        sample_size = min(limit, len(items))
+
+        preview = (
+            random.sample(items, sample_size) if random_sample else items[:sample_size]
+        )
+
+        print(f"[{label}] Showing {sample_size} {'random' if random_sample else 'first'} items (of {len(items)} total):")
+        for item in preview:
+            print(item)
+    except Exception as e:
+        print(f"[{label}] Error generating preview: {e}")
+    #return "\n".join(str(item) for item in preview) #for printing in GUI in future
+
+#functions for N-glycan permutation settings (provide information for how the glycan should be like)
+def NGlaunch(user_flags=None):
+    flags = NG_flags.copy()
+    if user_flags:
+        flags.update(user_flags)
+    #suppose you finished updating the flags
+    #generate terminal and internal permutations
+    terminal_comb = terminal_NG(**select_flags(flags, 
+                                               [   "alphagal_like", "allowldnc", "allowleby",
+                                                   "allow5ac", "allow5gc", "allowkdn", "allowfuc",
+                                                   "allowpsa", "debug", "force_exit"
+                                                   ]))
+    internal_comb = internal_NG(**select_flags(flags, ["allowldnc", "allowldnf", "allowfuc"]))
+    #combine both to tree-like NG ternima (non-reducing end)
+    branches = generate_arm_combinations(terminal_comb, internal_comb, arm_count=flags["arm_count"], internal_repeat_range=(flags["internal_minrep"],flags["internal_maxrep"]) )
+    #calcualte core and etc (highman and others)
+    core_etc = NGcore(**select_flags(flags, [ "corefuc", "bicorefuc",
+                                              "highman", "perman", "hybrid",
+                                              "debug",
+                                              #"customboundary",
+                                              "termi_comp",
+                                              "internal_comp"
+                                                ]))
+    #Get unique total compositions
+    #Default topology is False, which affect next function and downstream processing if you set to True
+    combos = get_unique_total_compositions(branches, flags["topology"])
+    if flags["debug"]:
+        print(f"[debug]: the unique composition count is {combos[1]} and first 10 composition is \n")
+        debug_preview(combos[0], limit=10, sort_if_set=False, random_sample=True, label="Unique Composition")
+    #noticed previous glitch? we're using branches rather than the unique compositions
+    #defined as set so the unique composition function is NOT required? GPT and Claude what's your thoughts?
+    final_set = combine_with_core(branches, core_etc[0], core_etc[1], flags["topology"])
+    if flags["debug"]:
+        print(f"[debug]: the unique composition count is {len(final_set)} and first 10 composition is \n")
+        debug_preview(final_set, limit=10, sort_if_set=False, random_sample=True, label="Final composition")  
+    if flags["compcheck"]:
+        if flags["debug"]:
+             print("[debug] Allow composition check by sugar unit numbers")
+        checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
+                                  flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
+        return checked_final, True
+    else:
+        if flags["debug"]:
+            print("[debug] Skipping composition check (optional)")
+        return final_set, False
+    
+
+NGlaunch()
