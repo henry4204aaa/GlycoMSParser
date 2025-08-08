@@ -87,7 +87,7 @@ NG_flags = {
 #for v0.51 apply this to all functions
 #catch errors and allow force_quit or silent revision when invalid value is assigned
 def error_watcher(errmsg):
-    if errmsg[0] is "force-exit-error":
+    if errmsg[0] == "force-exit-error":
         error_type = "force-exit-flag-enabled"
         error_detail = errmsg[1]
         return error_type, error_detail
@@ -243,6 +243,13 @@ def get_unique_total_compositions(arms,topology=False):
     #init empty set for storing unique? values
     with_topology = set()
     without_topology = set()
+
+    #for debug OG
+    print(f"[DEBUG] Number of arms: {len(arms)}")
+    for i, arm in enumerate(arms):
+        print(f"  Arm {i} has {len(arm)} items")
+
+    ###
 
     for combo in product(*arms):  # one dict per arm
         arm_sums = [entry['sum'] for entry in combo]
@@ -451,10 +458,10 @@ def NGlaunch(user_flags=None):
             print("[debug] Skipping composition check (optional)")
         return final_set, False
     
-
+'''
 NGlaunch()
 
-
+'''
 
 #20250722 trying OG composition
 #figure definition of O-glycan core: https://www.creative-proteomics.com/upload/image/O-Glycan-Linkage-Analysis-1.jpg
@@ -510,16 +517,35 @@ def generate_OG_arm_combinations(terminal_list, internal_list, extensible_compos
 #Only fit the format, directly pass the composition to sum
 #In future consider combining core combination into this block if possible
 def OGnonextensive(arm_compositions, arm_type):
-        fill_comb = []
-        fill_comb.append({
+    fill_comb = []
+    #for comp in arm_compositions:
+    fill_comb.append({
                         "arm_id": arm_type,
                         "base_composition": None,
                         "terminal": None,
                         "internal_group": None,
-                        "sum": arm_compositions
+                        "sum": tuple(arm_compositions)
                     })
+    return fill_comb
+from itertools import chain
+#avoid non-extensive only or mixed with extensive ver format errors
+def flatten_if_nested(inputlist):
+    if not inputlist:
+        return []
+    # All items are dictionaries: return as is
+    if all(isinstance(item, dict) for item in inputlist):
+        return inputlist
+    # All items are lists (of dicts): flatten one level
+    elif all(isinstance(item, list) for item in inputlist):
+        return list(chain.from_iterable(inputlist))
+    # Mixed or bad input — print and raise error
+    else:
+        print("[ERROR] Malformed input list. Items:")
+        for item in inputlist:
+            print(f"  - {type(item)}: {repr(item)[:100]}")
+        raise TypeError("Malformed arm composition list: mix of dicts and other types")
 
-def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False):
+def armadditionOG(arm3,arm6, keep_topology=False,loop=None, debug=False, OGflags = None ,test1= True):
     if debug:
         print(f"[debug] armadditionOG function called with arm3={arm3}, arm6={arm6}")
     #deal with 6 arm first
@@ -527,29 +553,31 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
     arm6_compositions = [] #hold only composition
     arm6_extencompositions = [] #hold extensible composition
     arm6_finalcompositions = [] #hold finished composition with proper format
+    if OGflags is None:
+        raise ValueError("Please pass OGflags properly from OGcorev2")
 
     if arm6[0]:  
         # if True, can add sialic acid only for 6 arm. First check combinations of sa only (not extending context)
-        if NG_flags["allow5ac"]:
+        if OGflags["allow5ac"]:
             arm6_compositions.append((0, 0, 1, 0, 0, 0))
-        if NG_flags["allow5gc"]:
+        if OGflags["allow5gc"]:
             arm6_compositions.append((0, 0, 0, 1, 0, 0))
-        if NG_flags["allowkdn"]:
+        if OGflags["allowkdn"]:
             arm6_compositions.append((0, 0, 0, 0, 1, 0))
         #fit the format
         for comps in arm6_compositions:
-            arm6_finalcompositions.append(OGnonextensive(comps, "arm6_nonextensive"))
+            arm6_finalcompositions.extend(OGnonextensive(comps, "arm6_nonextensive"))
     if arm6[1] and arm6[2] == "N":  
         # if True, can add other sugars (Hex, HexNAc, Fuc) for 6 arm
         #20250804 copying logic from arm3####
         print("[debug] 6 arm with HexNAc at the end for further extension")
-        if NG_flags["allowldnc"]: #add one more HexNAc, non-extensible
+        if OGflags["allowldnc"]: #add one more HexNAc, non-extensible
             arm6_compositions.append((0, 1, 0, 0, 0, 0))
             #add one more Hex to allow normal extension like NG
             arm6_extencompositions.append((1, 1, 0, 0, 0, 0))
-        if NG_flags["allowldnf"]: #add one more HexNAc and 2 Hexose, non-extensible
+        if OGflags["allowldnf"]: #add one more HexNAc and 2 Hexose, non-extensible
             arm6_compositions.append((0, 1, 0, 0, 0, 2))
-        if NG_flags["allowfuc"]:
+        if OGflags["allowfuc"]:
             #add 1 fucose on HexNAc, non-extensible
             arm6_compositions.append((0, 0, 0, 0, 0, 1))
             #add 1 extra hexose and 1 fucose, non-extensible
@@ -560,24 +588,24 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
             arm6_extencompositions.append((1, 0, 0, 0, 0, 1))  # add one more Hex to allow normal extension like NG
         #fit the format
         for comps in arm6_compositions:
-            arm6_finalcompositions.append(OGnonextensive(comps, "arm-6 nonextensive"))
+            arm6_finalcompositions.extend(OGnonextensive(comps, "arm-6 nonextensive"))
         #need to add clean one with Gal extension to allow NG-like terminal repeating permutation
         arm6_extencompositions.append((1, 0, 0, 0, 0, 0))
         #pre-added hexose for extensible compositions (no need to deal within this block)
         if arm6_extencompositions:
             # Get NG terminal and internal combinations
-            terminal_comb = terminal_NG(**select_flags(NG_flags, 
+            terminal_comb = terminal_NG(**select_flags(OGflags, 
                                                      ["alphagal_like", "allowldnc", "allowleby",
                                                       "allow5ac", "allow5gc", "allowkdn", "allowfuc",
                                                       "allowpsa", "debug", "force_exit"]))
-            internal_comb = internal_NG(**select_flags(NG_flags, ["allowldnc", "allowldnf", "allowfuc"]))
+            internal_comb = internal_NG(**select_flags(OGflags, ["allowldnc", "allowldnf", "allowfuc"]))
             # Apply NG-like extension logic to extensible compositions
             extended_arm6 = generate_OG_arm_combinations(
                 terminal_comb, 
                 internal_comb, 
                 arm6_extencompositions,
                 arm_type="arm6_extended",
-                internal_repeat_range=(NG_flags["internal_minrep"], NG_flags["internal_maxrep"])
+                internal_repeat_range=(OGflags["internal_minrep"], OGflags["internal_maxrep"])
             )
             arm6_finalcompositions.extend(extended_arm6)        
         # if True, can add more extensions and it should always start from core2 or core4 (and core6 core7 if we're going to support them)
@@ -590,26 +618,26 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
     arm3_finalcompositions = []
     if arm3[0]:  
         # if True, can add sialic acid OR fucose for 3 arm. Exclusive and will block the space for further extension if any is added
-        if NG_flags["allow5ac"]:
+        if OGflags["allow5ac"]:
             arm3_compositions.append((0, 0, 1, 0, 0, 0))
-        if NG_flags["allow5gc"]:
+        if OGflags["allow5gc"]:
             arm3_compositions.append((0, 0, 0, 1, 0, 0))
-        if NG_flags["allowkdn"]:
+        if OGflags["allowkdn"]:
             arm3_compositions.append((0, 0, 0, 0, 1, 0))
-        if NG_flags["allowfuc"]:
+        if OGflags["allowfuc"]:
             arm3_compositions.append((0, 0, 0, 0, 0, 1))
         for comps in arm3_compositions:
-            arm3_finalcompositions.append(OGnonextensive(comps, "arm3_nonextensive"))
+            arm3_finalcompositions.extend(OGnonextensive(comps, "arm3_nonextensive"))
     #N or H is exclusive, can't coexist so the condition setting should be okay
     if arm3[1] and arm3[2] == "N":  # if this logic work, apply to 6 arm as well... but iirc 6 only has HexNAc always (core2, 4)
         print("[debug] 3 arm with HexNAc at the end for further extension")
-        if NG_flags["allowldnc"]: #add one more HexNAc, non-extensible
+        if OGflags["allowldnc"]: #add one more HexNAc, non-extensible
             arm3_compositions.append((0, 1, 0, 0, 0, 0))
             #add one more Hex to allow normal extension like NG
             arm3_extencompositions.append((1, 1, 0, 0, 0, 0))
-        if NG_flags["allowldnf"]: #add one more HexNAc and 2 Hexose, non-extensible
+        if OGflags["allowldnf"]: #add one more HexNAc and 2 Hexose, non-extensible
             arm3_compositions.append((0, 1, 0, 0, 0, 2))
-        if NG_flags["allowfuc"]:
+        if OGflags["allowfuc"]:
             #add 1 fucose on HexNAc, non-extensible
             arm3_compositions.append((0, 0, 0, 0, 0, 1))
             #add 1 extra hexose and 1 fucose, non-extensible
@@ -621,16 +649,17 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
         #need to add clean one with Gal extension to allow NG-like terminal repeating permutation
         arm3_extencompositions.append((1, 0, 0, 0, 0, 0))
         #pre-added hexose for extensible compositions (no need to deal within this block)
+        print(f"[debug: all arm3 composition:] {arm3_compositions} ")
         for comps in arm3_compositions:
-            arm3_finalcompositions.append(OGnonextensive(comps, "arm3_nonextensive"))
+            arm3_finalcompositions.extend(OGnonextensive(comps, "arm3_nonextensive"))
 
         if arm3_extencompositions:
             # Get NG terminal and internal combinations
-            terminal_comb = terminal_NG(**select_flags(NG_flags, 
+            terminal_comb = terminal_NG(**select_flags(OGflags, 
                                                      ["alphagal_like", "allowldnc", "allowleby",
                                                       "allow5ac", "allow5gc", "allowkdn", "allowfuc",
                                                       "allowpsa", "debug", "force_exit"]))
-            internal_comb = internal_NG(**select_flags(NG_flags, ["allowldnc", "allowldnf", "allowfuc"]))
+            internal_comb = internal_NG(**select_flags(OGflags, ["allowldnc", "allowldnf", "allowfuc"]))
             
             # Apply NG-like extension logic to extensible compositions
             extended_arm3 = generate_OG_arm_combinations(
@@ -638,7 +667,7 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
                 internal_comb, 
                 arm3_extencompositions,
                 arm_type="arm3_extended",
-                internal_repeat_range=(NG_flags["internal_minrep"], NG_flags["internal_maxrep"])
+                internal_repeat_range=(OGflags["internal_minrep"], OGflags["internal_maxrep"])
             )
             
             arm3_finalcompositions.extend(extended_arm3) #me change all compositions to arm3_compositions since we need to combine them to core later
@@ -646,29 +675,29 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
 
         # add Hex and HexNAc... etc sth similar to NG terminal. Consider a direct call if compatible
     elif arm3[1] and arm3[2] == "H":  # if True, can add other sugars (Hex, HexNAc, Fuc) for 3 arm
-        if NG_flags["allowfuc"]:
+        if OGflags["allowfuc"]:
             #add 1 fucose on HexNAc, non-extensible
             arm3_compositions.append((0, 0, 0, 0, 0, 1))
-        if NG_flags["allow5ac"]:
+        if OGflags["allow5ac"]:
             arm3_compositions.append((0, 0, 1, 0, 0, 0))
-        if NG_flags["allow5gc"]:
+        if OGflags["allow5gc"]:
             arm3_compositions.append((0, 0, 0, 1, 0, 0))
-        if NG_flags["allowkdn"]:
+        if OGflags["allowkdn"]:
             arm3_compositions.append((0, 0, 0, 0, 1, 0))
-        if NG_flags["allowfuc"]:
+        if OGflags["allowfuc"]:
             arm3_compositions.append((0, 0, 0, 0, 0, 1))
         for comps in arm3_compositions:
-            arm3_finalcompositions.append(OGnonextensive(comps, "arm3_nonextensive"))
+            arm3_finalcompositions.extend(OGnonextensive(comps, "arm3_nonextensive"))
 
         #add empty (original status is eligible for further extension), see if all zero value cause errors.
         arm3_extencompositions.append((0, 0, 0, 0, 0, 0))            
         if arm3_extencompositions:
             # Get NG terminal and internal combinations
-            terminal_comb = terminal_NG(**select_flags(NG_flags, 
+            terminal_comb = terminal_NG(**select_flags(OGflags, 
                                                      ["alphagal_like", "allowldnc", "allowleby",
                                                       "allow5ac", "allow5gc", "allowkdn", "allowfuc",
                                                       "allowpsa", "debug", "force_exit"]))
-            internal_comb = internal_NG(**select_flags(NG_flags, ["allowldnc", "allowldnf", "allowfuc"]))
+            internal_comb = internal_NG(**select_flags(OGflags, ["allowldnc", "allowldnf", "allowfuc"]))
             
             # Apply NG-like extension logic to extensible compositions
             extended_arm3 = generate_OG_arm_combinations(
@@ -676,141 +705,83 @@ def armadditionOG(arm3,arm6,armcomb, keep_topology=False,loop=None, debug=False)
                 internal_comb, 
                 arm3_extencompositions,
                 arm_type="arm3_extended",
-                internal_repeat_range=(NG_flags["internal_minrep"], NG_flags["internal_maxrep"])
+                internal_repeat_range=(OGflags["internal_minrep"], OGflags["internal_maxrep"])
             )
             
             arm3_finalcompositions.extend(extended_arm3)
     #if keep topology append 3 and 6 arms separately, if no, just append the sum of 3 and 6 arms
     #copy the logic from NG terminal and internal composition
+    #from itertools import chain
+    flat_arm3 = flatten_if_nested(arm3_finalcompositions)
+    flat_arm6 = flatten_if_nested(arm6_finalcompositions)
+    #flat_arm3 = list(chain.from_iterable(arm3_finalcompositions)) if arm3_finalcompositions else []
+    #flat_arm6 = list(chain.from_iterable(arm6_finalcompositions)) if arm6_finalcompositions else []
+    if not flat_arm3:
+        flat_arm3 = [{"arm_id": "arm3_dummy", "sum": (0, 0, 0, 0, 0, 0)}]
+    if not flat_arm6:
+        flat_arm6 = [{"arm_id": "arm6_dummy", "sum": (0, 0, 0, 0, 0, 0)}]
+    all_arms = [flat_arm3, flat_arm6]
 
-def OGcombine(arms, corebase, keep_topology=False):
+    if keep_topology :#and not test1:
+        #all_arms = arm3_finalcompositions + arm6_finalcompositions
+        combos = get_unique_total_compositions(all_arms, topology=True)
+        print(f"[debug] using get_unique_total_compositions under topology {keep_topology} gives (first 10) {combos[:10]}")
+    elif not keep_topology :#and not test1:
+        #all_arms = arm3_finalcompositions + arm6_finalcompositions
+        #if debug:
+        #    print(f"[combos]: {all_arms}")
+        combos = get_unique_total_compositions(all_arms, topology=False)
+        #print(f"[debug] using get_unique_total_compositions under topology {keep_topology} gives (first 10) {combos[:10]}")
+    elif test1:
+        print("testing bugs")
+        print(f"[arm3] {arm3_finalcompositions}\n [arm6] {arm6_finalcompositions}")
+    return all_arms
+    #return arm6_finalcompositions, arm3_finalcompositions
+
+def OGcombine(arms, corebase, keep_topology=False, debug=False):
     #test version in 20250722 copied
+    #if debug:
+    #    print(f"[debug] DEBUG mode on OG combine, and arms are {arms} \n corebases are {corebase}")
+
     final_compositions = set()
 
-    for combo in product(*arms):  # one entry per arm
-        arm_sums = [entry['sum'] for entry in combo]
+    #print(f"[DEBUG] arms received by get_unique_total_compositions:")
+    #for i, arm in enumerate(arms):
+    #    print(f"  Arm {i}: {type(arm)}, length = {len(arm)}")
+    #    for j, a in enumerate(arm[:3]):
+    #        print(f"    Entry {j}: {a}")
 
+    for combo in product(*arms):  # one entry per arm
+        #print("DEBUG combo:", combo)   <- uncomment this line if error happens, it can track but too many outputs may be generated
+        arm_sums = [entry['sum'] for entry in combo]
+        # Ensure corebase is always a list of tuples
+        if isinstance(corebase, tuple):
+            corebase = [corebase]
+        assert all(isinstance(c, tuple) for c in corebase), "Expected corebase to be a list of tuples"
         # Compute total arm sum
         arm_total = tuple(sum(x) for x in zip(*arm_sums))
-
+        
         for core in corebase:
+            #print("DEBUG core:", core) <- uncomment this line if error happens, it can track but too many outputs may be generated
             full = tuple(a + b for a, b in zip(arm_total, core))
+            #print(f"[DEBUG] full {full}")
 
             if keep_topology:
                 final_compositions.add((core, *arm_sums))  # include original info
             else:
                 final_compositions.add(full)
 
+        #print(f"[debug] arm_totals are {arm_total}" )
     return final_compositions
 
 #coretype is a list of integers, each integer represents a core type. Should be able to toggle in GUI by checkboxes or sth eqivalent
-def coreOG(coretype=None, debug=False):
-    if debug:
-        print(f"[debug] coreOG function called with coretype={coretype}")
-    if coretype is None:
-        if debug:
-            print("[debug] No coretype specified, set to all core types available")
-        coretype = [0,1,2,3,4,5,6,7,8] #
-    OG_finalresults = []
-    #None for unspecified core
-    if 0 in coretype:
-        ###Tn antigen GalNAc-(alpha 1)S/T
-        if debug:
-            print("[debug] Core type 0 is selected, which is Tn-antigen core")
-        arm3 = (False, False)
-        arm6 = (True, False)
-        core = (0,1,0,0,0,0)  #Tn antigen core
-        #combine with armadditionOG
-        armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))
-
-    if -1 in coretype:
-        if debug:
-            print(["[debug] Core type -1 is selected, which suggests none of ppGalNAc-Ts are active, and should return NO OG"])
-        return None
-    if 1 in coretype:
-        ###T antigen Gal-(beta1 3)GalNAc-(alpha 1)S/T
-        if debug:
-            print("[debug] Core type 1 is selected, which is T-antigen core")
-        arm3 = (True, True, "H") #Gal on 3 terminal
-        arm6 = (True, False, None)
-        core = (1,1,0,0,0,0)  #T antigen core
-        #combine with armadditionOG
-        armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))       
-    if 3 in coretype:
-        ###GlcNAc-(beta1 3)GalNAc-(alpha 1)S/T
-        if debug:
-            print("[debug] Core type 3 is selected")
-        arm3 = (True, True, "N")
-        arm6 = (True, False, None)
-        core = (0,2,0,0,0,0)  #T antigen core
-        #combine with armadditionOG
-        #for 3 arm addition, I think it needs an extra Gal first if doing the extension.
-        armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))     
-    if 2 in coretype:
-        ### GlcNAC\(beta1-6) Gal-(beta1 3)GalNAc-(alpha 1)S/T
-        if debug:
-            print("[debug] Core type 2 is selected")
-        arm3 = (True, True, "H")
-        arm6 = (True, True, "N")
-        core = (1,2,0,0,0,0)  #T antigen core
-        #combine with armadditionOG
-        #for 3 arm addition, I think it needs an extra Gal first if doing the extension.
-        armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))                
-    if 4 in coretype:
-        ### GlcNAC\(beta1-6) GlcNAc-(beta1 3)GalNAc-(alpha 1)S/T
-        if debug:
-            print("[debug] Core type 4 is selected")
-        arm3 = (True, True, "N")
-        arm6 = (True, True, "N")
-        core = (1,2,0,0,0,0)  #T antigen core
-        #combine with armadditionOG
-        #for 3 arm addition, I think it needs an extra Gal first if doing the extension.
-        armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))    
-
-    for i in coretype:
-        if i > 4:
-            print(f"[debug] Core type {i} is not supported yet, skipping")
-            continue
-
-    #if coretype == 0: assign as T-antigen core
-    # only allow 6 arm to add any sialic acid, 
-    #thinking flags and controls for different arms sharing same terminal function
-    # if coretype == 1: assign as core 1
-    # allow 3 and 6 arm to add sialic acid
-    # if 3 arm add a sa then it terminates
-    # 
-    # if coretype == 2: assign as core 2
-    # allow 6 arm to add sa which terminates or add a galactose
-    # def enumeratebranchOG
-    # try to add same terminal units as NG but following the rule
-    # if add a sa then it terminates 
-    # if add a fucose then it terminates too
-    # if add others galactose leave a error msg, idk biological contexts here
-    # if add GlcNAc with sth follow the teeminal rules
-    # if has a termina sa or bifuc then it cannt loop anymore
-    # otherwise follow the same logic to loop and add possible combinations till loop limits
-    # core 3 and 4 add 1 GlcNAc on core 3arm,try adding sa or fuc or gal(able to loop)
-    #core 5 to 8 are outliers, mark as not supported for now
-    """
-    Returns a list of core O-glycan compositions.
-    Currently only supports T-antigen core.
-    """
-    #T-antigen core
-    return [(1, 1, 0, 0, 0, 0)]  # (Hex, HexNAc, Neu5Ac, Neu5Gc, KDN, Fucose)
-
+#20250804 remove coreOG bc I can't see differences more than comments to v2, I forgor what happened
 
 #follow NG logic and treat joint unit separately
-def OGcorev2(coretype=None, debug=False):
+def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test1= False):
+    #20250807 add proper flag dealing block
+    if OGflags is None:
+        OGflags = NG_flags.copy()
     if debug:
         print(f"[debug] coreOG function called with coretype={coretype}")
     if coretype is None:
@@ -828,13 +799,15 @@ def OGcorev2(coretype=None, debug=False):
         core = (0,1,0,0,0,0)  #Tn antigen core
         #combine with armadditionOG
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
+        armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
         OG_finalresults.append(OGcombine(armscomb,core, debug=debug))
 
     if -1 in coretype:
         if debug:
             print(["[debug] Core type -1 is selected, which suggests none of ppGalNAc-Ts are active, and should return NO OG"])
+            #OG_finalresults.append()
         return None
+        #OG_finalresults.append(None)
     if 1 in coretype:
         ###T antigen Gal-(beta1 3)GalNAc-(alpha 1)S/T
         if debug:
@@ -844,8 +817,9 @@ def OGcorev2(coretype=None, debug=False):
         core = (1,1,0,0,0,0)  #T antigen core
         #combine with armadditionOG
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))       
+        armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
+        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))  
+
     if 3 in coretype:
         ###GlcNAc-(beta1 3)GalNAc-(alpha 1)S/T
         if debug:
@@ -856,8 +830,9 @@ def OGcorev2(coretype=None, debug=False):
         #combine with armadditionOG
         #for 3 arm addition, I think it needs an extra Gal first if doing the extension.
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))     
+        armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
+        if not test1:
+            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))          
     if 2 in coretype:
         ### GlcNAC\(beta1-6) Gal-(beta1 3)GalNAc-(alpha 1)S/T
         if debug:
@@ -868,8 +843,9 @@ def OGcorev2(coretype=None, debug=False):
         #combine with armadditionOG
         #for 3 arm addition, I think it needs an extra Gal first if doing the extension.
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))                
+        armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
+        if not test1:
+            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))                    
     if 4 in coretype:
         ### GlcNAC\(beta1-6) GlcNAc-(beta1 3)GalNAc-(alpha 1)S/T
         if debug:
@@ -880,58 +856,86 @@ def OGcorev2(coretype=None, debug=False):
         #combine with armadditionOG
         #for 3 arm addition, I think it needs an extra Gal first if doing the extension.
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
-        armscomb = armadditionOG(arm3, arm6, debug=debug)
-        OG_finalresults.append(OGcombine(armscomb,core, debug=debug))    
+        armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
+        if not test1:
+            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))        
 
     for i in coretype:
         if i > 4:
             print(f"[debug] Core type {i} is not supported yet, skipping")
             continue
 
+    return OG_finalresults
+
 #testing function for O-glycan launch
-def OGlaunch(user_flags=None):
+def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, flag1 = True):
     flags = NG_flags.copy()
     if user_flags:
         flags.update(user_flags)
-    #suppose you finished updating the flags
+    #Thinking how to pass the flag to 
+    OG_comps = OGcorev2(coretype,keep_topology,debug, OGflags=flags)#test1=flag1)
+    #try to avoid multiple core type errors
+    if isinstance(OG_comps, list) and all(isinstance(x, set) for x in OG_comps):
+        OG_comps = set().union(*OG_comps)
+    print(f"[debug] OG comps now is {type(OG_comps)}")
+    if OG_comps is None or OG_comps == []:
+        print("none")
+    else:
+        if isinstance(OG_comps, set):
+            first = next(iter(OG_comps)) if OG_comps else None
+            print(f"[DEBUG 3] the OG comps are : {OG_comps} and types are {type(OG_comps)} and inner {type(first)}")
+        else:
+            print(f"[DEBUG 2] the OG comps are : {OG_comps} and types are {type(OG_comps)} and inner{type(OG_comps)}") #{type(OG_comps[0])}")
     #generate terminal and internal permutations
-    terminal_comb = terminal_NG(**select_flags(flags, 
-                                               [   "alphagal_like", "allowldnc", "allowleby",
-                                                   "allow5ac", "allow5gc", "allowkdn", "allowfuc",
-                                                   "allowpsa", "debug", "force_exit"
-                                                   ]))
-    internal_comb = internal_NG(**select_flags(flags, ["allowldnc", "allowldnf", "allowfuc"]))
-    #combine both to tree-like NG ternima (non-reducing end)
-    branches = generate_arm_combinations(terminal_comb, internal_comb, arm_count=flags["arm_count"], internal_repeat_range=(flags["internal_minrep"],flags["internal_maxrep"]) )
-    #calcualte core and etc (highman and others)
-    core_etc = OGcorev2(**select_flags(flags, [ "corefuc", "bicorefuc",
-                                              "highman", "perman", "hybrid",
-                                              "debug",
-                                              #"customboundary",
-                                              "termi_comp",
-                                              "internal_comp"
-                                                ]))
     #Get unique total compositions
+    #Skip for O-glycans? I'm not sure if that's needed for extensive compositions
     #Default topology is False, which affect next function and downstream processing if you set to True
-    combos = get_unique_total_compositions(branches, flags["topology"])
-    if flags["debug"]:
-        print(f"[debug]: the unique composition count is {combos[1]} and first 10 composition is \n")
-        debug_preview(combos[0], limit=10, sort_if_set=False, random_sample=True, label="Unique Composition")
+    #combos = get_unique_total_compositions(branches, flags["topology"])
+    #if flags["debug"]:
+    #    print(f"[debug]: the unique composition count is {combos[1]} and first 10 composition is \n")
+    #    debug_preview(combos[0], limit=10, sort_if_set=False, random_sample=True, label="Unique Composition")
     #noticed previous glitch? we're using branches rather than the unique compositions
     #defined as set so the unique composition function is NOT required? GPT and Claude what's your thoughts?
-    final_set = combine_with_core(branches, core_etc[0], core_etc[1], flags["topology"])
+    #final_set = combine_with_core(branches, core_etc[0], core_etc[1], flags["topology"])
     if flags["debug"]:
-        print(f"[debug]: the unique composition count is {len(final_set)} and first 10 composition is \n")
-        debug_preview(final_set, limit=10, sort_if_set=False, random_sample=True, label="Final composition")  
+        if OG_comps and OG_comps is not None:
+            print(f"[debug]: the unique composition count is {len(OG_comps)} \n")#{len(OG_comps[0])} \n")
+            debug_preview(OG_comps, limit=10, sort_if_set=False, random_sample=False,
+         label="Final composition")   #OG_comps[0] -> OG_comps
+        else:
+            print("OG_comps is empty.")
+                
     if flags["compcheck"]:
         if flags["debug"]:
              print("[debug] Allow composition check by sugar unit numbers")
-        checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
+        checked_final = compcheck(OG_comps, flags["Hex_range"], flags["HexNAc_range"],
                                   flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
         return checked_final, True
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
-        return final_set, False
-    
+        return OG_comps, False
 
+
+OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4,5], debug=True)
+
+#line 455 NG_launch() is suppressed now
+
+
+#coretype 0 validated {(0, 1, 1, 0, 0, 0), (0, 1, 0, 1, 0, 0)}
+#coretype -1 fixed in 20250806: OG_comps is empty. (got None)
+#coretype 1 testing got 100 comb in arm1 2 in arm2 get 124 unique comp finally
+#coretype 1 test "internal_maxrep": 1 flag: got 70 unique composition, no_extension -> got 31 unique composition
+#didn't do deeper check to confirm all composition did work as expected, but the number met what we can see in real (maximum)
+#coretype 2 test "internal_maxrep": 0  Arm 0 has 25 items Arm 1 has 37 items [debug]: the unique composition count is 182
+#coretype 2 test "internal_maxrep": 1  Arm 0 has 55 items Arm 1 has 97 items [debug]: the unique composition count is 474
+#coretype 2 test "internal_maxrep": 2  Arm 0 has 100 items Arm 1 has 187 items [debug]: the unique composition count is 886
+#coretype 3 test "internal_maxrep": 0  Arm 0 has 39 items Arm 1 has 2 items [debug]: the unique composition count is 50
+#coretype 3 test "internal_maxrep": 1  Arm 0 has 99 items Arm 1 has 2 items [debug]: the unique composition count is 104
+#coretype 3 test "internal_maxrep": 2  Arm 0 has 189 items Arm 1 has 2 items [debug]: the unique composition count is 173
+#coretype 4 test "internal_maxrep": 0 Arm 0 has 39 items Arm 1 has 37 items [debug]: the unique composition count is 234
+#coretype 4 test "internal_maxrep": 0 Arm 0 has 39 items Arm 1 has 37 items [debug]: the unique composition count is 234
+#coretype 4 test "internal_maxrep": 1 Arm 0 has 99 items Arm 1 has 97 items [debug]: the unique composition count is 586
+#coretype 4 test "internal_maxrep": 2  Arm 0 has 189 items Arm 1 has 187 items [debug]: the unique composition count is 1058
+#"internal_maxrep": 1, coretype=[0,1,2] [debug]: the unique composition count is 493
+#"internal_maxrep": 1, coretype=[0,1,2,3,4,5] [debug]: the unique composition count is 717
