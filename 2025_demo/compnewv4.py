@@ -28,8 +28,8 @@
 #--- able to write manuscript for this part ---
 #v1.0 for finished O-glycan
 #v1.1 for finished O-glycan integration with mspcomposition.py -> code will move there
-version = "0.36"
-last_update = 20250716
+version = "1.0?"
+last_update = 20250808
 #version changelog:
 #v0.48 export composition
 #v0.4 add fragment calculator beta (fixed for perMe, will need to link to metadata to get proper mass)
@@ -39,7 +39,7 @@ last_update = 20250716
 #compnew v2.py new file > find duplicate funtions removed in v2
 
 
-
+from mspcomposition import precursormassv2
 
 #N-glycan settings (need revision)
 NG_flags = {
@@ -95,6 +95,31 @@ def error_watcher(errmsg):
         print("[watcher v0.1] No error detected, return original output")
         return errmsg
 
+
+#20250808 add comp export
+def save_glycan_pseudocomp_to_csv(comps, filename=None, include_header=True):
+    headers = ["Fuc", "Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Mass"]
+    if filename is None:
+        filename = input("[dev k1] Please provide a name for this pseudocomp")
+
+    filenamecsv = filename.strip() + ".csv"
+
+    #fix the N-glycan extra wrapped issue
+    flat_compositions = []
+    for item in comps:
+        if isinstance(item, (list, set)):
+            flat_compositions.extend(item)
+        else:
+            flat_compositions.append(item)
+
+    with open(filenamecsv, "w") as f:
+        if include_header:
+            f.write(",".join(headers) + "\n")
+        for comp in sorted(flat_compositions):
+            assert len(comp) == 6, f"Composition length error: {comp}"
+            mass = precursormassv2(comp)
+            f.write(",".join(map(str, comp)) + f",{mass:.3f}\n")
+            #f.write(",".join(map(str, comp)) + "\n")
 
 
 #20250604 tank tank tank ... __ __ __
@@ -413,7 +438,9 @@ def debug_preview(obj, limit=10, sort_if_set=True, random_sample=False, label="P
     #return "\n".join(str(item) for item in preview) #for printing in GUI in future
 
 #functions for N-glycan permutation settings (provide information for how the glycan should be like)
-def NGlaunch(user_flags=None):
+def NGlaunch(user_flags=None, filename=None):
+    if filename is None:
+        filename = input("[dev NGlaunch] Please enter filename:\n")
     flags = NG_flags.copy()
     if user_flags:
         flags.update(user_flags)
@@ -452,11 +479,14 @@ def NGlaunch(user_flags=None):
              print("[debug] Allow composition check by sugar unit numbers")
         checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
                                   flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
-        return checked_final, True
+        save_glycan_pseudocomp_to_csv(checked_final, filename=filename, include_header=True)
+        #return checked_final, True
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
-        return final_set, False
+        save_glycan_pseudocomp_to_csv(final_set, filename=filename, include_header=True)
+
+        #return final_set, False
     
 '''
 NGlaunch()
@@ -868,7 +898,10 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
     return OG_finalresults
 
 #testing function for O-glycan launch
-def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, flag1 = True):
+def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, flag1 = True, filename = None):
+    if filename is None:
+        filename = input("[dev OGlaunch] Please give the output file name")
+
     flags = NG_flags.copy()
     if user_flags:
         flags.update(user_flags)
@@ -914,10 +947,55 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
-        return OG_comps, False
+        #return OG_comps, False
+
+    #write file name
+    save_glycan_pseudocomp_to_csv(OG_comps, filename=filename, include_header=True)
+
+OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4], debug=True, filename="testifbreakOG_delaftertest")
+"""
+NGlaunch(user_flags={
+        #monitoring flags
+         "debug": True, 
+         "dev": False,
+         "force_exit": False,
+        #common settings for terminal and internal permutations
+         "alphagal_like":   False, #Human
+         "allowldnc":       False, #Not marked
+         "allowleby":       False, #Not marked, fucose amount <2
+         "allow5ac":        True, 
+         "allow5gc":        False,#Not marked
+         "allowkdn":        False,#Human, not intestine
+         "allowfuc":        True,
+         "allowpsa":        0,
+         "allowldnf":       False,
+        #iteration logic flags
+         "arm_count":       4, #maximum 4 arms
+         "internal_minrep": 0,
+         "internal_maxrep": 1, #6 LacNAc max in MALDI
+         "topology":        False,
+        #core flags
+         "corefuc":         True,
+         "bicorefuc":       False,
+         "highman":         True,
+         "perman":          False,
+         "hybrid":          False,
+        #optional composition check
+        # "customboundary":  None, <- deactivated since we define range below
+         "compcheck":       True,
+         "Hex_range":       [2,12],
+         "HexNAc_range":    [2,10],
+         "Neu5Ac_range":    [0,4],
+         "Neu5Gc_range":    [0,0],
+         "KDN_range":       [0,0],
+         "Fucose_range":    [0,2],     
+        #hybrid NG arguments for calculating composition it's PLACEHOLDER 
+         "termi_comp":      None,
+         "internal_comp":   None,
+         }, filename="U937NG")
+"""
 
 
-OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4,5], debug=True)
 
 #line 455 NG_launch() is suppressed now
 

@@ -5,12 +5,13 @@ import pandas as pd
 import csv
 import math
 import copy
-version = "0.24"
-last_update = 20250508
+version = "0.25"
+last_update = 20250808
 
 #v0.5: code review and need functions for better integration. Need pre-filling in subwindow (not this file) when it detect N/O/GSL glycans etc
 #v0.4: add pseudo-label to converted csv (stop here and test the accuracy if possible)
 #v0.3: generate in silico csv in decodecompinput and pass it to fit_composition 
+#v0.25 supress precursormassv2 message
 #v0.22: test version that collects all information needed properly.
 #v0.2: debugging test (use the code from compositioncalc.py)
 #v0.1: placeholder
@@ -18,7 +19,7 @@ last_update = 20250508
 
 
 #editing for future support#
-def precursormassv2(composition, deri="PerMe"): #general version
+def precursormassv2(composition, deri="PerMe", debug=False): #general version
     a, b, c, d, e = composition[0], composition[1], composition[2], composition[3], composition[4]
     if composition[5]: #KDN
         f = composition[5]
@@ -28,10 +29,12 @@ def precursormassv2(composition, deri="PerMe"): #general version
         M =  a * 174.08921 + b * 204.09977 + c * 245.12632 + d * 361.17367 + e * 391.18423 + f * 335.1700 + 46.04186 + 1.0073
         # M = a x Fucose (triangle) + b x Hexose (circle) + c x HexNAc (Square) + d * Neu5Ac (purple diamond) + e * Neu5Gc (aqua diamond) + reducing end + [H+]
         # a, b, c, d, e >=0, is integer
-        print("precursormassv2 calculating permetylation precursor mass")
+        if debug:
+            print("precursormassv2 calculating permetylation precursor mass")
     else:
         M = a * 162 + b * 180 + c * 204 + d * 245 + e * 275 + 46.04186 + 1.0073
-        print("precursormassv2 calculating native precursor mass (not percise mass)")
+        if debug:
+            print("precursormassv2 calculating native precursor mass (not percise mass)")
     return(M)
 
 def compositionbuilder(f=0, h=0, n=0, s=0, g=0, k=0):
