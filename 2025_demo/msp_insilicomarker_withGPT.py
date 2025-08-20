@@ -12,6 +12,9 @@ converted_csv = r"C:\Users\Sakazuki\Desktop\Khoolab_2025data\U937cells_NG_new\ms
 composition_list = r"G:\其他電腦\My Computer\GlycoMSParser\U937NG_fix.csv" #this is fault file, mass wrong  #fix wrong mass before adding comp list file
 ion_sheet = r"C:\Users\Sakazuki\Downloads\ionlist_from_zebrafish_NG.csv"
 
+#to get rid of warning
+def ppm(x): return x
+
 
 
 #extract_ionmasslist in mspvalidator
@@ -199,12 +202,118 @@ df["pseudo compositions"] = df["protonatedmass"].apply(lambda m: collect_row_hit
 # or, if you need speed and have many rows, iterate in vectorized batches or with itertuples
 
 # 2) Build matched_df
-matched_df = df[df["pseudo compositions"].map(bool)].copy()
+matched_df = df[df["pseudo compositions"].map(bool)].copy().reset_index()
+print(matched_df.head())
+#matched_df.to_csv("U937NGST1OENGneu.csv")
 
-matched_df.to_csv("U937NGST1OENGneu.csv")
+
+#dealing with ion list
+
+import numpy as np
+import pandas as pd
+from mspvalidator_merger import findingions, expandpeaklist
+# assume: from somewhere import score_counter  # returns 0..1
+
+def _ppm_value(val=20.0):
+    try:
+        return float(ppm(val))  # project helper if present
+    except NameError:
+        return float(val)
 
 
+##self-made function
+def score_counter_old(hits,ionlist):
+    hitcount = len(hits)
+    totalioncount = len(ionlist)
+    score = hitcount/totalioncount
+    return score
 
+#GPT suggestion, avoid 0 division and value <0 or >1
+def score_counter(hits, ionlist):
+    hitcount = len(hits)
+    totalioncount = len(ionlist) if len(ionlist) else 1  # avoid /0
+    return min(1.0, max(0.0, hitcount / totalioncount))
+
+
+def _prepare_ion_df(ion_df, mass_col="mass"):
+    """Return (ionlist_mz_array, iondf_for_findingions, mass_col)."""
+    if isinstance(ion_df, (list, tuple, np.ndarray)):
+        arr = np.asarray(ion_df, dtype=float)
+        return arr, pd.DataFrame({mass_col: arr}), mass_col
+    if mass_col not in ion_df.columns:
+        for c in ("mass","mz","ion_mz"):
+            if c in ion_df.columns:
+                mass_col = c; break
+    arr = ion_df[mass_col].astype(float).to_numpy()
+    return arr, ion_df[[mass_col]].copy(), mass_col
+
+def _coerce_peaks(df):
+    """Parse tuple-strings if needed."""
+    if df.shape[0] and (isinstance(df["peaklist"].iloc[0], str) or isinstance(df["peakintensity"].iloc[0], str)):
+        return expandpeaklist(df.copy())
+    return df
+
+def attach_ion_score_on_matched(
+    matched_df: pd.DataFrame,
+    ion_df: pd.DataFrame | list | np.ndarray,
+    ppm_value: float = 20.0,
+    scan_col: str = "MS2scan_no",
+    ion_mass_col: str = "mass",
+    score_col: str = "ion score",
+    hitcount_col: str = "ion hit count",
+    hitlist_col: str = "ion hits m/z",
+):
+    out = _coerce_peaks(matched_df.copy())
+    ionlist_mz, iondf_for_find, ion_mass_col = _prepare_ion_df(ion_df, mass_col=ion_mass_col)
+
+    def _score_row(row):
+        hits_out = findingions(row, iondf_for_find, ppm_value)
+        # Detect shape:
+        #  (A) matched-only: list of mz or (mz, intensity) for matches
+        #  (B) full listing:  list of (mz, logI_plus1_or_1) for all reference ions
+        if not hits_out:
+            return 0.0, 0, ""
+        elem = hits_out[0]
+        if isinstance(elem, (list, tuple)) and len(elem) == 2 and len(hits_out) == len(ionlist_mz):
+            # (B) full listing from findingions
+            matched = [(mz, v) for mz, v in hits_out if v > 1.0]
+            score = sum(1 for _mz, _v in hits_out if _v > 1.0) / len(hits_out)
+            hit_list = ";".join(f"{mz:.4f}" for mz, _ in matched)
+            return float(score), len(matched), hit_list
+        else:
+            # (A) matched-only from peaks_ppm
+            # normalize to m/z list for score_counter
+            if isinstance(elem, (list, tuple)):
+                matched_mz = [mz for mz, *_ in hits_out]     # [(mz,intensity),...] → [mz,...]
+            else:
+                matched_mz = list(hits_out)                  # [mz,...]
+            score = score_counter(matched_mz, ionlist_mz)    # 0..1
+            hit_list = ";".join(f"{mz:.4f}" for mz in matched_mz)
+            return float(score), len(matched_mz), hit_list
+
+    triples = out.apply(_score_row, axis=1)
+    triples = pd.DataFrame(triples.tolist(), index=out.index,
+                           columns=[score_col, hitcount_col, hitlist_col])
+    return pd.concat([out, triples], axis=1)
+
+
+ion_df = extract_ionmasslist(pd.read_csv(ion_sheet))
+
+matched_df2 = attach_ion_score_on_matched(
+    matched_df,
+    ion_df,                 # DataFrame or list/array
+    ppm_value=20.0,
+    scan_col="MS2scan_no",
+    ion_mass_col="mass",
+)
+print(matched_df2.head())
+print("rows:", len(matched_df2))
+print("scans with ≥1 ion hit:", int((matched_df2["ion hit count"] > 0).sum()))
+print("median ion hit count:", matched_df2["ion hit count"].median())
+print("median ion score:", matched_df2["ion score"].median())
+
+
+matched_df2.to_csv("U937NGST1OENGneu_withzfion.csv", index=False)
 
 #v20250815 we have old version to use
 #need to restrict numbers, currently set to float, could be better to limit 4 dec
@@ -270,78 +379,7 @@ def readunlabeledcsv(csv, ionlist, compositionlist):
 
 
 
-import numpy as np
-import pandas as pd
-from mspvalidator_merger import findingions, expandpeaklist
-# assume: from somewhere import score_counter  # returns 0..1
 
-def _ppm_value(val=20.0):
-    try:
-        return float(ppm(val))  # project helper if present
-    except NameError:
-        return float(val)
-
-def _prepare_ion_df(ion_df, ion_mass_col="mass", ion_adduct_offset=0.0):
-    if isinstance(ion_df, (list, tuple, np.ndarray)):
-        arr = np.asarray(ion_df, dtype=float) + float(ion_adduct_offset)
-        return pd.DataFrame({ion_mass_col: arr})
-    df = ion_df.copy()
-    if ion_mass_col not in df.columns:
-        for c in ("mass","mz","ion_mz"):
-            if c in df.columns: ion_mass_col = c; break
-    df = df[[ion_mass_col]].copy()
-    df[ion_mass_col] = df[ion_mass_col].astype(float) + float(ion_adduct_offset)
-    return df
-
-def attach_ion_score(
-    matched_df: pd.DataFrame,
-    converted_df: pd.DataFrame,
-    ion_df,
-    ion_mass_col="mass",
-    ion_adduct_offset=0.0,   # set to 0.0 normally; try 22.989218 for Na adduct hypothesis
-    scan_col="MS2scan_no",
-    score_col="ion score",
-    hitcount_col="ion hit count",
-    hitlist_col="ion hits m/z",
-    ppm_default=20.0,
-):
-    # safe copy and parse peaks if needed
-    out = matched_df.copy()
-    if out.shape[0] and (isinstance(out["peaklist"].iloc[0], str) or isinstance(out["peakintensity"].iloc[0], str)):
-        out = expandpeaklist(out)
-
-    conv = converted_df
-    if conv.shape[0] and (isinstance(conv["peaklist"].iloc[0], str) or isinstance(conv["peakintensity"].iloc[0], str)):
-        conv = expandpeaklist(conv.copy())
-
-    ppm_val = _ppm_value(ppm_default)
-    iondf_for_find = _prepare_ion_df(ion_df, ion_mass_col=ion_mass_col, ion_adduct_offset=ion_adduct_offset)
-
-    # build a fast lookup from scan → row in converted_df
-    conv_indexed = conv.set_index(scan_col, drop=False)
-
-    def _score_one(scan):
-        try:
-            row = conv_indexed.loc[scan]
-        except KeyError:
-            return 0.0, 0, ""  # scan not in converted_df (shouldn't happen)
-        hits = findingions(row, iondf_for_find, ppm_val)  # [[ion_mz, logI_plus1_or_1], ...]
-        matched_mz = [mz for mz, v in hits if v > 1.0]
-        score = float(score_counter(iondf_for_find.iloc[:,0].to_numpy(), matched_mz))  # 0..1
-        hit_count = len(matched_mz)
-        hit_list = ";".join(f"{m:.4f}" for m in matched_mz)
-        return score, hit_count, hit_list
-
-    triples = out[scan_col].apply(_score_one)
-    triples = pd.DataFrame(triples.tolist(), index=out.index, columns=[score_col, hitcount_col, hitlist_col])
-    return pd.concat([out, triples], axis=1)
-
-matched_df = attach_ion_score(
-    matched_df, converted_df, ion_df,
-    ion_mass_col="mass",
-    ion_adduct_offset=0.0,   # keep 0.0 since you already treat library as [M+H]+
-    scan_col="MS2scan_no",
-)
 
 import numpy as np
 import pandas as pd
