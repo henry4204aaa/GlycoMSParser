@@ -26,11 +26,12 @@
 #v0.5 for finished N-glycan 
 #v0.7 for finished integration with mspcomposition.py -> code will move there
 #--- able to write manuscript for this part ---
-#v1.0 for finished O-glycan
+#v1.0? for finished O-glycan
 #v1.1 for finished O-glycan integration with mspcomposition.py -> code will move there
-version = "1.0?"
-last_update = 20250808
+version = "1.0"
+last_update = 20250819
 #version changelog:
+#v1.0: 20250819 fix mass calc error
 #v0.48 export composition
 #v0.4 add fragment calculator beta (fixed for perMe, will need to link to metadata to get proper mass)
 #v0.36 add function calling whole flow
@@ -39,7 +40,7 @@ last_update = 20250808
 #compnew v2.py new file > find duplicate funtions removed in v2
 
 
-from mspcomposition import precursormassv2
+#from mspcomposition import precursormassv2
 
 #N-glycan settings (need revision)
 NG_flags = {
@@ -83,6 +84,22 @@ NG_flags = {
          }
 #O-glycan will share a portion of N-glycan flags, thinking if I should mix them together or not
 
+#adapted, mind the deri and reduction status should be obtain from metadata, if no metadata exists, ask user to choose
+def precursormassv3(composition, deri="PerMe",reduced=False, debug=False): #general version
+    a, b, c, d, e, f = composition[0], composition[1], composition[2], composition[3], composition[4], composition[5]
+    if deri == "PerMe":
+        M =  f * 174.08921 + a * 204.09977 + b * 245.12632 + c * 361.17367 + d * 391.18423 + e * 335.1700 + 46.04186 + 1.0073
+        # M = a x Fucose (triangle) + b x Hexose (circle) + c x HexNAc (Square) + d * Neu5Ac (purple diamond) + e * Neu5Gc (aqua diamond) + reducing end + [H+]
+        # a, b, c, d, e >=0, is integer
+        if reduced == True:
+            M = M + 16.0313
+        if debug:
+            print("precursormassv3 calculating permetylation precursor mass")
+    else:
+        M = 0
+        if debug:
+            print("precursormassv3 throwing 0 as exceptions")
+    return(M)
 
 #for v0.51 apply this to all functions
 #catch errors and allow force_quit or silent revision when invalid value is assigned
@@ -98,7 +115,8 @@ def error_watcher(errmsg):
 
 #20250808 add comp export
 def save_glycan_pseudocomp_to_csv(comps, filename=None, include_header=True):
-    headers = ["Fuc", "Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Mass"]
+    #20250815 fix header, should be in the order of HNSiaFMass, not Fuc in the first place
+    headers = ["Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Fuc", "Mass"]
     if filename is None:
         filename = input("[dev k1] Please provide a name for this pseudocomp")
 
@@ -117,7 +135,7 @@ def save_glycan_pseudocomp_to_csv(comps, filename=None, include_header=True):
             f.write(",".join(headers) + "\n")
         for comp in sorted(flat_compositions):
             assert len(comp) == 6, f"Composition length error: {comp}"
-            mass = precursormassv2(comp)
+            mass = precursormassv3(comp, reduced= True)
             f.write(",".join(map(str, comp)) + f",{mass:.3f}\n")
             #f.write(",".join(map(str, comp)) + "\n")
 
@@ -952,8 +970,8 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
     #write file name
     save_glycan_pseudocomp_to_csv(OG_comps, filename=filename, include_header=True)
 
-OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4], debug=True, filename="testifbreakOG_delaftertest")
-"""
+#OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4], debug=True, filename="testifbreakOG_delaftertest")
+
 NGlaunch(user_flags={
         #monitoring flags
          "debug": True, 
@@ -992,7 +1010,8 @@ NGlaunch(user_flags={
         #hybrid NG arguments for calculating composition it's PLACEHOLDER 
          "termi_comp":      None,
          "internal_comp":   None,
-         }, filename="U937NG")
+         }, filename="U937NG_fix")
+"""
 """
 
 
