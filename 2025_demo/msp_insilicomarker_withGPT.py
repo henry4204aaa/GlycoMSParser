@@ -315,6 +315,18 @@ print("median ion score:", matched_df2["ion score"].median())
 
 matched_df2.to_csv("U937NGST1OENGneu_withzfion.csv", index=False)
 
+
+# top scans by ion score
+top = matched_df2.sort_values("ion score", ascending=False).head(50)
+
+# how many anchors in each scan (using your current hit list)
+#def parse_hits(s): return [float(x) for x in s.split(";") if x]
+#matched_df["anchors"] = matched_df["ion hits m/z"].map(parse_hits).map(has_anchors)
+#matched_df["passes_anchors"] = matched_df["anchors"] >= 2
+#matched_df["passes_anchors"].mean()  # fraction passing the gate
+
+
+
 #v20250815 we have old version to use
 #need to restrict numbers, currently set to float, could be better to limit 4 dec
 def getppm(refmass, comparemass, ppm):
@@ -968,3 +980,60 @@ path
 
 
 """
+
+
+#some extra suggestions after testing with GPT
+
+#1) Anchor rule (cheap & effective)
+# example anchors (placeholder values – swap for your dataset’s anchors)
+ANCHORS = [204.087, 366.140, 512.197]  # adjust for derivatization/adduct
+ANCHOR_TOL = 0.02  # Da window
+
+def has_anchors(hit_mz_list):
+    return sum(any(abs(m - a) <= ANCHOR_TOL for m in hit_mz_list) for a in ANCHORS)
+
+def score_counter(hits_mz, ionlist_mz):
+    # gate: at least 2 anchor ions
+    if has_anchors(hits_mz) < 2:
+        return 0.0
+    return len(hits_mz) / max(1, len(ionlist_mz))
+
+#2) Trim the denominator (don’t penalize with rarely observed ions)
+curated = ion_df.query("mass >= 150 & mass <= 2000")  # plus your own whitelist/blacklist
+# Use `curated` for scoring, keep full list only for logs
+
+
+#3) Add intensity awareness (optional, still 0..1)
+# If you can switch to an internal matcher that returns the matched peak intensity:
+def intensity_fraction(matched_intensities, all_intensities, min_i=0.0):
+    num = sum(i for i in matched_intensities if i > min_i)
+    den = sum(i for i in all_intensities if i > min_i) or 1.0
+    return num / den  # 0..1
+
+# Hybrid score (anchors gate + size + intensity)
+#score = 0.5 * (len(hits_mz)/len(ionlist_mz)) + 0.5 * intensity_fraction(...)
+
+#4) Tighten ppm at low m/z (optional)
+def ppm_dynamic(mz):
+    return 10.0 if mz < 400 else 20.0  # example
+
+#5) Target–decoy FDR (data-driven threshold)
+import numpy as np
+
+def decoy_ions(ionlist_mz, shift=50.0):
+    # simple decoy: shift ions outside real windows
+    return [m + shift for m in ionlist_mz]
+
+# run your scorer twice per scan: real ions vs decoy ions → compare distributions
+# choose score threshold where decoy pass-rate / real pass-rate ≈ desired FDR
+
+import os
+
+def extract_ionmasslist(ionmass_sheet, mass_col="mass"):
+    if isinstance(ionmass_sheet, (str, os.PathLike)):
+        ionmass_sheet = pd.read_csv(ionmass_sheet)  # or read_excel for .xlsx
+    df = ionmass_sheet.copy()
+    if mass_col not in df.columns:
+        for c in ("mass","mz","ion_mz","m/z"):
+            if c in df.columns: mass_col = c; break
+    return pd.to_numeric(df[mass_col], errors="coerce").dropna().tolist()
