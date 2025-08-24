@@ -6,6 +6,7 @@ import csv
 import mspvalidator_merger as validator
 import pandas as pd
 import re
+import json
 
 #fast converting fixed path
 converted_csv = r"C:\Users\Sakazuki\Desktop\Khoolab_2025data\U937cells_NG_new\ms2_U937_20250729_U937_ST1OE_NGneu.csv"
@@ -325,6 +326,173 @@ top = matched_df2.sort_values("ion score", ascending=False).head(50)
 #matched_df["passes_anchors"] = matched_df["anchors"] >= 2
 #matched_df["passes_anchors"].mean()  # fraction passing the gate
 
+
+
+#extra function to add intensity information back for later ML-based training
+def _intensity_from_logi1(logi1):
+    """
+    findingions returns log10(I + 1) for matches, and 1.0 for 'no hit'.
+    Recover I (approx) by I = 10**logi1 - 1 when logi1 > 1.0, else 0.
+    """
+    if logi1 is None or logi1 <= 1.0:
+        return 0.0
+    return float(10.0 ** float(logi1) - 1.0)
+
+def attach_ion_hits_with_intensity_on_matched(
+    matched_df: pd.DataFrame,
+    ion_df: pd.DataFrame | list | np.ndarray,
+    ppm_value: float = 20.0,
+    scan_col: str = "MS2scan_no",
+    ion_mass_col: str = "mass",
+    compute_peak_mz: bool = False,
+):
+    """
+    Append per-row JSON arrays of matched ion m/z and matched intensities (raw & rel),
+    and return a long (scan × ion) table with match flags and intensities.
+
+    Columns added to matched_df:
+      - ion hits m/z        (JSON array of matched ion masses from the ion list)
+      - ion hits intensity  (JSON array of raw intensities aligned to the above)
+      - ion hits logI       (JSON array of log10(I+1) aligned to the above)
+      - ion hits relI       (JSON array of intensity / basepeak aligned to the above)
+      (We leave your existing "ion score" / "ion hit count" columns untouched.)
+
+    Returns: updated_matched_df, long_df
+      long_df columns:
+        [MS2scan_no, ion_mz, matched, logI_plus1, intensity, rel_intensity, best_peak_mz (opt), ppm_error (opt)]
+    """
+    out = _coerce_peaks(matched_df.copy())
+    ionlist_mz, iondf_for_find, ion_mass_col = _prepare_ion_df(ion_df, mass_col=ion_mass_col)
+
+    long_rows = []
+
+    for idx, row in out.iterrows():
+        # Basepeak for relative intensity
+        peak_ints = np.asarray(row.get("peakintensity", []) if not isinstance(row.get("peakintensity"), str)
+                               else json.loads(row["peakintensity"]), dtype=float)
+        basepeak = float(peak_ints.max()) if peak_ints.size else 1.0
+
+        hits_out = findingions(row, iondf_for_find, ppm_value)
+        matched_mz = []
+        matched_I  = []
+        matched_logI = []
+        matched_relI = []
+
+        # Case A: findingions returns one entry per reference ion: (ion_mz, logI+1)
+        # We can still build a full long table (matched or not)
+        if hits_out and isinstance(hits_out[0], (list, tuple)) and len(hits_out) == len(ionlist_mz):
+            for (ion_mz, logi1), ref_mz in zip(hits_out, ionlist_mz):
+                matched = bool(logi1 > 1.0)
+                I = _intensity_from_logi1(logi1)
+                relI = I / basepeak if basepeak > 0 else 0.0
+
+                best_mz = np.nan
+                ppm_err = np.nan
+                if compute_peak_mz and matched:
+                    # Optional: compute best matched peak m/z & ppm via local search
+                    peaks = np.asarray(row["peaklist"], dtype=float)
+                    ints  = np.asarray(row["peakintensity"], dtype=float)
+                    tol = abs(ref_mz) * float(ppm_value) / 1e6
+                    mask = (np.abs(peaks - ref_mz) <= tol) if peaks.size == ints.size and peaks.size > 0 else np.zeros(0, dtype=bool)
+                    if np.any(mask):
+                        k = int(np.argmax(ints[mask]))
+                        best_mz = float(np.asarray(peaks[mask])[k])
+                        ppm_err = (best_mz - ref_mz) / ref_mz * 1e6
+
+                long_rows.append({
+                    scan_col: row[scan_col],
+                    "ion_mz": float(ref_mz),
+                    "matched": matched,
+                    "logI_plus1": float(logi1),
+                    "intensity": float(I),
+                    "rel_intensity": float(relI),
+                    "best_peak_mz": best_mz,
+                    "ppm_error": ppm_err,
+                })
+
+                if matched:
+                    matched_mz.append(ref_mz)
+                    matched_I.append(I)
+                    matched_logI.append(float(logi1))
+                    matched_relI.append(relI)
+
+        else:
+            # Case B: you passed through a matched-only list earlier.
+            # We'll still compute intensities by searching peaks within ppm for each matched ion.
+            # If hits_out looks like [mz,...] or [(mz,intensity),...], normalize to list of m/z:
+            if hits_out:
+                first = hits_out[0]
+                if isinstance(first, (list, tuple)):
+                    matched_only_mz = [float(m) for m, *_ in hits_out]
+                else:
+                    matched_only_mz = [float(m) for m in hits_out]
+            else:
+                matched_only_mz = []
+
+            peaks = np.asarray(row["peaklist"], dtype=float)
+            ints  = np.asarray(row["peakintensity"], dtype=float)
+
+            # Build a full long row set (including non-matches) for ML
+            ion_set = set(np.round(matched_only_mz, 6))
+            for ref_mz in ionlist_mz:
+                matched = (np.round(ref_mz, 6) in ion_set)
+                best_mz = np.nan
+                I = 0.0
+                logi1 = 1.0
+                ppm_err = np.nan
+                if matched and peaks.size == ints.size and peaks.size > 0:
+                    tol = abs(ref_mz) * float(ppm_value) / 1e6
+                    mask = np.abs(peaks - ref_mz) <= tol
+                    if np.any(mask):
+                        k = int(np.argmax(ints[mask]))
+                        best_mz = float(np.asarray(peaks[mask])[k])
+                        I = float(np.asarray(ints[mask])[k])
+                        logi1 = float(np.log10(I + 1.0))
+                        ppm_err = (best_mz - ref_mz) / ref_mz * 1e6
+                relI = I / basepeak if basepeak > 0 else 0.0
+
+                long_rows.append({
+                    scan_col: row[scan_col],
+                    "ion_mz": float(ref_mz),
+                    "matched": matched,
+                    "logI_plus1": float(logi1),
+                    "intensity": float(I),
+                    "rel_intensity": float(relI),
+                    "best_peak_mz": best_mz,
+                    "ppm_error": ppm_err,
+                })
+
+                if matched:
+                    matched_mz.append(ref_mz)
+                    matched_I.append(I)
+                    matched_logI.append(logi1)
+                    matched_relI.append(relI)
+
+        # Store JSON arrays (compact & lossless alignment)
+        out.at[idx, "ion hits m/z"]        = json.dumps([round(float(x), 6) for x in matched_mz])
+        out.at[idx, "ion hits intensity"]  = json.dumps([float(x) for x in matched_I])
+        out.at[idx, "ion hits logI"]       = json.dumps([float(x) for x in matched_logI])
+        out.at[idx, "ion hits relI"]       = json.dumps([float(x) for x in matched_relI])
+
+    long_df = pd.DataFrame(long_rows, columns=[
+        scan_col, "ion_mz", "matched", "logI_plus1", "intensity", "rel_intensity",
+        "best_peak_mz", "ppm_error"
+    ])
+    return out, long_df
+
+
+matched_df3, ion_long = attach_ion_hits_with_intensity_on_matched(
+    matched_df2,
+    ion_df,                   # DataFrame or list/array
+    ppm_value=20.0,
+    scan_col="MS2scan_no",
+    ion_mass_col="mass",
+    compute_peak_mz=False     # set True if you want best_peak_mz + ppm_error (slower)
+)
+
+# Save both for inspection / ML
+matched_df3.to_csv("pseudolabel_with_intensities.csv", index=False)
+ion_long.to_csv("ion_hits_long_with_intensity.csv", index=False)
 
 
 #v20250815 we have old version to use
@@ -999,7 +1167,7 @@ def score_counter(hits_mz, ionlist_mz):
     return len(hits_mz) / max(1, len(ionlist_mz))
 
 #2) Trim the denominator (don’t penalize with rarely observed ions)
-curated = ion_df.query("mass >= 150 & mass <= 2000")  # plus your own whitelist/blacklist
+#curated = ion_df.query("mass >= 150 & mass <= 2000")  # plus your own whitelist/blacklist
 # Use `curated` for scoring, keep full list only for logs
 
 

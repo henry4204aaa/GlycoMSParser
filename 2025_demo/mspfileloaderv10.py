@@ -1,6 +1,6 @@
 import os
-version = "0.991"
-last_update = 20250417
+version = "0.992"
+last_update = 20250824
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -19,6 +19,8 @@ import pandas as pd
 import platform
 
 # v1.00: Add Glypick-like autoannotation back (need to change UI)
+# v0.993: able to apply pseudolabeling function (functional but may have bugs)
+# v0.992: Link to pseudolabeling function
 # v0.991: Make the software functional to work on MacOS
 # v0.99: demo version before cleaning code
 # v0.91: ML added. Lacking combining data and include "Non-glycan labels for training"
@@ -102,35 +104,298 @@ class AppLogger:
 
 logger = AppLogger()
 
+#20250822 replace composition window with pseudolabel window
+# --- Pseudo-Labeling Setup window (replaces the old GlycanCompositionWindow) ---
 
-class GlycanCompositionWindow(tk.Toplevel):
-    def __init__(self, master, on_submit):
+class PseudoLabelingSetupWindow(tk.Toplevel):
+    """
+    Edit in-silico generation flags and preview essential metadata.
+    - Defaults injected via `default_flags` (dict copied before editing)
+    - Read-only metadata summary (Glycan Type / Charge / Derivatization)
+    - Save/Load flags presets (JSON)
+    - Calls `on_submit({"flags": ..., "metadata": {...}})` on Generate
+    """
+    def __init__(self, master, meta_json_path=None, meta_prefill=None, default_flags=None, on_submit=None):
+
         super().__init__(master)
-        self.title("Define Glycan Composition")
-        self.geometry("350x300")
-        self.resizable(False, False)
-        self.on_submit = on_submit
+        self.title("Pseudo-Labeling Setup")
+        self.geometry("620x640")
+        self.resizable(True, True)
 
-        self.composition_fields = {
-            "Hex": tk.IntVar(value=0),
-            "HexNAc": tk.IntVar(value=0),
-            "Fuc": tk.IntVar(value=0),
-            "NeuAc": tk.IntVar(value=0),
-            "NeuGc": tk.IntVar(value=0),
-            "KDN": tk.IntVar(value=0)
+        self.meta_json_path = meta_json_path
+        self.on_submit = on_submit
+        self.flags = dict(default_flags or {})  # shallow copy; safe to mutate locally
+
+        """
+        # --- Metadata summary (read-only) ---
+        meta_frame = ttk.LabelFrame(self, text="Metadata Summary")
+        meta_frame.pack(fill="x", padx=12, pady=(12, 6))
+        self.meta_vars = {
+            "Glycan Type": tk.StringVar(value=""),
+            "Mass Analyzer charge mode": tk.StringVar(value=""),
+            "Derivatization Type": tk.StringVar(value=""),
+        }
+        #debug lines
+        print("[meta] GUI vars:", {k: v.get() for k, v in self.meta_vars.items()})
+        # 1) prefill from dict if provided
+        if meta_prefill:
+            self.meta_vars["Glycan Type"].set(meta_prefill.get("Glycan Type", ""))
+            self.meta_vars["Mass Analyzer charge mode"].set(meta_prefill.get("Mass Analyzer charge mode", ""))
+            self.meta_vars["Derivatization Type"].set(meta_prefill.get("Derivatization Type", ""))
+
+        # 2) then, if a path is given, try to read/overwrite from file
+        if self.meta_json_path and os.path.exists(self.meta_json_path):
+            try:
+                with open(self.meta_json_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                # only set if key exists, to avoid wiping prefill with blanks
+                if "Glycan Type" in meta:
+                    self.meta_vars["Glycan Type"].set(meta["Glycan Type"])
+                if "Mass Analyzer charge mode" in meta:
+                    self.meta_vars["Mass Analyzer charge mode"].set(meta["Mass Analyzer charge mode"])
+                if "Derivatization Type" in meta:
+                    self.meta_vars["Derivatization Type"].set(meta["Derivatization Type"])
+            except Exception as e:
+                messagebox.showwarning("Metadata", f"Could not read metadata:\n{self.meta_json_path}\n\n{e}")
+        r = 0
+        for label, var in self.meta_vars.items():
+            ttk.Label(meta_frame, text=f"{label}:").grid(row=r, column=0, sticky="w", padx=10, pady=4)
+            ttk.Label(meta_frame, textvariable=var).grid(row=r, column=1, sticky="w", padx=8, pady=4)
+            r += 1
+        """
+        # --- Metadata (editable) ---
+        meta_frame = ttk.LabelFrame(self, text="Metadata (can override here)")
+        meta_frame.pack(fill="x", padx=12, pady=(12, 6))
+
+        # choices (adjust if you have more)
+        GLYCAN_CHOICES = ["N", "O"]
+        CHARGE_CHOICES = ["+", "-"]
+        DERIV_CHOICES  = ["PerMe", "PerMe(Freeend)", "None"]
+
+        # hold current + original for a Reset action
+        self.meta_vars = {
+            "Glycan Type": tk.StringVar(value=""),
+            "Mass Analyzer charge mode": tk.StringVar(value=""),
+            "Derivatization Type": tk.StringVar(value=""),
+        }
+        self._meta_original = {"Glycan Type":"", "Mass Analyzer charge mode":"", "Derivatization Type":""}
+
+        # 1) prefill from dict if provided (preferred)
+        if meta_prefill:
+            self.meta_vars["Glycan Type"].set(meta_prefill.get("Glycan Type", ""))
+            self.meta_vars["Mass Analyzer charge mode"].set(meta_prefill.get("Mass Analyzer charge mode", ""))
+            self.meta_vars["Derivatization Type"].set(meta_prefill.get("Derivatization Type", ""))
+        for k in self._meta_original:
+            self._meta_original[k] = self.meta_vars[k].get()
+
+        # render editable controls
+        r = 0
+        ttk.Label(meta_frame, text="Glycan Type:").grid(row=r, column=0, sticky="w", padx=10, pady=4)
+        ttk.Combobox(meta_frame, state="readonly", width=10,
+                    values=["N", "O"],
+                    textvariable=self.meta_vars["Glycan Type"]).grid(row=r, column=1, sticky="w", padx=8, pady=4)
+        r += 1
+
+        ttk.Label(meta_frame, text="Mass Analyzer charge mode:").grid(row=r, column=0, sticky="w", padx=10, pady=4)
+        ttk.Combobox(meta_frame, state="readonly", width=10,
+                    values=["+", "-"],
+                    textvariable=self.meta_vars["Mass Analyzer charge mode"]).grid(row=r, column=1, sticky="w", padx=8, pady=4)
+        r += 1
+
+        ttk.Label(meta_frame, text="Derivatization Type:").grid(row=r, column=0, sticky="w", padx=10, pady=4)
+        ttk.Combobox(meta_frame, state="readonly", width=20,
+                    values=["PerMe", "PerMe(Freeend)", "PerMe(Reduced)", "None"],
+                    textvariable=self.meta_vars["Derivatization Type"]).grid(row=r, column=1, sticky="w", padx=8, pady=4)
+        """
+        # 2) then, if a path is given, try to read/overwrite from file (only if keys exist)
+        file_meta = None
+        if self.meta_json_path and os.path.exists(self.meta_json_path):
+            try:
+                with open(self.meta_json_path, "r", encoding="utf-8") as f:
+                    file_meta = json.load(f)
+                if "Glycan Type" in file_meta:
+                    self.meta_vars["Glycan Type"].set(file_meta["Glycan Type"])
+                if "Mass Analyzer charge mode" in file_meta:
+                    self.meta_vars["Mass Analyzer charge mode"].set(file_meta["Mass Analyzer charge mode"])
+                if "Derivatization Type" in file_meta:
+                    self.meta_vars["Derivatization Type"].set(file_meta["Derivatization Type"])
+            except Exception as e:
+                messagebox.showwarning("Metadata", f"Could not read metadata:\n{self.meta_json_path}\n\n{e}"
+        """
+        # tiny reset link
+        def _reset_meta():
+            for k, v in self._meta_original.items():
+                self.meta_vars[k].set(v)
+
+        ttk.Button(meta_frame, text="Reset from file", command=_reset_meta).grid(row=0, column=2, rowspan=3, padx=8)
+
+        # --- Flag editor (selected subset; excludes termi_comp/internal_comp) ---
+        flags_frame = ttk.LabelFrame(self, text="In-Silico Generation Flags")
+        flags_frame.pack(fill="both", expand=True, padx=12, pady=6)
+
+        flag_spec = {
+            # monitoring / flow
+            "debug": ("bool", None),
+            "dev": ("bool", None),
+            "force_exit": ("bool", None),
+            # composition options
+            "alphagal_like": ("bool", None),
+            "allowldnc": ("bool", None),
+            "allowleby": ("bool", None),
+            "allow5ac": ("bool", None),
+            "allow5gc": ("bool", None),
+            "allowkdn": ("bool", None),
+            "allowfuc": ("bool", None),
+            "allowpsa": ("int", (0, 3)),
+            "allowldnf": ("bool", None),
+            # iteration logic
+            "arm_count": ("int", (0, 8)),
+            "internal_minrep": ("int", (0, 6)),
+            "internal_maxrep": ("int", (0, 10)),
+            "topology": ("bool", None),
+            # core flags (NG)
+            "corefuc": ("bool", None),
+            "bicorefuc": ("bool", None),
+            "highman": ("bool", None),
+            "perman": ("bool", None),
+            "hybrid": ("bool", None),  # note: hybrid components are derived later, not edited here
+            # optional composition check
+            "compcheck": ("bool", None),
+            "Hex_range": ("range", (0, 20)),
+            "HexNAc_range": ("range", (0, 20)),
+            "Neu5Ac_range": ("range", (0, 10)),
+            "Neu5Gc_range": ("range", (0, 10)),
+            "KDN_range": ("range", (0, 10)),
+            "Fucose_range": ("range", (0, 10)),
         }
 
-        row = 0
-        for comp, var in self.composition_fields.items():
-            ttk.Label(self, text=f"Max {comp}:").grid(row=row, column=0, padx=10, pady=5, sticky="w")
-            ttk.Entry(self, textvariable=var, width=10).grid(row=row, column=1, padx=10, pady=5)
-            row += 1
+        self.flag_vars = {}
 
-        ttk.Button(self, text="Generate & Assign", command=self.submit).grid(row=row, column=0, columnspan=2, pady=10)
+        left = ttk.Frame(flags_frame)
+        right = ttk.Frame(flags_frame)
+        left.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=8)
+        right.pack(side="left", fill="both", expand=True, padx=(5, 10), pady=8)
+
+        def _coerce_int_like(val, default=0):
+            return int(val) if isinstance(val, (int, float, str)) and str(val).strip() != "" else int(default)
+
+        def add_bool(parent, key, row):
+            var = tk.BooleanVar(value=bool(self.flags.get(key, False)))
+            ttk.Checkbutton(parent, text=key, variable=var).grid(row=row, column=0, sticky="w", pady=3)
+            self.flag_vars[key] = var
+            if key == "hybrid":
+                ttk.Label(parent, text="(components auto-filled on submit)").grid(row=row, column=1, sticky="w")
+
+        def add_int(parent, key, row, lo, hi):
+            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
+            var = tk.IntVar(value=_coerce_int_like(self.flags.get(key, 0), 0))
+            ttk.Spinbox(parent, from_=lo, to=hi, textvariable=var, width=6).grid(row=row, column=1, sticky="w", padx=6)
+            self.flag_vars[key] = var
+
+        def add_range(parent, key, row, lo, hi):
+            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
+            default = self.flags.get(key, [0, 0])
+            vmin = tk.IntVar(value=_coerce_int_like(default[0] if isinstance(default, (list, tuple)) else 0, 0))
+            vmax = tk.IntVar(value=_coerce_int_like(default[1] if isinstance(default, (list, tuple)) else 0, 0))
+            wrap = ttk.Frame(parent)
+            wrap.grid(row=row, column=1, sticky="w")
+            ttk.Spinbox(wrap, from_=lo, to=hi, textvariable=vmin, width=5).pack(side="left")
+            ttk.Label(wrap, text=" to ").pack(side="left")
+            ttk.Spinbox(wrap, from_=lo, to=hi, textvariable=vmax, width=5).pack(side="left")
+            self.flag_vars[key] = (vmin, vmax)
+
+        keys = list(flag_spec.keys())
+        half = (len(keys) + 1) // 2
+        left_keys, right_keys = keys[:half], keys[half:]
+
+        def render_column(parent, keys_subset):
+            r = 0
+            for k in keys_subset:
+                ftype, extra = flag_spec[k]
+                if ftype == "bool":
+                    add_bool(parent, k, r)
+                elif ftype == "int":
+                    lo, hi = extra
+                    add_int(parent, k, r, lo, hi)
+                elif ftype == "range":
+                    lo, hi = extra
+                    add_range(parent, k, r, lo, hi)
+                r += 1
+
+        render_column(left, left_keys)
+        render_column(right, right_keys)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=12, pady=(6, 12))
+        ttk.Button(btns, text="Load Flags…", command=self.load_flags).pack(side="left", padx=4)
+        ttk.Button(btns, text="Save Flags…", command=self.save_flags).pack(side="left", padx=4)
+        ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(btns, text="Generate In-Silico CSV", command=self.submit).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=4)
+
+    def collect_flags(self):
+        out = {}
+        for k, v in self.flag_vars.items():
+            if isinstance(v, tuple):
+                vmin, vmax = v
+                out[k] = [int(vmin.get()), int(vmax.get())]
+            elif isinstance(v, tk.BooleanVar):
+                out[k] = bool(v.get())
+            else:
+                out[k] = int(v.get())
+        return out
+
+    def load_flags(self):
+        path = filedialog.askopenfilename(title="Load Flags JSON", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k, v in data.items():
+                if k not in self.flag_vars:
+                    continue
+                w = self.flag_vars[k]
+                if isinstance(w, tuple):
+                    w[0].set(int(v[0] if isinstance(v, (list, tuple)) else 0))
+                    w[1].set(int(v[1] if isinstance(v, (list, tuple)) else 0))
+                elif isinstance(w, tk.BooleanVar):
+                    w.set(bool(v))
+                else:
+                    w.set(int(v))
+            messagebox.showinfo("Flags Loaded", f"Loaded: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Load Failed", str(e))
+
+    def save_flags(self):
+        path = filedialog.asksaveasfilename(title="Save Flags JSON",
+                                            defaultextension=".json",
+                                            filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.collect_flags(), f, indent=2)
+            messagebox.showinfo("Saved", f"Saved: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Save Failed", str(e))
 
     def submit(self):
-        config = {k: v.get() for k, v in self.composition_fields.items()}
-        self.on_submit(config)
+        flags = self.collect_flags()
+
+        # collect editable metadata (overrides)
+        meta = {
+            "Glycan Type": self.meta_vars["Glycan Type"].get(),
+            "Mass Analyzer charge mode": self.meta_vars["Mass Analyzer charge mode"].get(),
+            "Derivatization Type": self.meta_vars["Derivatization Type"].get(),
+            "_meta_json": self.meta_json_path or "",
+        }
+        # mark whether anything was changed relative to the file/original values
+        meta_changed = any(self.meta_vars[k].get() != self._meta_original.get(k, "") for k in self._meta_original)
+        meta["_overrides_applied"] = bool(meta_changed)
+
+        if self.on_submit:
+            self.on_submit({"flags": flags, "metadata": meta})
         self.destroy()
 
 #metadata class 
@@ -589,6 +854,134 @@ def on_batch_conversion_complete(converted_raws):
     
     launch_metadata_for_all(converted_raws)
 
+#added for pseudolabeling
+from pathlib import Path
+
+# Only the essentials are required; Derivatization may be absent in older files.
+REQUIRED_META_KEYS = ("Glycan Type", "Mass Analyzer charge mode")
+
+def _is_metadata_dict(d: dict) -> bool:
+    return isinstance(d, dict) and all(k in d for k in REQUIRED_META_KEYS)
+
+def _load_json_safely(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _score_metadata_candidate(meta: dict, sample_name: str, csv_path: str | None) -> int:
+    """Content-based score: does this metadata look like it belongs to the selected sample?"""
+    sample_tok = (sample_name or "").lower()
+    csv_tok = ""
+    if csv_path:
+        csv_tok = Path(csv_path).stem.lower()
+        if csv_tok.endswith(".raw"):  # normalize "...raw.csv" stems
+            csv_tok = csv_tok[:-4]
+    tokens = []
+    tokens.append(os.path.basename((meta.get("Raw filename") or "")).lower())
+    tokens.append(os.path.basename((meta.get("Original raw file path") or "")).lower())
+    tokens.append((meta.get("Experiment Title") or "").lower())
+
+    score = 0
+    for t in tokens:
+        if not t:
+            continue
+        if sample_tok and sample_tok in t:
+            score += 1
+        if csv_tok and csv_tok in t:
+            score += 1
+    return score
+
+
+def _choose_metadata_dialog(parent, candidates):
+    """
+    candidates: list of tuples (path, meta_dict, score)
+    Returns: (path, meta_dict) or (None, None) if cancelled.
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    win = tk.Toplevel(parent)
+    win.title("Select metadata JSON for this sample")
+    win.transient(parent)
+    win.grab_set()
+
+    cols = ("file", "raw", "exp", "score")
+    tree = ttk.Treeview(win, columns=cols, show="headings", height=min(10, len(candidates)))
+    for c, w in zip(cols, (36, 20, 26, 6)):
+        tree.heading(c, text=c.upper())
+        tree.column(c, width=12 * w, anchor="w")
+    for p, meta, s in candidates:
+        tree.insert("", "end", values=(
+            os.path.basename(p),
+            os.path.basename(meta.get("Raw filename") or ""),
+            (meta.get("Experiment Title") or ""),
+            s,
+        ))
+    tree.pack(fill="both", expand=True, padx=10, pady=8)
+
+    sel = {"idx": None}
+    def _ok():
+        cur = tree.selection()
+        if cur:
+            sel["idx"] = tree.index(cur[0])
+        win.destroy()
+
+    btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=(0,10))
+    ttk.Button(btns, text="OK", command=_ok).pack(side="right", padx=6)
+    ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+
+    win.wait_window()
+    if sel["idx"] is None:
+        return None, None
+    p, meta, _ = candidates[sel["idx"]]
+    return p, meta
+
+def _resolve_metadata_for_sample(files: dict, sample_name: str, csv_path: str | None):
+    """
+    Returns: (meta_path, meta_dict) or (None, None)
+    Strategy:
+      1) explicit files["metadata"] if it validates
+      2) if files["json"] looks like a metadata JSON (.raw.json) → validate & use
+      3) if files["json"] is a method JSON → follow samples[sample]["metadata"] relative to method file
+      4) else → None, caller decides whether to prompt
+    """
+    # 1) explicit pointer
+    p = files.get("metadata")
+    d = _load_json_safely(p)
+    if _is_metadata_dict(d):
+        return p, d
+
+    # 2) sometimes 'json' already points at the metadata (.raw.json)
+    j = files.get("json")
+    if isinstance(j, str) and j.lower().endswith(".raw.json"):
+        d2 = _load_json_safely(j)
+        if _is_metadata_dict(d2):
+            return j, d2
+
+    # 3) method file → per-sample 'metadata' entry
+    md = _load_json_safely(j)
+    if isinstance(md, dict) and "samples" in md:
+        entry = md["samples"].get(sample_name)
+        if entry is None:
+            # tolerant case-insensitive match if the tree cleaned the name
+            lowmap = {k.lower(): k for k in md["samples"].keys()}
+            k2 = lowmap.get((sample_name or "").lower())
+            entry = md["samples"].get(k2) if k2 else None
+
+        if isinstance(entry, dict):
+            rel_meta = entry.get("metadata") or entry.get("json")  # tolerate older key
+            if rel_meta:
+                base = os.path.dirname(j) if j else ""
+                cand = rel_meta if os.path.isabs(rel_meta) else os.path.normpath(os.path.join(base, rel_meta))
+                d3 = _load_json_safely(cand)
+                if _is_metadata_dict(d3):
+                    return cand, d3
+
+    # 4) give up (launcher will optionally ask user once)
+    return None, None
+
 
 def open_prepare_dataset_window():
     subwin = tk.Toplevel(root)
@@ -667,10 +1060,10 @@ def open_prepare_dataset_window():
                 has_json = bool(files.get("json"))
 
                 # Decide how to display the sample label
-                if (exp_title, sample_name) in validation_failed_samples:
-                    sample_display = f"⛔ Sample: {sample_display} (validation failed)"
                 if (exp_title, sample_name) in linked_validated_samples:
                     sample_display = f"✅ Sample: {sample_name}"
+                elif (exp_title, sample_name) in validation_failed_samples:
+                    sample_display = f"⛔ Sample: {sample_name} (validation failed)"
                 elif has_csv and has_excel and has_json:
                     sample_display = f"⚠️ Sample: {sample_name} (unvalidated)"
                 elif not has_json:
@@ -680,9 +1073,14 @@ def open_prepare_dataset_window():
 
                 sample_node = tree.insert(exp_node, "end", text=sample_display, open=True)
 
-                for ftype in ["csv", "excel", "json"]:
+                for ftype in ["csv", "excel", "json", "insilico_csv"]:
                     if files.get(ftype):
-                        label = ftype.upper() if ftype != "json" else "Metadata"
+                        if ftype == "json":
+                            label = "Metadata"
+                        elif ftype == "insilico_csv":
+                            label = "In-silico CSV"
+                        else:
+                            label = ftype.upper()
                         tree.insert(sample_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
     # --- statistics ---
     def show_experiment_summary(exp_name):
@@ -1414,63 +1812,122 @@ def open_prepare_dataset_window():
 
         return None
 
-    #-- pseudo labeling --#
+    # -- pseudo labeling --
     def launch_pseudo_labeling():
-        print("[debug] only work on single file selection?")
+        import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
+        from datetime import datetime
+
         sel = tree.selection()
-        if sel:
-            print(f"selected {sel}")
-            sample_id = sel[0]
-            exp_id = tree.parent(sample_id)
-            sample_name = clean_sample_name(tree.item(sel[0], "text"))
-            print(sample_name)
-            debugaaaaa = []
-            for exp_title, exp_data in experiment_projects.items():
-                for sample_name, files in exp_data.get("samples", {}).items():
-                    print(f"[debug] files are {files} make sure no multiple sample can be selected once")
-                    debugaaaaa.append(files.get("csv"))
-                    debugaaaaa.append(files.get("json"))
-                    csv = files.get("csv")
-                    meta = files.get("json")
+        if not sel:
+            messagebox.showwarning("No Selection", "Select a sample in the tree first.")
+            return
 
-        print(f"debug get file {debugaaaaa}")
-           # selected_id = sel[0]
-            #node_type = tree.item(selected_id, "values")[0]  # type info
-            #sample_id = selected_id if node_type == "sample" else tree.parent(selected_id)
-            #exp_id = tree.parent(sample_id)
-            #exp_name = tree.item(exp_id, "text")
-            #sample_name = tree.item(sample_id, "text")
-            #files = experiment_projects[exp_name]["samples"][sample_name]
-            #csv_path = files.get("csv")
-            #if not csv_path:
-            #    messagebox.showerror("Error", "Sample is missing required csv.")
-            #    return
-            #print(f"csv selected: {csv_path}")
-        #sample_id = tree.parent(item_id)
-        #exp_id = tree.parent(sample_id)
-        #sample_id = sel[0]
-        #print(f"sample_id is {sample_id}")
-        #exp_id = tree.parent(sample_id)
-        #sample_name = clean_sample_name(tree.item(sel[0], "text"))
-        #sample_name = clean_sample_name(sample_name)
-        #if sample_name not in experiment_projects[exp_name]["samples"]:
-        #    logger.log(f"[ERROR] Cleaned sample name '{sample_name}' not found under '{exp_name}'")
-        #    messagebox.showerror("Invalid Sample", f"Sample not found in experiment: {sample_name}")
-        #    return
-        #sample = experiment_projects[exp_name]["samples"][sample_name]
-        #selected_csv = get_selected_csv(tree)
-        #if not sample["csv"]:#selected_csv:
-        #    messagebox.showwarning("No CSV File Selected", "Please select a CSV file in the tree before continuing.")
-        #    return
-        #print(f"seleceted csv is {selected_csv}")
-        def on_composition_ready(config):
-            import mspcomposition as mspcomp
-            mspcomp.fit_composition(config, csv, meta, debug=True)
+        node = sel[0]
+        text = tree.item(node, "text")
 
-            #messagebox.showinfo("Done", "Pseudo-labels have been assigned and glycan list generated.")
-            refresh_tree()
+        # If user clicked a file row like "CSV: ..." or "Metadata: ...", go up to the sample row
+        if ":" in text:
+            node = tree.parent(node)
 
-        GlycanCompositionWindow(root, on_submit=on_composition_ready)
+        sample_name = clean_sample_name(tree.item(node, "text"))
+        exp_node = tree.parent(node)
+        if not exp_node:
+            messagebox.showerror("Invalid Selection", "Please select a sample under an experiment.")
+            return
+
+        exp_text = tree.item(exp_node, "text")
+        exp_name = exp_text.replace("Experiment: ", "").split(" (")[0].strip()
+
+        files = experiment_projects.get(exp_name, {}).get("samples", {}).get(sample_name, {})
+        csv_path = files.get("csv")
+        meta_path = files.get("json")
+
+        if not csv_path or not meta_path:
+            messagebox.showerror("Missing Files", "This sample must have both CSV and Metadata (.json) linked.")
+            return
+        
+        print("[launch] files:", files)
+        print("[launch] using meta:", meta_path)
+
+        # auto-resolve without prompting
+        meta_path, meta_dict = _resolve_metadata_for_sample(files, sample_name, csv_path)
+
+        if meta_path and meta_dict:
+            files["metadata"] = meta_path  # cache for next time
+        else:
+            picked = filedialog.askopenfilename(
+                title="Select metadata JSON (must contain Glycan Type / Charge; Derivatization optional)",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if picked:
+                d = _load_json_safely(picked)
+                if _is_metadata_dict(d):
+                    meta_path, meta_dict = picked, d
+                    files["metadata"] = picked
+                else:
+                    messagebox.showwarning("Metadata not valid",
+                                        "Selected file lacks Glycan Type / Mass Analyzer charge mode.")
+                    meta_path, meta_dict = None, None
+            else:
+                messagebox.showwarning(
+                    "Metadata not found",
+                    "Could not locate metadata for this sample. You can proceed, but defaults may be wrong."
+                )
+
+        print("[launch] using meta (final):", meta_path)
+
+
+
+        def on_submit(payload):
+            # 1) Start from NG_flags defaults, overlay UI edits
+            flags = dict(compv4.NG_flags)
+            flags.update(payload.get("flags", {}))
+
+            # 2) Determine glycan type from metadata (prefer window metadata; fallback to file)
+            glycan_type = (payload["metadata"].get("Glycan Type") or "").strip().upper()
+            charge_mode = payload["metadata"].get("Mass Analyzer charge mode")  # if needed downstream
+            deriv_type  = payload["metadata"].get("Derivatization Type")        # if needed downstream
+            if payload["metadata"].get("_overrides_applied"):
+                logger.log("[WARN] Using metadata overrides from UI; consider updating the metadata JSON.")
+            # 3) Choose output path
+            outdir = filedialog.askdirectory(title="Select output folder for in-silico CSV")
+            if not outdir:
+                return
+            outname = f"{sample_name}_insilico_{datetime.now().strftime('%Y%m%d')}.csv"
+            outpath = os.path.join(outdir, outname)
+
+            try:
+                # 4) Launch NG or OG generator (no hybrid component dicts yet)
+                if glycan_type == "N":
+                    compv4.NGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
+                elif glycan_type == "O":
+                    # OGbranch: we can extend with coretype/keep_topology later
+                    compv4.OGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
+                else:
+                    messagebox.showwarning("Glycan Type Missing",
+                                        "Metadata lacks a valid 'Glycan Type' (expected 'N' or 'O').")
+                    return
+
+                files["insilico_csv"] = outpath
+                messagebox.showinfo("In-silico CSV generated", f"Saved and linked:\n{outpath}")
+                refresh_tree()
+                # (Optional) attach outpath to the sample record here so the next step can find it
+                # files["insilico_csv"] = outpath
+                refresh_tree()
+
+            except Exception as e:
+                traceback.print_exc()
+                messagebox.showerror("Generation failed", str(e))
+
+        # Open the setup window with the resolved metadata
+        PseudoLabelingSetupWindow(
+            root,
+            meta_json_path=meta_path,        # may be None (window handles it)
+            meta_prefill=meta_dict or {},    # <-- NEW: pass the already-parsed dict
+            default_flags=compv4.NG_flags,
+            on_submit=on_submit
+        )
+
 
 
     # --- Button panel ---

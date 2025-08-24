@@ -972,45 +972,49 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
 
 #OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4], debug=True, filename="testifbreakOG_delaftertest")
 
-NGlaunch(user_flags={
-        #monitoring flags
-         "debug": True, 
-         "dev": False,
-         "force_exit": False,
-        #common settings for terminal and internal permutations
-         "alphagal_like":   False, #Human
-         "allowldnc":       False, #Not marked
-         "allowleby":       False, #Not marked, fucose amount <2
-         "allow5ac":        True, 
-         "allow5gc":        False,#Not marked
-         "allowkdn":        False,#Human, not intestine
-         "allowfuc":        True,
-         "allowpsa":        0,
-         "allowldnf":       False,
-        #iteration logic flags
-         "arm_count":       4, #maximum 4 arms
-         "internal_minrep": 0,
-         "internal_maxrep": 1, #6 LacNAc max in MALDI
-         "topology":        False,
-        #core flags
-         "corefuc":         True,
-         "bicorefuc":       False,
-         "highman":         True,
-         "perman":          False,
-         "hybrid":          False,
-        #optional composition check
-        # "customboundary":  None, <- deactivated since we define range below
-         "compcheck":       True,
-         "Hex_range":       [2,12],
-         "HexNAc_range":    [2,10],
-         "Neu5Ac_range":    [0,4],
-         "Neu5Gc_range":    [0,0],
-         "KDN_range":       [0,0],
-         "Fucose_range":    [0,2],     
-        #hybrid NG arguments for calculating composition it's PLACEHOLDER 
-         "termi_comp":      None,
-         "internal_comp":   None,
-         }, filename="U937NG_fix")
+if __name__ == "__main__":
+    # DEV/TEST ONLY
+    
+    # OGlaunch(...) tests, etc.
+    NGlaunch(user_flags={
+            #monitoring flags
+            "debug": True, 
+            "dev": False,
+            "force_exit": False,
+            #common settings for terminal and internal permutations
+            "alphagal_like":   False, #Human
+            "allowldnc":       False, #Not marked
+            "allowleby":       False, #Not marked, fucose amount <2
+            "allow5ac":        True, 
+            "allow5gc":        False,#Not marked
+            "allowkdn":        False,#Human, not intestine
+            "allowfuc":        True,
+            "allowpsa":        0,
+            "allowldnf":       False,
+            #iteration logic flags
+            "arm_count":       4, #maximum 4 arms
+            "internal_minrep": 0,
+            "internal_maxrep": 1, #6 LacNAc max in MALDI
+            "topology":        False,
+            #core flags
+            "corefuc":         True,
+            "bicorefuc":       False,
+            "highman":         True,
+            "perman":          False,
+            "hybrid":          False,
+            #optional composition check
+            # "customboundary":  None, <- deactivated since we define range below
+            "compcheck":       True,
+            "Hex_range":       [2,12],
+            "HexNAc_range":    [2,10],
+            "Neu5Ac_range":    [0,4],
+            "Neu5Gc_range":    [0,0],
+            "KDN_range":       [0,0],
+            "Fucose_range":    [0,2],     
+            #hybrid NG arguments for calculating composition it's PLACEHOLDER 
+            "termi_comp":      None,
+            "internal_comp":   None,
+            }, filename="U937NG_fix")
 """
 """
 
