@@ -1,0 +1,15 @@
+Manual scans total: 189
+Manual scans in RAW candidates: 189
+Manual scans AFTER FILTERS: 164
+
+[Settings]
+ppm_window: 20.0
+score_min: 0.07
+big_mass_threshold: 2500.0
+isotope_salvage_enabled: True
+max_candidates_per_scan: 10
+
+[Cap Trim]
+trimmed_main_candidates: 0  (affected_scans=0)
+trimmed_override_candidates: 0  (affected_scans=0)
+trimmed_total: 0  (affected_scans_total=0)

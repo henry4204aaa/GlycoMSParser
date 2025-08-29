@@ -8,11 +8,6 @@ import pandas as pd
 import re
 import json
 
-#fast converting fixed path
-converted_csv = r"C:\Users\Sakazuki\Desktop\Khoolab_2025data\U937cells_NG_new\ms2_U937_20250729_U937_ST1OE_NGneu.csv"
-composition_list = r"G:\其他電腦\My Computer\GlycoMSParser\U937NG_fix.csv" #this is fault file, mass wrong  #fix wrong mass before adding comp list file
-ion_sheet = r"C:\Users\Sakazuki\Downloads\ionlist_from_zebrafish_NG.csv"
-
 #to get rid of warning
 def ppm(x): return x
 
@@ -122,7 +117,8 @@ def find_compositions_for_mass(
       - a callable: lambda theo: theo + <something>
     """
     # 1) Raw library masses → transformed masses
-    theo_raw = insilico_df[mass_col].to_numpy(dtype=float)
+    #theo_raw = insilico_df[mass_col].to_numpy(dtype=float)
+    theo_raw = insilico_sorted[mass_col].to_numpy(dtype=float)
     theo_x   = _apply_mass_transform(theo_raw, mass_transform)  # <-- THIS is theo_x
 
     # 2) Sort BY the transformed masses (needed for searchsorted)
@@ -185,10 +181,7 @@ def hits_to_legacy_list(hits: pd.DataFrame):
         for tup, tm, ppm in zip(comps, hits[tm_col], hits.get("ppm_error", [np.nan]*len(hits)))
     ]
 
-insilico_df = parse_composition(pd.read_csv(composition_list))
-# insilico_df is your new table
-# 0) Prepare library once
-lib = normalize_insilico(insilico_df)  # sorted by Mass
+
 
 # 1) For each row’s observed mass, collect all comp matches within ppm
 def collect_row_hits(row):
@@ -196,17 +189,14 @@ def collect_row_hits(row):
     hits = find_compositions_for_mass(x, lib, ppm=20.0, mass_transform="M+H")
     return hits_to_legacy_list(hits)  # or return the DataFrame itself if you prefer
 
-df = pd.read_csv(converted_csv, sep='\t') 
 
-df = df.copy()
-df["pseudo compositions"] = df["protonatedmass"].apply(lambda m: collect_row_hits({"protonatedmass": m}))
+
+
 # or, if you need speed and have many rows, iterate in vectorized batches or with itertuples
 
 # 2) Build matched_df
-matched_df = df[df["pseudo compositions"].map(bool)].copy().reset_index()
-print(matched_df.head())
-#matched_df.to_csv("U937NGST1OENGneu.csv")
 
+#matched_df.to_csv("U937NGST1OENGneu.csv")
 
 #dealing with ion list
 
@@ -298,27 +288,7 @@ def attach_ion_score_on_matched(
     return pd.concat([out, triples], axis=1)
 
 
-ion_df = extract_ionmasslist(pd.read_csv(ion_sheet))
 
-matched_df2 = attach_ion_score_on_matched(
-    matched_df,
-    ion_df,                 # DataFrame or list/array
-    ppm_value=20.0,
-    scan_col="MS2scan_no",
-    ion_mass_col="mass",
-)
-print(matched_df2.head())
-print("rows:", len(matched_df2))
-print("scans with ≥1 ion hit:", int((matched_df2["ion hit count"] > 0).sum()))
-print("median ion hit count:", matched_df2["ion hit count"].median())
-print("median ion score:", matched_df2["ion score"].median())
-
-
-matched_df2.to_csv("U937NGST1OENGneu_withzfion.csv", index=False)
-
-
-# top scans by ion score
-top = matched_df2.sort_values("ion score", ascending=False).head(50)
 
 # how many anchors in each scan (using your current hit list)
 #def parse_hits(s): return [float(x) for x in s.split(";") if x]
@@ -480,19 +450,57 @@ def attach_ion_hits_with_intensity_on_matched(
     ])
     return out, long_df
 
+#avoid call error from mspfileloaderv10.py
+if __name__ == "__main__":
+#fast converting fixed path
+    converted_csv = r"C:\Users\Sakazuki\Desktop\Khoolab_2025data\U937cells_NG_new\ms2_U937_20250729_U937_ST1OE_NGneu.csv"
+    composition_list = r"G:\其他電腦\My Computer\GlycoMSParser\U937NG_fix.csv" #this is fault file, mass wrong  #fix wrong mass before adding comp list file
+    ion_sheet = r"C:\Users\Sakazuki\Downloads\ionlist_from_zebrafish_NG.csv"
+    insilico_df = parse_composition(pd.read_csv(composition_list))
+# insilico_df is your new table
+# 0) Prepare library once
+    lib = normalize_insilico(insilico_df)  # sorted by Mass
+    df = pd.read_csv(converted_csv, sep='\t') 
+    df = df.copy()
+    df["pseudo compositions"] = df["protonatedmass"].apply(lambda m: collect_row_hits({"protonatedmass": m}))
+    matched_df = df[df["pseudo compositions"].map(bool)].copy().reset_index()
+    print(matched_df.head())
 
-matched_df3, ion_long = attach_ion_hits_with_intensity_on_matched(
-    matched_df2,
-    ion_df,                   # DataFrame or list/array
-    ppm_value=20.0,
-    scan_col="MS2scan_no",
-    ion_mass_col="mass",
-    compute_peak_mz=False     # set True if you want best_peak_mz + ppm_error (slower)
-)
+    ion_df = extract_ionmasslist(pd.read_csv(ion_sheet))
 
-# Save both for inspection / ML
-matched_df3.to_csv("pseudolabel_with_intensities.csv", index=False)
-ion_long.to_csv("ion_hits_long_with_intensity.csv", index=False)
+    matched_df2 = attach_ion_score_on_matched(
+        matched_df,
+        ion_df,                 # DataFrame or list/array
+        ppm_value=20.0,
+        scan_col="MS2scan_no",
+        ion_mass_col="mass",
+    )
+    print(matched_df2.head())
+    print("rows:", len(matched_df2))
+    print("scans with ≥1 ion hit:", int((matched_df2["ion hit count"] > 0).sum()))
+    print("median ion hit count:", matched_df2["ion hit count"].median())
+    print("median ion score:", matched_df2["ion score"].median())
+
+
+    matched_df2.to_csv("U937NGST1OENGneu_withzfion.csv", index=False)
+
+
+    # top scans by ion score
+    top = matched_df2.sort_values("ion score", ascending=False).head(50)
+
+    matched_df3, ion_long = attach_ion_hits_with_intensity_on_matched(
+        matched_df2,
+        ion_df,                   # DataFrame or list/array
+        ppm_value=20.0,
+        scan_col="MS2scan_no",
+        ion_mass_col="mass",
+        compute_peak_mz=False     # set True if you want best_peak_mz + ppm_error (slower)
+    )
+
+    # Save both for inspection / ML
+    matched_df3.to_csv("pseudolabel_with_intensities.csv", index=False)
+    ion_long.to_csv("ion_hits_long_with_intensity.csv", index=False)
+
 
 
 #v20250815 we have old version to use

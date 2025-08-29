@@ -1,0 +1,12 @@
+[2025-04-14 18:31:16] [Metadata] Output will be saved to: F:/
+[2025-04-14 18:31:27] Metadata saved to F:/guitest_20250414demo_20250414_zf_sPerMeNG_brain.json
+[2025-04-14 18:31:27] Renamed ms2tmp_zf_sPerMeNG_brain.csv → F:/ms2_guitest_20250414demo_20250414_zf_sPerMeNG_brain.csv and move to F:/
+[2025-04-14 18:31:27] Renamed ms3tmp_zf_sPerMeNG_brain.csv → F:/ms3_guitest_20250414demo_20250414_zf_sPerMeNG_brain.csv and move to F:/
+[2025-04-14 18:31:27] Saved log to: F:/guitest_20250414demo_20250414_zf_sPerMeNG_brain.log
+[2025-04-14 18:31:29] Confirmed metadata for F:/zf_sPerMeNG_brain.raw
+[2025-04-14 18:58:09] [Validation] CSV successful: F:/ms2_guitest_20250414demo_20250414_zf_sPerMeNG_brain.csv
+
+[2025-04-14 18:58:12] [Validation] Excel successful: F:/ms2_guitest_20250414demo_20250414_zf_sPerMeNG_brain.csv
+
+[2025-04-14 18:58:12] [Method] Per-sample method saved: F:/zf_sPerMeNG_brain.method.json
+[2025-04-14 18:58:20] [Method] Experiment method saved to: F:/guitest.exp.json

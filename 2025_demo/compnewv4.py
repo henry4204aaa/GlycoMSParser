@@ -28,9 +28,10 @@
 #--- able to write manuscript for this part ---
 #v1.0? for finished O-glycan
 #v1.1 for finished O-glycan integration with mspcomposition.py -> code will move there
-version = "1.0"
-last_update = 20250819
+version = "1.01"
+last_update = 20250825
 #version changelog:
+#v1.01: fix derivatization flags not passing issue
 #v1.0: 20250819 fix mass calc error
 #v0.48 export composition
 #v0.4 add fragment calculator beta (fixed for perMe, will need to link to metadata to get proper mass)
@@ -40,7 +41,61 @@ last_update = 20250819
 #compnew v2.py new file > find duplicate funtions removed in v2
 
 
-#from mspcomposition import precursormassv2
+
+# --- New: derivatization normalization helpers ---
+_DERIV_ALIASES = {
+    "perme": "PerMe",
+    "permethylation": "PerMe",
+    "reducedperme": "PerMe_reduced",
+    "reduced_permethylation": "PerMe_reduced",
+    "reduced": "PerMe_reduced",
+    "nonreduced": "PerMe",
+    "native": "Native",
+}
+
+# compnewv4.py — near _DERIV_ALIASES
+_DERIV_ALIASES.update({
+    "perme(reduced)": "PerMe_reduced",
+    "perme(freeend)": "PerMe",
+})
+
+def _normalize_derivatization(flags):
+    """Return (deri, reduced) normalized from various flag shapes."""
+    if flags is None:
+        flags = {}
+
+    # Accept several keys that might appear in GUI/metadata
+    raw = (
+        flags.get("derivatization")
+        or flags.get("derivatization_type")
+        or flags.get("Derivatization Type")
+        or flags.get("derivatizationType")
+        or ""
+    )
+    raw_norm = str(raw).strip().lower().replace(" ", "")
+    tag = _DERIV_ALIASES.get(raw_norm, None)
+
+    # Default to previous behavior if unset: PerMe with reduced=True
+    deri = "PerMe"
+    reduced = True
+
+    if tag == "PerMe":
+        deri, reduced = "PerMe", False
+    elif tag == "PerMe_reduced":
+        deri, reduced = "PerMe", True
+    elif tag == "Native":
+        deri, reduced = "Native", False  # adapt if you support Native masses
+
+    # Explicit boolean override wins if present
+    if "reduced" in flags:
+        try:
+            reduced = bool(flags["reduced"])
+        except Exception:
+            pass
+
+    return deri, reduced
+
+
 
 #N-glycan settings (need revision)
 NG_flags = {
@@ -84,6 +139,8 @@ NG_flags = {
          }
 #O-glycan will share a portion of N-glycan flags, thinking if I should mix them together or not
 
+
+
 #adapted, mind the deri and reduction status should be obtain from metadata, if no metadata exists, ask user to choose
 def precursormassv3(composition, deri="PerMe",reduced=False, debug=False): #general version
     a, b, c, d, e, f = composition[0], composition[1], composition[2], composition[3], composition[4], composition[5]
@@ -114,7 +171,16 @@ def error_watcher(errmsg):
 
 
 #20250808 add comp export
-def save_glycan_pseudocomp_to_csv(comps, filename=None, include_header=True):
+def save_glycan_pseudocomp_to_csv(
+    comps,
+    filename=None,
+    include_header=True,
+    derivatization="PerMe",
+    reduced=None,               # None means "use old default"
+):
+    #extra fix of deri flags and reduction 
+    if reduced is None:
+        reduced = True  # previous code acted as if reduced=True
     #20250815 fix header, should be in the order of HNSiaFMass, not Fuc in the first place
     headers = ["Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Fuc", "Mass"]
     if filename is None:
@@ -135,7 +201,7 @@ def save_glycan_pseudocomp_to_csv(comps, filename=None, include_header=True):
             f.write(",".join(headers) + "\n")
         for comp in sorted(flat_compositions):
             assert len(comp) == 6, f"Composition length error: {comp}"
-            mass = precursormassv3(comp, reduced= True)
+            mass = precursormassv3(comp, deri=derivatization, reduced=reduced)
             f.write(",".join(map(str, comp)) + f",{mass:.3f}\n")
             #f.write(",".join(map(str, comp)) + "\n")
 
@@ -456,12 +522,13 @@ def debug_preview(obj, limit=10, sort_if_set=True, random_sample=False, label="P
     #return "\n".join(str(item) for item in preview) #for printing in GUI in future
 
 #functions for N-glycan permutation settings (provide information for how the glycan should be like)
-def NGlaunch(user_flags=None, filename=None):
+def NGlaunch(user_flags=None, filename=None, debug = False):
     if filename is None:
         filename = input("[dev NGlaunch] Please enter filename:\n")
     flags = NG_flags.copy()
     if user_flags:
         flags.update(user_flags)
+    deri, reduced = _normalize_derivatization(user_flags or {})
     #suppose you finished updating the flags
     #generate terminal and internal permutations
     terminal_comb = terminal_NG(**select_flags(flags, 
@@ -497,13 +564,15 @@ def NGlaunch(user_flags=None, filename=None):
              print("[debug] Allow composition check by sugar unit numbers")
         checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
                                   flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
-        save_glycan_pseudocomp_to_csv(checked_final, filename=filename, include_header=True)
+        #save_glycan_pseudocomp_to_csv(checked_final, filename=filename, include_header=True)
+        save_glycan_pseudocomp_to_csv(checked_final,filename=filename,include_header=True,derivatization=deri,reduced=reduced) 
+
         #return checked_final, True
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
-        save_glycan_pseudocomp_to_csv(final_set, filename=filename, include_header=True)
-
+        #save_glycan_pseudocomp_to_csv(final_set, filename=filename, include_header=True)
+        save_glycan_pseudocomp_to_csv(final_set,filename=filename,include_header=True,derivatization=deri,reduced=reduced)
         #return final_set, False
     
 '''

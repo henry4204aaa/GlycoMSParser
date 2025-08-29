@@ -1,5 +1,5 @@
 import os
-version = "0.992"
+version = "0.9921"
 last_update = 20250824
 import msprawextractor as mspext
 import threading
@@ -17,7 +17,7 @@ import traceback
 import mspvalidator_merger as mspval
 import pandas as pd
 import platform
-
+import msp_insilicomarker_withGPT as marker
 # v1.00: Add Glypick-like autoannotation back (need to change UI)
 # v0.993: able to apply pseudolabeling function (functional but may have bugs)
 # v0.992: Link to pseudolabeling function
@@ -115,7 +115,10 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
     - Save/Load flags presets (JSON)
     - Calls `on_submit({"flags": ..., "metadata": {...}})` on Generate
     """
-    def __init__(self, master, meta_json_path=None, meta_prefill=None, default_flags=None, on_submit=None):
+    def __init__(self, master,
+             meta_json_path=None, meta_prefill=None, default_flags=None, on_submit=None,
+             on_generate=None, on_link_existing=None, on_attach_ionlist=None, on_start=None,
+             initial_insilico=None, initial_ionlist=None):
 
         super().__init__(master)
         self.title("Pseudo-Labeling Setup")
@@ -125,6 +128,12 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         self.meta_json_path = meta_json_path
         self.on_submit = on_submit
         self.flags = dict(default_flags or {})  # shallow copy; safe to mutate locally
+        self.on_generate = on_generate
+        self.on_link_existing = on_link_existing
+        self.on_attach_ionlist = on_attach_ionlist
+        self.on_start = on_start
+        self.insilico_path_var = tk.StringVar(value=initial_insilico or "")
+        self.ionlist_path_var  = tk.StringVar(value=initial_ionlist or "")
 
         """
         # --- Metadata summary (read-only) ---
@@ -170,7 +179,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         # choices (adjust if you have more)
         GLYCAN_CHOICES = ["N", "O"]
         CHARGE_CHOICES = ["+", "-"]
-        DERIV_CHOICES  = ["PerMe", "PerMe(Freeend)", "None"]
+        DERIV_CHOICES  = ["PerMe(Reduced)", "PerMe(Freeend)", "None"]
 
         # hold current + original for a Reset action
         self.meta_vars = {
@@ -324,7 +333,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         render_column(left, left_keys)
         render_column(right, right_keys)
-
+        """
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=12, pady=(6, 12))
         ttk.Button(btns, text="Load Flags…", command=self.load_flags).pack(side="left", padx=4)
@@ -332,6 +341,102 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(btns, text="Generate In-Silico CSV", command=self.submit).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=4)
+        """
+        # --- BELOW your metadata + flags UI ---
+
+        # Small panel to show current links (insilico / ion list)
+        links_frame = ttk.LabelFrame(self, text="Linked files (optional)")
+        links_frame.pack(fill="x", padx=12, pady=(6, 0))
+
+        self.insilico_path_var = tk.StringVar(value=initial_insilico or "")
+        self.ionlist_path_var  = tk.StringVar(value=initial_ionlist or "")
+
+        ttk.Label(links_frame, text="In-silico CSV:").grid(row=0, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(links_frame, textvariable=self.insilico_path_var).grid(row=0, column=1, sticky="w", padx=8, pady=4)
+
+        ttk.Label(links_frame, text="Ion list (optional):").grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(links_frame, textvariable=self.ionlist_path_var).grid(row=1, column=1, sticky="w", padx=8, pady=4)
+
+        # --- Footer buttons
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=12, pady=(6, 12))
+
+        ttk.Button(btns, text="Load Flags…", command=self.load_flags).pack(side="left", padx=4)
+        ttk.Button(btns, text="Save Flags…", command=self.save_flags).pack(side="left", padx=4)
+
+        ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        # Generate in-silico: call the provided on_generate/on_submit callback
+        def _on_generate():
+            payload = {"flags": self.collect_flags(),
+                    "metadata": {
+                        "Glycan Type": self.meta_vars["Glycan Type"].get(),
+                        "Mass Analyzer charge mode": self.meta_vars["Mass Analyzer charge mode"].get(),
+                        "Derivatization Type": self.meta_vars["Derivatization Type"].get(),
+                        "_meta_json": self.meta_json_path or "",
+                        "_overrides_applied": any(self.meta_vars[k].get() != self._meta_original.get(k, "")
+                                                    for k in self._meta_original)
+                    }}
+            # Back-compat: accept either on_submit or on_generate
+            cb = self.on_submit or self.on_generate
+            if cb:
+                # If the callback returns a path, reflect it in the UI
+                maybe_path = cb(payload)
+                if isinstance(maybe_path, str) and os.path.exists(maybe_path):
+                    self.insilico_path_var.set(maybe_path)
+
+        ttk.Button(btns, text="Generate In-Silico CSV", command=_on_generate).pack(side="left", padx=4)
+
+        # Link existing in-silico (no auto popups unless user clicks)
+        def _link_existing():
+            p = filedialog.askopenfilename(title="Select existing in-silico CSV",
+                                        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+            if not p:
+                return
+            self.insilico_path_var.set(p)
+            cb = self.on_link_existing
+            
+            if cb:
+                cb(p)
+
+        ttk.Button(btns, text="Link Existing…", command=_link_existing).pack(side="left", padx=4)
+
+        # Attach ion list (optional)
+        def _attach_ionlist():
+            p = filedialog.askopenfilename(title="Attach Ion List (CSV/XLSX)",
+                                        filetypes=[("CSV/XLSX", "*.csv;*.xlsx;*.xls"), ("All files", "*.*")])
+            if not p:
+                return
+            self.ionlist_path_var.set(p)
+            cb = self.on_attach_ionlist
+            if cb:
+                cb(p)
+
+        ttk.Button(btns, text="Attach Ion List…", command=_attach_ionlist).pack(side="left", padx=4)
+
+        ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        # Start pseudolabeling (enabled if converted CSV + insilico present)
+        def _start():
+            payload = {"flags": self.collect_flags(),
+                    "metadata": {
+                        "Glycan Type": self.meta_vars["Glycan Type"].get(),
+                        "Mass Analyzer charge mode": self.meta_vars["Mass Analyzer charge mode"].get(),
+                        "Derivatization Type": self.meta_vars["Derivatization Type"].get(),
+                        "_meta_json": self.meta_json_path or "",
+                        "_overrides_applied": any(self.meta_vars[k].get() != self._meta_original.get(k, "")
+                                                    for k in self._meta_original)
+                    },
+                    "insilico_csv": self.insilico_path_var.get().strip(),
+                    "ionlist_path": self.ionlist_path_var.get().strip()}
+            cb = self.on_start
+            if cb:
+                cb(payload)
+
+        ttk.Button(btns, text="Start Pseudolabeling", command=_start).pack(side="left", padx=4)
+
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side="right", padx=4)
+
 
     def collect_flags(self):
         out = {}
@@ -696,6 +801,77 @@ def get_version_info_for(module_name, manifest_path="project_version_manifest.in
         return version, last_update
     return None, None
 
+#newly added 20250824 for reading csv (is that essential?)
+def _robust_read_csv(path, prefer_tab=False):
+    """
+    Try several parsing strategies (TSV first if prefer_tab=True).
+    Returns a pandas DataFrame or raises the last error.
+    """
+    import pandas as pd, csv
+
+    tries = []
+
+    # Prefer TSV if requested (your converted file)
+    if prefer_tab:
+        tries += [
+            dict(engine="python", sep="\t", encoding="utf-8-sig", low_memory=False),
+            dict(engine="c",      sep="\t", encoding="utf-8-sig", low_memory=False),
+        ]
+
+    # Standard CSV attempts
+    tries += [
+        dict(engine="c",      encoding="utf-8-sig", low_memory=False),
+        dict(engine="python", sep=None, encoding="utf-8-sig", low_memory=False),  # sniff delimiter
+        dict(engine="python", sep=r',(?=(?:[^"]*"[^"]*")*[^"]*$)', encoding="utf-8-sig", low_memory=False),
+        dict(engine="python", delimiter=",", quoting=csv.QUOTE_NONE, escapechar="\\",
+             encoding="utf-8-sig", on_bad_lines="skip", low_memory=False),
+    ]
+
+    last_err = None
+    for kw in tries:
+        try:
+            df = pd.read_csv(path, **kw)
+            df.columns = [str(c).strip() for c in df.columns]
+            return df
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+def _read_ion_df(path):
+    import pandas as pd
+    if not path:
+        return None
+    p = str(path).lower()
+
+    if p.endswith((".xlsx", ".xls")):
+        sheets = pd.read_excel(path, sheet_name=None)
+        # pick sheet named like "ionlist" first, else the first with a mass-like column
+        preferred = None
+        for name in sheets:
+            if name.strip().lower() in {"ionlist", "ions", "ion_list"}:
+                preferred = sheets[name]
+                break
+        if preferred is None:
+            for df in sheets.values():
+                cols_l = {c.strip().lower() for c in df.columns}
+                if any(c in cols_l for c in {"mass", "mz", "ion_mz", "m/z"}):
+                    preferred = df
+                    break
+        if preferred is None:
+            return None
+        df = preferred
+    else:
+        df = pd.read_csv(path, engine="python")
+
+    # normalize a mass column name
+    col_map = {c.lower(): c for c in df.columns}
+    for key in ("mass", "mz", "ion_mz", "m/z"):
+        if key in col_map:
+            if key != "mass":
+                df = df.rename(columns={col_map[key]: "mass"})
+            break
+    return df[["mass"]].dropna() if "mass" in df.columns else None
+
 
 # Function to create and hide Tkinter root window
 # If future version supports GUI fully available, please reconstruct this part (not hiding main window, but think about what should be there)
@@ -982,6 +1158,39 @@ def _resolve_metadata_for_sample(files: dict, sample_name: str, csv_path: str | 
     # 4) give up (launcher will optionally ask user once)
     return None, None
 
+#newly added
+def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value):
+    """Minimal ion score using validator.findingions + marker.score_counter (anchors-aware)."""
+    import numpy as np, pandas as pd
+    from mspvalidator_merger import findingions, expandpeaklist
+
+    out = matched_df.copy()
+    # ensure peaks are lists (the validator expects python lists, not strings)
+    if isinstance(out["peaklist"].iloc[0], str) or isinstance(out["peakintensity"].iloc[0], str):
+        out = expandpeaklist(out)
+
+    ionlist_mz = pd.to_numeric(ion_df["mass"], errors="coerce").dropna().to_numpy()
+
+    scores, counts, hits_str = [], [], []
+    for _, row in out.iterrows():
+        # findingions returns a full listing: [(ion_mz, logI_plus1), ...] length == len(ionlist)
+        hit_pairs = findingions(row, ion_df[["mass"]], ppm_value)
+        matched_mz = [float(mz) for (mz, logi1) in hit_pairs if float(logi1) > 1.0]
+        try:
+            # prefer your module’s anchors-aware score if present
+            score = float(getattr(marker, "score_counter")(matched_mz, ionlist_mz))
+        except Exception:
+            # simple fraction fallback
+            score = (len(matched_mz) / max(1, len(ionlist_mz))) if len(ionlist_mz) else 0.0
+        scores.append(score)
+        counts.append(len(matched_mz))
+        hits_str.append(";".join(f"{mz:.6f}" for mz in matched_mz))
+
+    out["ion score"] = scores
+    out["ion hit count"] = counts
+    out["ion hits m/z"] = hits_str
+    return out
+
 
 def open_prepare_dataset_window():
     subwin = tk.Toplevel(root)
@@ -1073,12 +1282,18 @@ def open_prepare_dataset_window():
 
                 sample_node = tree.insert(exp_node, "end", text=sample_display, open=True)
 
-                for ftype in ["csv", "excel", "json", "insilico_csv"]:
+                for ftype in ["csv", "excel", "json", "metadata", "insilico_csv", "ionlist_path", "pseudolabel_csv"]:
                     if files.get(ftype):
                         if ftype == "json":
+                            label = "Method"
+                        elif ftype == "metadata":
                             label = "Metadata"
                         elif ftype == "insilico_csv":
                             label = "In-silico CSV"
+                        elif ftype == "ionlist_path":
+                            label = "Ion List"
+                        elif ftype == "pseudolabel_csv":
+                            label = "Pseudolabel CSV"
                         else:
                             label = ftype.upper()
                         tree.insert(sample_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
@@ -1346,6 +1561,299 @@ def open_prepare_dataset_window():
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
         except Exception as e:
             messagebox.showerror("Merge Failed", f"Error:\n{str(e)}")
+
+
+    #newly added
+    def append_runlog(files: dict, entry: dict):
+        """Append one JSON line to a per-sample ops log."""
+        try:
+            # Prefer insilico/converted csv folder, else cwd
+            base = (files.get("insilico_csv") or files.get("csv") or os.getcwd())
+            folder = os.path.dirname(base)
+            logdir = os.path.join(folder, "logs")
+            os.makedirs(logdir, exist_ok=True)
+            # Per-sample rolling file is simple; switch to dated if you prefer
+            sample = "sample"
+            # try to extract a readable name from any path we have
+            for k in ("csv", "insilico_csv"):
+                p = files.get(k)
+                if p:
+                    sample = os.path.splitext(os.path.basename(p))[0]
+                    break
+            logfile = os.path.join(logdir, f"{sample}_ops.jsonl")
+            with open(logfile, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            traceback.print_exc()
+
+    def run_pseudolabeling(sample_name: str, files: dict, meta_overrides: dict, parent=None,
+                        ppm_value: float = 20.0, keep_top_n_per_scan: int = 3,
+                        ion_ppm: float = 10.0, anchors_required: int = 2):
+        import pandas as pd, numpy as np, traceback, os
+        from datetime import datetime
+        # use your module helpers
+        
+
+        csv_path = files.get("csv")
+        ins_path = files.get("insilico_csv")
+        ion_path = files.get("ionlist_path")
+
+        if not csv_path or not os.path.exists(csv_path):
+            messagebox.showwarning("Converted CSV missing", "Link a converted CSV for this sample.")
+            return
+        if not ins_path or not os.path.exists(ins_path):
+            messagebox.showwarning("In-silico CSV missing", "Generate or link an in-silico CSV first.")
+            return
+
+        # 1) Load inputs
+        df  = _robust_read_csv(csv_path, prefer_tab=True)   # converted TSV
+        lib = _robust_read_csv(ins_path)                    # in-silico CSV
+
+        # column heuristics (converted)
+        scan_col = next((c for c in ["MS2scan_no","unique_ID","ScanNum","scan","Scan"] if c in df.columns), None)
+        mass_col = next((c for c in ["protonatedmass","ProtonatedMass","precursor_mass","mz","MZ"] if c in df.columns), None)
+        if not scan_col or not mass_col:
+            messagebox.showerror("Columns not found",
+                "Could not find scan/mass columns in converted file (need e.g., MS2scan_no + protonatedmass).")
+            return
+
+        # 2) Normalize in-silico library → comp_tuple/comp_str + sorted Mass
+        libn = marker.normalize_insilico(
+            lib,
+            comp_cols=("Hex","HexNAc","NeuAc","NeuGc","KDN","Fuc"),
+            mass_col="Mass",
+            add_legacy_repr=True,
+        )
+        libn = libn.sort_values("Mass").reset_index(drop=True)
+
+        # 3) Precursor matching (top-N by |ppm| per scan) → tidy table
+        rows = []
+        for r in df[[scan_col, mass_col]].dropna().itertuples(index=False):
+            scan, obs = getattr(r, scan_col), float(getattr(r, mass_col))
+            hits = marker.find_compositions_for_mass(
+                obs_mass=obs,
+                insilico_sorted=libn,
+                mass_col="Mass",
+                ppm=ppm_value,
+                mass_transform=None,  # Mass already protonated in your lib
+                comp_cols=("Hex","HexNAc","NeuAc","NeuGc","KDN","Fuc"),
+            )
+            if not hits.empty:
+                hits = hits.reindex(hits["ppm_error"].abs().sort_values().index)
+                if keep_top_n_per_scan:
+                    hits = hits.head(keep_top_n_per_scan)
+                hits.insert(0, "MS2scan_no", scan)
+                rows.append(hits[["MS2scan_no","observed_mass","theoretical_mass","ppm_error","comp_str","comp_tuple"]])
+
+        matched = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(
+            columns=["MS2scan_no","observed_mass","theoretical_mass","ppm_error","comp_str","comp_tuple"]
+        )
+        matched = matched.rename(columns={"comp_str": "composition"})
+
+        if matched.empty:
+            messagebox.showinfo("Pseudolabeling", "No precursor matches within tolerance.")
+            return
+
+        # 4) Bring peaklist into matched (needed for ion scoring)
+
+        #temp change to including ion score full format so we commented this part
+        peaklist_col = next((c for c in ["peaklist","peaks","ms2_peaks","peak_list","mz_list"] if c in df.columns), None)
+        peakint_col  = next((c for c in ["peakintensity","peak_intensity","intensitylist","intensities"] if c in df.columns), None)
+
+        if peaklist_col and peakint_col:
+            # merge without creating _x/_y when the scan key matches
+            if scan_col == "MS2scan_no":
+                matched = matched.merge(df[[scan_col, peaklist_col, peakint_col]], on="MS2scan_no", how="left")
+            else:
+                matched = matched.merge(df[[scan_col, peaklist_col, peakint_col]],
+                                        left_on="MS2scan_no", right_on=scan_col, how="left") \
+                                .drop(columns=[scan_col], errors="ignore")
+            # standardize names so downstream is stable
+            matched = matched.rename(columns={peaklist_col: "peaklist", peakint_col: "peakintensity"})
+        else:
+            # no peaks → ion scoring will be skipped
+            pass
+        """
+        peaks_cols = [c for c in ("peaklist","peakintensity") if c in df.columns]
+        if len(peaks_cols) == 2:
+            if scan_col == "MS2scan_no":
+                # same key name on both sides → use 'on=' to avoid suffixes
+                matched = matched.merge(
+                    df[[scan_col] + peaks_cols],
+                    on="MS2scan_no", how="left"
+                )
+            else:
+                matched = matched.merge(
+                    df[[scan_col] + peaks_cols],
+                    left_on="MS2scan_no", right_on=scan_col, how="left"
+                ).drop(columns=[scan_col], errors="ignore")
+        """
+        #if len(peaks_cols) == 2:
+        #    matched = matched.merge(df[[scan_col] + peaks_cols], left_on="MS2scan_no", right_on=scan_col, how="left") \
+        #                    .drop(columns=[scan_col])  
+
+
+        # 5) Ion scoring (optional)
+        ion_scoring_status, n_with_scores = "skipped", 0
+        ion_df = _read_ion_df(ion_path) if ion_path else None
+        print("[ion] path:", ion_path,
+            "ion_df_rows:", 0 if (ion_df is None) else len(ion_df),
+            "has_peaks:", bool("peaklist" in matched.columns and "peakintensity" in matched.columns))
+
+        if ion_df is not None and not ion_df.empty and \
+        "peaklist" in matched.columns and "peakintensity" in matched.columns:
+            try:
+                # 5a) try the module’s scorer first
+                print("[ion] calling attach_ion_score_on_matched ...")
+                matched2 = marker.attach_ion_score_on_matched(
+                    matched_df=matched,
+                    ion_df=ion_df,
+                    ppm_value=ion_ppm,
+                    scan_col="MS2scan_no",
+                    ion_mass_col="mass",
+                )
+                # unify column names the module might use
+                rename_map = {
+                    "ion_score": "ion score",
+                    "ion_hit_count": "ion hit count",
+                    "ion_hits_mz": "ion hits m/z",
+                    "ion_hits_intensity": "ion hits intensity",
+                    "ion_hits_logI": "ion hits logI",
+                    "ion_hits_relI": "ion hits relI",
+                    "pseudo_compositions": "pseudo compositions",
+                }
+                for src, dst in rename_map.items():
+                    if src in matched2.columns and dst not in matched2.columns:
+                        matched2.rename(columns={src: dst}, inplace=True)
+
+                # accept if it actually added a score column
+                if "ion score" in matched2.columns or "ion hit count" in matched2.columns:
+                    matched = matched2
+                    ion_scoring_status = "ok"
+                    n_with_scores = int((matched.get("ion hit count", 0) > 0).sum()) if "ion hit count" in matched.columns else 0
+                else:
+                    print("[ion] scorer returned no ion columns; falling back to simple score_counter")
+                    raise RuntimeError("no_ion_columns")
+
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                # 5b) fallback — always produce basic ion columns with score_counter
+                try:
+                    matched = _fallback_simple_ion_scoring(matched, ion_df, ion_ppm)
+                    ion_scoring_status = "ok(fallback)"
+                    n_with_scores = int((matched["ion hit count"] > 0).sum())
+                except Exception:
+                    traceback.print_exc()
+                    ion_scoring_status = "failed"
+
+        """
+        # 5) Ion scoring (optional; compact columns appended)
+        ion_scoring_status, n_with_scores = "skipped", 0
+        ion_df = _read_ion_df(ion_path) if ion_path else None
+
+        #temp debug
+        print("[ion] path:", ion_path,
+        "ion_df_rows:", 0 if (ion_df is None) else len(ion_df),
+        "has_peaks:", bool("peaklist" in matched.columns and "peakintensity" in matched.columns))
+        if ion_df is not None and not ion_df.empty and all(c in matched.columns for c in ("peaklist","peakintensity")):
+            try:
+                rename_map = {
+                    "ion_score": "ion score",
+                    "ion_hit_count": "ion hit count",
+                    "ion_hits_mz": "ion hits m/z",
+                    "ion_hits_intensity": "ion hits intensity",
+                    "ion_hits_logI": "ion hits logI",
+                    "ion_hits_relI": "ion hits relI",
+                    "pseudo_compositions": "pseudo compositions",
+                }
+                for src, dst in rename_map.items():
+                    if src in matched.columns and dst not in matched.columns:
+                        matched.rename(columns={src: dst}, inplace=True)
+                #temp change to a later version
+                
+                matched = marker.attach_ion_score_on_matched(
+                    matched_df=matched,
+                    ion_df=ion_df,
+                    ppm_value=ion_ppm,
+                    scan_col="MS2scan_no",
+                    ion_mass_col="mass",
+                    score_col="ion score",
+                    hitcount_col="ion hit count",
+                    hitlist_col="ion hits m/z",
+                )
+                ion_scoring_status = "ok"
+                n_with_scores = int((matched["ion hit count"] > 0).sum())
+                
+            except Exception:
+                traceback.print_exc()
+                ion_scoring_status = "failed"
+            """
+
+        # 6) Merge back onto the original converted file (one row per composition match)
+        #enrich_cols = ["MS2scan_no","composition","theoretical_mass","ppm_error","observed_mass"]
+        #for extra in ("ion score","ion hit count","ion hits m/z"):
+        #    if extra in matched.columns: enrich_cols.append(extra)
+        #out = df.merge(matched[enrich_cols], left_on=scan_col, right_on="MS2scan_no", how="left")
+        scan_right = "MS2scan_no"
+        if scan_right not in matched.columns:
+            for alt in ("MS2scan_no_x", "MS2scan_no_y", "ScanNum", "scan", "Scan", "unique_ID"):
+                if alt in matched.columns:
+                    matched = matched.rename(columns={alt: "MS2scan_no"})
+                    break
+
+        if "MS2scan_no" not in matched.columns:
+            messagebox.showerror("Merge error", "No scan column found in matched table.")
+            return
+        # pick a composition column that exists
+        comp_col_out = "composition" if "composition" in matched.columns else \
+                    ("pseudo compositions" if "pseudo compositions" in matched.columns else None)
+
+        enrich_cols = ["MS2scan_no", "theoretical_mass", "ppm_error"]#, "observed_mass"] <- mind this will still appear internally when doing calculation
+        if comp_col_out:
+            enrich_cols.insert(1, comp_col_out)
+        for extra in ("ion score", "ion hit count", "ion hits m/z", "ion hits intensity", "ion hits logI", "ion hits relI"): #"pseudo compositions"  # if your scorer populates it
+            if extra in matched.columns:
+                enrich_cols.append(extra)
+        #debug use
+        print("matched cols:", matched.columns.tolist()[:30])
+        print("df cols:", df.columns.tolist()[:30])
+        # final join
+        out = df.merge(
+            matched[enrich_cols],
+            left_on=scan_col, right_on="MS2scan_no",
+            how="left"
+        )
+        # just in case it sneaks in from elsewhere:
+        out.drop(columns=["observed_mass"], errors="ignore", inplace=True)
+        # 7) Save TSV next to converted CSV
+        outdir  = os.path.dirname(csv_path)
+        outname = f"{sample_name}_pseudolabels_{datetime.now().strftime('%Y%m%d')}.tsv"
+        outpath = os.path.join(outdir, outname)
+        out.to_csv(outpath, index=False, sep="\t")
+
+        files["pseudolabel_csv"] = outpath
+        append_runlog(files, {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "action": "pseudolabel_run",
+            "sample": sample_name,
+            "inputs": {"converted_csv": csv_path, "insilico_csv": ins_path, "ionlist": ion_path or "none"},
+            "params": {"ppm_value": ppm_value, "keep_top_n_per_scan": keep_top_n_per_scan, "ion_ppm": ion_ppm},
+            "output": {"pseudolabel_tsv": outpath},
+            "summary": {
+                "n_scans": int(len(df)),
+                "n_labeled": int(matched["MS2scan_no"].nunique()),
+                "n_rows": int(len(out)),
+                "n_with_ion_scores": int(n_with_scores),
+                "ion_scoring": ion_scoring_status,
+            },
+        })
+
+        if parent:
+            messagebox.showinfo("Pseudolabeling complete", f"Saved and linked:\n{outpath}")
+        try:
+            refresh_tree()
+        except Exception:
+            pass
 
     # --- Assign file to experiment/sample ---
     def assign_file(filetype, filepath, exp_title="Unassigned", sample_name="Unassigned"):
@@ -1886,7 +2394,14 @@ def open_prepare_dataset_window():
             # 2) Determine glycan type from metadata (prefer window metadata; fallback to file)
             glycan_type = (payload["metadata"].get("Glycan Type") or "").strip().upper()
             charge_mode = payload["metadata"].get("Mass Analyzer charge mode")  # if needed downstream
-            deriv_type  = payload["metadata"].get("Derivatization Type")        # if needed downstream
+            # Example normalization at the GUI edge (optional but nice):
+            deriv_raw = (payload["metadata"].get("Derivatization Type") or "").strip().lower()
+            reduced = False
+            if "reduced" in deriv_raw:   # e.g., "Reduced Permethylation"
+                reduced = True
+            flags["derivatization_type"] = payload["metadata"].get("Derivatization Type", "PerMe")
+            flags["reduced"] = reduced
+            #deriv_type  = payload["metadata"].get("Derivatization Type")        # if needed downstream
             if payload["metadata"].get("_overrides_applied"):
                 logger.log("[WARN] Using metadata overrides from UI; consider updating the metadata JSON.")
             # 3) Choose output path
@@ -1919,13 +2434,94 @@ def open_prepare_dataset_window():
                 traceback.print_exc()
                 messagebox.showerror("Generation failed", str(e))
 
+        def on_generate(payload):
+            # Generate NG/OG and link the path; also append run log
+            flags = dict(compv4.NG_flags); flags.update(payload.get("flags", {}))
+            glycan_type = (payload["metadata"].get("Glycan Type") or "").strip().upper()
+            # NEW: carry derivatization into flags
+            deriv_raw = (payload["metadata"].get("Derivatization Type") or "").strip().lower()
+            flags["derivatization_type"] = payload["metadata"].get("Derivatization Type", "PerMe")
+            flags["reduced"] = ("reduced" in deriv_raw)
+
+            outdir = filedialog.askdirectory(title="Select output folder for in-silico CSV")
+            if not outdir:
+                return None
+            outname = f"{sample_name}_insilico_{datetime.now().strftime('%Y%m%d')}.csv"
+            outpath = os.path.join(outdir, outname)
+
+            try:
+                if glycan_type == "N":
+                    compv4.NGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
+                elif glycan_type == "O":
+                    compv4.OGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
+                else:
+                    messagebox.showwarning("Glycan Type Missing",
+                                        "Select 'N' or 'O' in the metadata panel.")
+                    return None
+
+                files["insilico_csv"] = outpath
+                append_runlog(files, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "action": "insilico_generate",
+                    "sample": sample_name,
+                    "flags": flags,
+                    "metadata_used": {
+                        "Glycan Type": payload["metadata"].get("Glycan Type", ""),
+                        "Mass Analyzer charge mode": payload["metadata"].get("Mass Analyzer charge mode", ""),
+                        "Derivatization Type": payload["metadata"].get("Derivatization Type", ""),
+                        "overrides_applied": payload["metadata"].get("_overrides_applied", False),
+                    },
+                    "inputs": {
+                        "method_json": files.get("json"),
+                        "metadata_json": files.get("metadata"),
+                        "converted_csv": files.get("csv"),
+                    },
+                    "output": {"insilico_csv": outpath},
+                })
+                messagebox.showinfo("In-silico CSV generated", f"Saved and linked:\n{outpath}")
+                refresh_tree()
+                return outpath  # so the window can show it immediately
+
+            except Exception as e:
+                traceback.print_exc()
+                messagebox.showerror("Generation failed", str(e))
+                return None
+
+        def on_link_existing(path):
+            files["insilico_csv"] = path
+            append_runlog(files, {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "action": "insilico_link_existing",
+                "sample": sample_name,
+                "output": {"insilico_csv": path},
+            })
+            refresh_tree()
+
+        def on_attach_ionlist(path):
+            files["ionlist_path"] = path
+            refresh_tree()
+
+        def on_start(payload):
+            # Use linked paths & run the wrapper
+            run_pseudolabeling(
+                sample_name=sample_name,
+                files=files,
+                meta_overrides=payload.get("metadata", {}),
+                parent=root
+            )
+
         # Open the setup window with the resolved metadata
         PseudoLabelingSetupWindow(
             root,
-            meta_json_path=meta_path,        # may be None (window handles it)
-            meta_prefill=meta_dict or {},    # <-- NEW: pass the already-parsed dict
+            meta_json_path=meta_path,
+            meta_prefill=meta_dict or {},
             default_flags=compv4.NG_flags,
-            on_submit=on_submit
+            on_generate=on_generate,                 # new
+            on_link_existing=on_link_existing,       # new
+            on_attach_ionlist=on_attach_ionlist,     # new
+            on_start=on_start,                       # new
+            initial_insilico=files.get("insilico_csv"),
+            initial_ionlist=files.get("ionlist_path")
         )
 
 
