@@ -1,3 +1,8 @@
+from __future__ import annotations
+#Python3.9 compatibility fix (not working haha)
+
+
+
 #part of it was copied from GPT5 answer based on the discussion
 
 
@@ -7,6 +12,7 @@ import mspvalidator_merger as validator
 import pandas as pd
 import re
 import json
+
 
 #to get rid of warning
 def ppm(x): return x

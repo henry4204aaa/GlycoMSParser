@@ -133,8 +133,9 @@ def collect_ng_candidates(
     # If marking no-hit: keep only rows that are truly near-baseline across all features
     if "_candidate_nohit" in ng_raw.columns:
         mask_nohit = (np.isclose(feat_df.values, 1.0)).all(axis=1)
-        # retain only those marked nohit AND truly baseline
-        keep = (~ng_raw["_candidate_nohit"]) | mask_nohit
+        # NEW: coerce the flag to boolean (NaN→False) before bitwise NOT
+        flag = pd.Series(ng_raw["_candidate_nohit"], index=ng_raw.index).astype("boolean").fillna(False)
+        keep = (~flag) | mask_nohit
         ng_raw = ng_raw[keep].drop(columns=["_candidate_nohit"])
         feat_df = feat_df.loc[ng_raw.index]
 

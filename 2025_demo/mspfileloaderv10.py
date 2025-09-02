@@ -1,6 +1,6 @@
 import os
-version = "0.9921"
-last_update = 20250824
+version = "0.9925"
+last_update = 20250901
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -18,8 +18,12 @@ import mspvalidator_merger as mspval
 import pandas as pd
 import platform
 import msp_insilicomarker_withGPT as marker
+
+
+
 # v1.00: Add Glypick-like autoannotation back (need to change UI)
 # v0.993: able to apply pseudolabeling function (functional but may have bugs)
+# v0.9925: add split and stratified method when creating training set
 # v0.992: Link to pseudolabeling function
 # v0.991: Make the software functional to work on MacOS
 # v0.99: demo version before cleaning code
@@ -2578,7 +2582,704 @@ def open_ml_analysis_window():
     from tkinter import filedialog, messagebox
     from tkinter import ttk
     import tkinter as tk
+    #20250901 add split
+    from sklearn.model_selection import train_test_split
 
+
+    #v0.9923~0.9929 utilities
+    from ml_ng_utils import (
+        collect_ng_candidates,
+        cap_non_glycan,
+        predict_with_threshold,
+        build_features_from_peaks_log10_plus1,  # optional if you need it directly
+    )
+    from ml_ng_utils_extras import resample_by_strategy, tau_sweep_summary
+
+    def balance_and_split(
+        df: pd.DataFrame,
+        label_col="Structure",
+        majority_label="Non-glycan",
+        min_count=12,
+        majority_factor=3,
+        feature_exclude=("MS2scan_no","ID","Source","IUPACname(optional)","Glycanannotation2","GlyToucan ID","unique_ID"),
+        test_size=0.2,
+        val_size=0.0,
+        stratify=True,
+        cap_training_only=False,     # << NEW
+        random_state=42
+    ):
+        from sklearn.model_selection import train_test_split
+
+        # --- 0) drop tiny classes globally so test never contains unseen labels
+        counts = df[label_col].value_counts()
+        keep = counts[counts >= min_count].index
+        dropped_rare = df[~df[label_col].isin(keep)]
+        df1 = df[df[label_col].isin(keep)].copy()
+
+        # --- helpers
+        def _feat_cols(dff):
+            return [c for c in dff.columns if c not in set(feature_exclude) | {label_col}]
+
+        def _cap_majority_df(dff, cap):
+            if majority_label not in dff[label_col].unique():
+                return dff, None
+            maj = dff[dff[label_col] == majority_label]
+            if len(maj) <= cap:
+                return dff, None
+            maj_keep = maj.sample(n=int(cap), random_state=random_state)
+            dff2 = pd.concat([maj_keep, dff[dff[label_col] != majority_label]], axis=0)
+            return dff2, int(cap)
+
+        # --- robust split math
+        ts = float(test_size); vs = float(val_size)
+        if ts < 0 or vs < 0: raise ValueError("Test/Validation must be ≥ 0.")
+        if ts == 0 and vs == 0: raise ValueError("At least one of test/val must be > 0.")
+        holdout = ts + vs
+        if holdout >= 0.999: raise ValueError(f"Test+Validation ({holdout:.2f}) must be < 1.0.")
+
+        feat_cols = _feat_cols(df1)
+        X_all, y_all = df1[feat_cols], df1[label_col]
+        if y_all.nunique() < 2: raise ValueError("After filtering, fewer than 2 classes remain.")
+
+        if not cap_training_only:
+            # ----- MODE A: cap BEFORE splitting (affects all folds) -----
+            if majority_label in y_all.unique():
+                minor_counts = df1[df1[label_col] != majority_label][label_col].value_counts()
+                max_minor = int(minor_counts.max()) if not minor_counts.empty else 0
+                cap = max(majority_factor * max_minor, 1)
+                df1, cap_applied = _cap_majority_df(df1, cap)
+                feat_cols = _feat_cols(df1)
+                X_all, y_all = df1[feat_cols], df1[label_col]
+            else:
+                cap_applied = None
+
+            strat = y_all if stratify else None
+            try:
+                X_train, X_tmp, y_train, y_tmp = train_test_split(
+                    X_all, y_all, test_size=holdout, stratify=strat, random_state=random_state
+                )
+            except ValueError:
+                X_train, X_tmp, y_train, y_tmp = train_test_split(
+                    X_all, y_all, test_size=holdout, stratify=None, random_state=random_state
+                )
+
+            if vs > 0:
+                rel_test = min(max(ts / holdout, 1e-6), 1 - 1e-6)
+                strat_tmp = y_tmp if stratify else None
+                try:
+                    X_val, X_test, y_val, y_test = train_test_split(
+                        X_tmp, y_tmp, test_size=rel_test, stratify=strat_tmp, random_state=random_state
+                    )
+                except ValueError:
+                    X_val, X_test, y_val, y_test = train_test_split(
+                        X_tmp, y_tmp, test_size=rel_test, stratify=None, random_state=random_state
+                    )
+            else:
+                X_val, y_val = X_tmp.iloc[0:0], y_tmp.iloc[0:0]
+                X_test, y_test = X_tmp, y_tmp
+
+            info = {
+                "mode": "cap_before_split",
+                "kept_label_counts": y_all.value_counts().to_dict(),
+                "dropped_rare_counts": dropped_rare[label_col].value_counts().to_dict(),
+                "majority_cap_applied_to": majority_label if cap_applied else None,
+                "majority_cap": int(cap_applied) if cap_applied else None,
+                "feature_cols": feat_cols,
+            }
+            #Future proof, can be hidden
+            # after building `info` in either mode:
+            info["cap_applied_to"] = info.get("majority_cap_applied_to") or info.get("train_majority_cap_applied_to")
+            info["cap_value"]      = info.get("majority_cap") or info.get("train_majority_cap")
+
+            return X_train, y_train, X_val, y_val, X_test, y_test, info
+
+        else:
+            # ----- MODE B: cap TRAINING ONLY (real-world test) -----
+            strat = y_all if stratify else None
+            try:
+                X_train, X_tmp, y_train, y_tmp = train_test_split(
+                    X_all, y_all, test_size=holdout, stratify=strat, random_state=random_state
+                )
+            except ValueError:
+                X_train, X_tmp, y_train, y_tmp = train_test_split(
+                    X_all, y_all, test_size=holdout, stratify=None, random_state=random_state
+                )
+
+            if vs > 0:
+                rel_test = min(max(ts / holdout, 1e-6), 1 - 1e-6)
+                strat_tmp = y_tmp if stratify else None
+                try:
+                    X_val, X_test, y_val, y_test = train_test_split(
+                        X_tmp, y_tmp, test_size=rel_test, stratify=strat_tmp, random_state=random_state
+                    )
+                except ValueError:
+                    X_val, X_test, y_val, y_test = train_test_split(
+                        X_tmp, y_tmp, test_size=rel_test, stratify=None, random_state=random_state
+                    )
+            else:
+                X_val, y_val = X_tmp.iloc[0:0], y_tmp.iloc[0:0]
+                X_test, y_test = X_tmp, y_tmp
+
+            # compute cap from TRAIN labels only
+            if majority_label in y_train.unique():
+                minor_counts_train = y_train[y_train != majority_label].value_counts()
+                max_minor_train = int(minor_counts_train.max()) if not minor_counts_train.empty else 0
+                cap_train = max(majority_factor * max_minor_train, 1)
+
+                train_df = df1.loc[X_train.index].copy()
+                train_df_capped, cap_applied = _cap_majority_df(train_df, cap_train)
+                # rebuild X_train / y_train from capped rows
+                X_train = train_df_capped[feat_cols]
+                y_train = train_df_capped[label_col]
+            else:
+                cap_applied = None
+
+            info = {
+                "mode": "cap_training_only",
+                "kept_label_counts": y_all.value_counts().to_dict(),
+                "dropped_rare_counts": dropped_rare[label_col].value_counts().to_dict(),
+                "train_majority_cap_applied_to": majority_label if cap_applied else None,
+                "train_majority_cap": int(cap_applied) if cap_applied else None,
+                "feature_cols": feat_cols,
+            }
+            #Future proof, can be hidden
+            # after building `info` in either mode:
+            info["cap_applied_to"] = info.get("majority_cap_applied_to") or info.get("train_majority_cap_applied_to")
+            info["cap_value"]      = info.get("majority_cap") or info.get("train_majority_cap")
+            return X_train, y_train, X_val, y_val, X_test, y_test, info
+
+    """
+    # ---------- NEW: balancing helper ---------- 20250901
+    def balance_and_split(
+        df: pd.DataFrame,
+        label_col="Structure",
+        majority_label="Non-glycan",
+        min_count=5,                  # tiny-class filter
+        majority_factor=3,            # cap majority to factor * max(minor count)
+        feature_exclude=("MS2scan_no","ID","Source","IUPACname(optional)","Glycanannotation2","GlyToucan ID","unique_ID"),
+        test_size=0.2,
+        val_size=0.1,
+        stratify=True,
+        random_state=42
+    ):
+        from sklearn.model_selection import train_test_split
+
+        # A) drop tiny classes
+        counts = df[label_col].value_counts()
+        keep = counts[counts >= min_count].index
+        dropped_rare = df[~df[label_col].isin(keep)]
+        df1 = df[df[label_col].isin(keep)].copy()
+
+        # B) cap the majority class to majority_factor * max(minor)
+        cap_applied = None
+        if majority_label in df1[label_col].unique():
+            minor_counts = df1[df1[label_col] != majority_label][label_col].value_counts()
+            max_minor = int(minor_counts.max()) if not minor_counts.empty else 0
+            cap = max(majority_factor * max_minor, 1)
+            majority_df = df1[df1[label_col] == majority_label]
+            if len(majority_df) > cap:
+                majority_df = majority_df.sample(n=cap, random_state=random_state)
+                df1 = pd.concat([majority_df, df1[df1[label_col] != majority_label]], axis=0)
+                cap_applied = cap
+
+        # inside balance_and_split(...) right before the split section
+        # added 20250902, to solve the validation set to 0 error occurred in 20250901
+        feat_cols = [c for c in df1.columns if c not in set(feature_exclude) | {label_col}]
+        X, y = df1[feat_cols], df1[label_col]
+        if y.nunique() < 2:
+            raise ValueError("After filtering, fewer than 2 classes remain. Loosen filters.")
+
+        # --- NEW: robust split math ---
+        ts = float(test_size)
+        vs = float(val_size)
+        if ts < 0 or vs < 0:
+            raise ValueError("Test/validation splits must be >= 0.")
+        if ts == 0 and vs == 0:
+            raise ValueError("At least one of test or validation must be > 0.")
+        holdout = ts + vs
+        if holdout >= 0.999:
+            raise ValueError(f"Test + Validation ({holdout:.2f}) must be < 1.0.")
+
+        strat = y if stratify else None
+        from sklearn.model_selection import train_test_split
+        X_train, X_tmp, y_train, y_tmp = train_test_split(
+            X, y, test_size=holdout, stratify=strat, random_state=random_state
+        )
+
+        if vs > 0:
+            # second split between val and test
+            rel_test = ts / holdout
+            # clamp away from 0 and 1 for sklearn
+            rel_test = min(max(rel_test, 1e-6), 1 - 1e-6)
+            strat_tmp = y_tmp if stratify else None
+            X_val, X_test, y_val, y_test = train_test_split(
+                X_tmp, y_tmp, test_size=rel_test, stratify=strat_tmp, random_state=random_state
+            )
+        else:
+            # no validation set requested
+            X_val, y_val = X_tmp.iloc[0:0], y_tmp.iloc[0:0]  # empty
+            X_test, y_test = X_tmp, y_tmp
+        # --- END NEW ---
+        
+        # C) split (optionally stratified) →  train/val/test
+        feat_cols = [c for c in df1.columns if c not in set(feature_exclude) | {label_col}]
+        X, y = df1[feat_cols], df1[label_col]
+        if y.nunique() < 2:
+            raise ValueError("After filtering, fewer than 2 classes remain. Loosen filters.")
+
+        strat = y if stratify else None
+        X_train, X_tmp, y_train, y_tmp = train_test_split(
+            X, y, test_size=(test_size + val_size), random_state=random_state, stratify=strat
+        )
+        rel_test = test_size / (test_size + val_size) if (test_size + val_size) > 0 else 0.0
+        strat_tmp = y_tmp if stratify else None
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_tmp, y_tmp, test_size=rel_test, random_state=random_state, stratify=strat_tmp
+        )
+        
+        info = {
+            "kept_label_counts": y.value_counts().to_dict(),
+            "dropped_rare_counts": dropped_rare[label_col].value_counts().to_dict(),
+            "majority_cap_applied_to": majority_label if cap_applied else None,
+            "majority_cap": int(cap_applied) if cap_applied else None,
+            "feature_cols": feat_cols,
+        }
+        return X_train, y_train, X_val, y_val, X_test, y_test, info
+        """
+    # ---------- END NEW helper ----------
+
+    # state
+    model_file_path = None
+    predict_input_path = None
+    train_csv_path = None
+    linked_exp_json = None
+
+    # ---------- NEW: GUI vars for balancing/stratify ----------
+    n_estimators_var = tk.IntVar(value=400)     # default trees
+    class_weight_var = tk.BooleanVar(value=True)  # use "balanced"  
+    test_split_var   = tk.DoubleVar(value=0.20)   # test %
+    val_split_var    = tk.DoubleVar(value=0.10)   # val %
+    min_samples_var  = tk.IntVar(value=5)         # tiny class threshold
+    use_balance_var  = tk.BooleanVar(value=True)  # enable balancing pipeline
+    majority_label_var = tk.StringVar(value="Non-glycan")
+    majority_factor_var = tk.IntVar(value=3)      # cap = factor * max(minor)
+    use_stratify_var = tk.BooleanVar(value=True)
+    # Cap only the training fold (leave Val/Test uncapped)
+    real_world_test_var = tk.BooleanVar(value=False)
+    # Confidence thresholding (post-prediction) 20250902, final addition
+    enable_thresh_var = tk.BooleanVar(value=True)   # default ON
+    thresh_val_var    = tk.DoubleVar(value=0.65)    # τ in [0,1]
+    # ---------------------------------------------------------
+
+    def select_train_csv():
+        nonlocal train_csv_path, linked_exp_json
+        path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        train_csv_path = os.path.abspath(path)
+
+        exp_json_path = None
+        base_dir = os.path.dirname(path)
+        for fname in os.listdir(base_dir):
+            if fname.endswith(".exp.json"):
+                exp_json_path = os.path.join(base_dir, fname)
+                break
+        linked_exp_json = exp_json_path
+
+        if exp_json_path and os.path.exists(exp_json_path):
+            try:
+                with open(exp_json_path, "r") as f:
+                    exp_data = json.load(f)
+                exp_data["train_csv"] = train_csv_path
+                with open(exp_json_path, "w") as f:
+                    json.dump(exp_data, f, indent=4)
+            except Exception as e:
+                print(f"[ML] Failed to update experiment JSON: {e}")
+
+        origin_info.configure(state="normal")
+        origin_info.delete(1.0, "end")
+        origin_info.insert("end", f"Loaded file: {os.path.basename(path)}\n")
+        if exp_json_path:
+            origin_info.insert("end", f"Linked .exp.json: {os.path.basename(exp_json_path)}\n")
+        origin_info.insert("end", f"Path: {path}")
+        origin_info.configure(state="disabled")
+
+    # ---------- UPDATED: parameters window ----------
+    def open_train_settings():
+        settings = tk.Toplevel()
+        settings.title("Train/Test Parameters")
+        settings.geometry("360x360")
+
+        # splits
+        tk.Label(settings, text="Test split").pack(pady=(10,0))
+        tk.Scale(settings, from_=0.05, to=0.5, resolution=0.05, orient="horizontal",
+                 variable=test_split_var).pack(fill="x", padx=10)
+
+        tk.Label(settings, text="Validation split").pack(pady=(10,0))
+        tk.Scale(settings, from_=0.00, to=0.3, resolution=0.05, orient="horizontal",
+                 variable=val_split_var).pack(fill="x", padx=10)
+
+        # --- Live split summary + note ---------------------------------- added 20250902
+        note_lbl = tk.Label(settings, text="Note: Test + Validation must be < 1.0",
+                            fg="#666666")
+        note_lbl.pack(pady=(4,0))
+
+        split_pct_lbl = tk.Label(settings, text="", font=("TkDefaultFont", 9, "bold"))
+        split_pct_lbl.pack(pady=(2,6))
+
+        def _update_split_labels(*_):
+            ts = float(test_split_var.get())
+            vs = float(val_split_var.get())
+            tr = 1.0 - (ts + vs)
+            split_pct_lbl.configure(
+                text=f"Train {max(tr,0)*100:.0f}%  |  Val {vs*100:.0f}%  |  Test {ts*100:.0f}%"
+            )
+            # color rules
+            if ts < 0 or vs < 0 or (ts + vs) >= 1.0:
+                split_pct_lbl.configure(fg="red")            # invalid
+            elif tr < 0.10:
+                split_pct_lbl.configure(fg="#D17D00")        # warning: tiny train set
+            else:
+                split_pct_lbl.configure(fg="black")          # ok
+
+        # trigger on slider move + initialize
+        test_split_var.trace_add("write", _update_split_labels)
+        val_split_var.trace_add("write", _update_split_labels)
+        _update_split_labels()
+        # ---------------------------------------------------------------
+
+        # tiny class
+        tk.Label(settings, text="Minimum samples per class").pack(pady=(12,0))
+        tk.Spinbox(settings, from_=1, to=50, textvariable=min_samples_var, width=6).pack()
+
+        # balancing block
+        tk.Checkbutton(settings, text="Enable class balancing (cap majority)", variable=use_balance_var).pack(pady=(12,0))
+        row = tk.Frame(settings); row.pack(pady=2)
+        tk.Label(row, text="Majority label:").pack(side="left")
+        tk.Entry(row, textvariable=majority_label_var, width=16).pack(side="left", padx=6)
+        row2 = tk.Frame(settings); row2.pack(pady=2)
+        tk.Label(row2, text="Majority factor (×max minor):").pack(side="left")
+        tk.Spinbox(row2, from_=1, to=20, textvariable=majority_factor_var, width=6).pack(side="left", padx=6)
+
+        # stratify
+        tk.Checkbutton(settings, text="Stratify by label", variable=use_stratify_var).pack(pady=(12,0))
+
+        # --- Random Forest options ---
+        sep = ttk.Separator(settings, orient="horizontal"); sep.pack(fill="x", padx=10, pady=(12,6))
+        tk.Label(settings, text="Random Forest Options").pack()
+
+        row_rf = tk.Frame(settings); row_rf.pack(pady=2)
+        tk.Label(row_rf, text="n_estimators (trees):").pack(side="left")
+        tk.Spinbox(row_rf, from_=50, to=2000, increment=50, textvariable=n_estimators_var, width=7).pack(side="left", padx=6)
+
+        tk.Checkbutton(settings, text='Use class_weight = "balanced"', variable=class_weight_var).pack(pady=2)
+        tk.Checkbutton(settings, text="Real-world test (cap training only)",
+               variable=real_world_test_var).pack(pady=(4,0))
+        
+
+        sep3 = ttk.Separator(settings, orient="horizontal"); sep3.pack(fill="x", padx=10, pady=(12,6))
+        tk.Label(settings, text="Prediction Thresholding").pack()
+
+        tk.Checkbutton(
+            settings,
+            text="Enable confidence threshold → fallback to Majority label",
+            variable=enable_thresh_var
+        ).pack(pady=(2,2))
+
+        row_thr = tk.Frame(settings); row_thr.pack(pady=2)
+        tk.Label(row_thr, text="Threshold τ (0.00–0.99):").pack(side="left")
+        tk.Spinbox(row_thr, from_=0.00, to=0.99, increment=0.01,
+                textvariable=thresh_val_var, width=6).pack(side="left", padx=6)
+
+        tk.Button(settings, text="Close", command=settings.destroy).pack(pady=12)
+    # -----------------------------------------------
+
+    def train_model():
+        try:
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.metrics import classification_report
+            from sklearn.preprocessing import LabelEncoder
+            from sklearn.utils.multiclass import unique_labels
+            import joblib
+        except ImportError:
+            messagebox.showerror("Missing Dependencies",
+                                 "Please install scikit-learn and joblib.")
+            return
+
+        if not train_csv_path:
+            messagebox.showwarning("No File", "Please select a training CSV first.")
+            return
+
+        label_col = label_dropdown.get().strip()
+        if label_col not in ['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID']:
+            messagebox.showerror("Invalid Label", f"'{label_col}' is not a supported label column.")
+            return
+
+        # load
+        try:
+            df = pd.read_csv(train_csv_path)
+        except Exception as e:
+            messagebox.showerror("Read Error", str(e)); return
+        if label_col not in df.columns:
+            messagebox.showerror("Missing Column", f"{label_col} not found."); return
+
+        # encode label AFTER any string/tuple harmonization (if needed)
+        y_raw = df[label_col].astype(str)
+
+        # run balancing + split
+        try:
+            if use_balance_var.get():
+                X_train, y_train, X_val, y_val, X_test, y_test, info = balance_and_split(
+                    df.assign(**{label_col: y_raw}),
+                    label_col=label_col,
+                    majority_label=majority_label_var.get(),
+                    min_count=int(min_samples_var.get()),
+                    majority_factor=int(majority_factor_var.get()),
+                    test_size=float(test_split_var.get()),
+                    val_size=float(val_split_var.get()),
+                    stratify=bool(use_stratify_var.get()),
+                    cap_training_only=bool(real_world_test_var.get()),   # << NEW
+                    random_state=42
+                )
+            else:
+                # no balancing — just use helper with factor=0 & no cap
+                X_train, y_train, X_val, y_val, X_test, y_test, info = balance_and_split(
+                    df.assign(**{label_col: y_raw}),
+                    label_col=label_col,
+                    majority_label="__no_cap__",  # won't match → no cap
+                    min_count=int(min_samples_var.get()),
+                    majority_factor=1,
+                    test_size=float(test_split_var.get()),
+                    val_size=float(val_split_var.get()),
+                    stratify=bool(use_stratify_var.get()),
+                    cap_training_only=bool(real_world_test_var.get()),   # << NEW
+                    random_state=42
+                )
+        except Exception as e:
+            messagebox.showerror("Split/Balancing Failed", str(e)); return
+
+        # LabelEncoder (consistent across splits)
+        le = LabelEncoder()
+        y_train_enc = le.fit_transform(y_train)
+        y_val_enc   = le.transform(y_val)
+        y_test_enc  = le.transform(y_test)
+
+        # model
+        model = RandomForestClassifier(
+            n_estimators=int(n_estimators_var.get()),
+            class_weight=("balanced" if class_weight_var.get() else None),
+            max_features="sqrt",
+            random_state=42,
+            n_jobs=-1
+        )
+        #model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train_enc)
+        from sklearn.metrics import classification_report, confusion_matrix
+        from sklearn.utils.multiclass import unique_labels
+        import numpy as np
+        # evaluate with proba
+        # raw predictions
+        y_pred = model.predict(X_test)
+
+        # --- NEW: glycan-only confidence threshold -> fallback to majority label ---
+        if enable_thresh_var.get():
+            tau = float(thresh_val_var.get())
+            #newly added
+            margin = 0.05  # δ: only demote if majority prob is within 0.05 of best predicted prob
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X_test)      # [n_samples, n_classes]
+                maxp = proba.max(axis=1)                 # best class prob per sample
+
+                classes_ = list(le.classes_)
+                try:
+                    majority_idx = classes_.index(majority_label_var.get())
+                except ValueError:
+                    majority_idx = None
+
+                if majority_idx is not None:
+                    # predicted labels are encoded ints already
+                    p_major = proba[:, majority_idx]
+                    # Demote only when:
+                    #   1) current pred is a glycan (not majority),
+                    #   2) confidence below τ, and
+                    #   3) majority prob is within δ of the best prob (model is "nearly indifferent")
+                    demote = (y_pred != majority_idx) & (maxp < tau) & (p_major >= (maxp - margin))
+                    if np.any(demote):
+                        y_pred = y_pred.copy()
+                        y_pred[demote] = majority_idx
+                else:
+                    print(f"[ML] Thresholding skipped: fallback label '{majority_label_var.get()}' not in training classes.")
+            else:
+                print("[ML] Thresholding skipped: classifier lacks predict_proba.")
+            # --- end margin-aware demotion ---
+
+            """
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X_test)  # [n_samples, n_classes]
+                maxp = proba.max(axis=1)
+
+                # indices in the fitted LabelEncoder
+                classes_ = list(le.classes_)
+                try:
+                    majority_idx = classes_.index(majority_label_var.get())
+                except ValueError:
+                    majority_idx = None
+
+                if majority_idx is not None:
+                    import numpy as np
+                    # apply threshold ONLY when the predicted class is a glycan (not the majority)
+                    mask = (y_pred != majority_idx) & (maxp < tau)
+                    if np.any(mask):
+                        y_pred = y_pred.copy()
+                        y_pred[mask] = majority_idx
+                else:
+                    print(f"[ML] Thresholding skipped: fallback label '{majority_label_var.get()}' not in training classes.")
+            else:
+                print("[ML] Thresholding skipped: classifier lacks predict_proba.")
+                """
+        # --- END NEW ---
+        # --- NEW: confidence threshold -> fallback to majority label
+        """
+        if enable_thresh_var.get():
+            tau = float(thresh_val_var.get())
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X_test)  # shape: [n_samples, n_classes]
+                maxp = proba.max(axis=1)
+
+                # find fallback class index in the fitted LabelEncoder
+                try:
+                    fallback_idx = list(le.classes_).index(majority_label_var.get())
+                except ValueError:
+                    fallback_idx = None
+
+                if fallback_idx is not None:
+                    import numpy as np
+                    mask = (maxp < tau)
+                    if mask.any():
+                        # y_pred is already encoded ints
+                        y_pred = y_pred.copy()
+                        y_pred[mask] = fallback_idx
+                else:
+                    print(f"[ML] Thresholding skipped: fallback label '{majority_label_var.get()}' not in training classes.")
+            else:
+                print("[ML] Thresholding skipped: classifier lacks predict_proba.")
+        """
+        #report = classification_report(y_test_enc, y_pred, target_names=used_names, zero_division=0)
+
+        # --- END NEW ---
+        
+        # evaluate on test
+        #y_pred = model.predict(X_test)
+        used = unique_labels(y_test_enc, y_pred)
+        used_names = [le.classes_[i] for i in used]
+        # quiet, deterministic handling of 0/0 cases 20250902
+        report = classification_report(y_test_enc, y_pred, target_names=used_names, zero_division=0)
+        # (optional) flag classes with no predicted or no true samples
+        labels_all = list(le.classes_)
+        cm = confusion_matrix(y_test_enc, y_pred, labels=np.arange(len(labels_all)))
+        no_pred = [labels_all[j] for j, s in enumerate(cm.sum(axis=0)) if s == 0]
+        no_true = [labels_all[i] for i, s in enumerate(cm.sum(axis=1)) if s == 0]
+
+        if no_pred or no_true:
+            print(f"[ML] No predicted samples for: {no_pred}")
+            print(f"[ML] No true samples in test for: {no_true}")
+        #report = classification_report(y_test_enc, y_pred, target_names=used_names)
+
+        #glycan only report (maybe wont export as report, need screenshot?)
+        try:
+            maj_idx = labels_all.index(majority_label_var.get())
+        except ValueError:
+            maj_idx = None
+
+        if maj_idx is not None:
+            mask_glycan_true = (y_test_enc != maj_idx)
+            if np.any(mask_glycan_true):
+                glycan_label_indices = [i for i, _ in enumerate(labels_all) if i != maj_idx]
+                glycan_names = [labels_all[i] for i in glycan_label_indices]
+                glycan_report = classification_report(
+                    y_test_enc[mask_glycan_true],
+                    y_pred[mask_glycan_true],
+                    labels=glycan_label_indices,
+                    target_names=glycan_names,
+                    zero_division=0
+                )
+                print("\n[ML] Glycan-only report (excludes Non-glycan):\n", glycan_report)
+        # --- end glycan-only report ---
+
+        # notify
+        # build a robust “cap” line that works for both modes
+        cap_applied_to = info.get("majority_cap_applied_to") or info.get("train_majority_cap_applied_to")
+        cap_value      = info.get("majority_cap") or info.get("train_majority_cap")
+        cap_prefix     = "Capped training " if info.get("mode") == "cap_training_only" else "Capped "
+        cap_line = (f"{cap_prefix}'{cap_applied_to}' at {cap_value}"
+                    if cap_applied_to else "No majority cap applied.")
+
+        msg = [
+            "Random Forest trained successfully.",
+            f"Classes kept: {len(info['kept_label_counts'])}",
+            cap_line,
+            f"Dropped tiny classes (< {min_samples_var.get()}): {sum(info['dropped_rare_counts'].values())}",
+            "",
+            report,
+        ]
+        """
+        msg = [
+            "Random Forest trained successfully.",
+            f"Classes kept: {len(info['kept_label_counts'])}",
+            (f"Capped '{info['majority_cap_applied_to']}' at {info['majority_cap']} "
+             if info['majority_cap_applied_to'] else "No majority cap applied."),
+            f"Dropped tiny classes (< {min_samples_var.get()}): {sum(info['dropped_rare_counts'].values())}",
+            "",
+            report
+        ]
+        """
+        #new lines, comment if I feel it annoying
+        msg.insert(1, f"RF: {int(n_estimators_var.get())} trees, class_weight="
+               f"{'balanced' if class_weight_var.get() else 'none'}")
+        msg.insert(1, f"Mode: {'Cap training only' if real_world_test_var.get() else 'Cap before split'}")
+        msg.insert(1, f"Thresholding: {'ON τ=' + format(thresh_val_var.get(), '.2f') + ' → ' + majority_label_var.get() if enable_thresh_var.get() else 'OFF'}")
+
+        messagebox.showinfo("Training Complete", "\n".join(msg))
+
+        # save artifacts
+        base = os.path.splitext(train_csv_path)[0]
+        model_path  = base + "_rf_model.joblib"
+        enc_path    = base + "_labelencoder.joblib"
+        report_path = base + "_rf_performance.txt"
+        joblib.dump(model, model_path)
+        joblib.dump(le, enc_path)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report)
+
+        # persist params back to exp.json if present
+        if linked_exp_json and os.path.exists(linked_exp_json):
+            try:
+                with open(linked_exp_json, "r", encoding="utf-8") as f:
+                    exp_data = json.load(f)
+                exp_data["train_parameters"] = {
+                    "split_ratio_test": float(test_split_var.get()),
+                    "split_ratio_val": float(val_split_var.get()),
+                    "min_samples": int(min_samples_var.get()),
+                    "balancing_enabled": bool(use_balance_var.get()),
+                    "majority_label": majority_label_var.get(),
+                    "majority_factor": int(majority_factor_var.get()),
+                    "stratify": bool(use_stratify_var.get()),
+                    "rf_n_estimators": int(n_estimators_var.get()),
+                    "rf_class_weight": "balanced" if class_weight_var.get() else "none",
+                    "real_world_test_cap_training_only": bool(real_world_test_var.get()),
+                    "threshold_enabled": bool(enable_thresh_var.get()),
+                    "threshold_tau": float(thresh_val_var.get()),
+                    "model_path": model_path,
+                    "labelencoder_path": enc_path,
+                    "report_path": report_path
+                }
+                with open(linked_exp_json, "w", encoding="utf-8") as f:
+                    json.dump(exp_data, f, indent=4)
+            except Exception as e:
+                print("Failed to write training parameters to exp.json:", e)
+
+
+    """
     def select_train_csv():
         nonlocal train_csv_path, linked_exp_json
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
@@ -2599,6 +3300,10 @@ def open_ml_analysis_window():
             try:
                 with open(exp_json_path, "r") as f:
                     exp_data = json.load(f)
+                try:
+                    exp_data["train_csv_is_pseudolabel"] = bool(is_pseudolabel_var.get())    
+                except:
+                    print("[dev]No pseudolabel info in metadata (no impact)")
                 exp_data["train_csv"] = train_csv_path
                 with open(exp_json_path, "w") as f:
                     json.dump(exp_data, f, indent=4)
@@ -2607,6 +3312,7 @@ def open_ml_analysis_window():
 
         origin_info.configure(state="normal")
         origin_info.delete(1.0, "end")
+        origin_info.insert("end", f"\nDataset type: {'Pseudo-labeled' if is_pseudolabel_var.get() else 'Manual'}")
         origin_info.insert("end", f"Loaded file: {os.path.basename(path)}\n")
         if exp_json_path:
             origin_info.insert("end", f"Linked .exp.json: {os.path.basename(exp_json_path)}\n")
@@ -2665,6 +3371,11 @@ def open_ml_analysis_window():
         valid_classes = class_counts[class_counts >= min_samples].index
         df = df[df[label_col].isin(valid_classes)].copy()
 
+        if is_pseudolabel_var.get():
+            print("[ML] Training with pseudo-labeled dataset")
+        else:
+            print("[ML] Training with manual dataset")
+
         drop_cols = ['ID', 'Source', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID', 'unique_ID']
         X = df.drop(columns=[col for col in drop_cols if col in df.columns] + [label_col], errors='ignore')
         y = df[label_col]
@@ -2705,7 +3416,8 @@ def open_ml_analysis_window():
                         "split_ratio": test_ratio,
                         "min_samples": min_samples,
                         "model_path": model_path,
-                        "report_path": report_path
+                        "report_path": report_path,
+                        "is_pseudolabeled": bool(is_pseudolabel_var.get()),
                     }
                     with open(linked_exp_json, "w") as f:
                         json.dump(exp_data, f, indent=4)
@@ -2714,7 +3426,39 @@ def open_ml_analysis_window():
 
         except Exception as e:
             messagebox.showerror("Training Failed", str(e))
+        """
+    def train_with_optional_ng(
+    positives_df,            # trainable (≥0.07 or ≥0.06 or salvage)
+    df_pseudo_full,          # long-form pseudolabel TSV
+    ion_masses, ppm=20.0,
+    include_ng=True,
+    low_score_col="ion score",
+    low_score_cut=0.03,
+    ng_strategy="cap_ng",    # or 'undersample' or 'none'
+    max_ng_ratio=1.0,
+    class_weight_balanced=True,):
+        train_df = positives_df.copy()
 
+        if include_ng:
+            ng_df = collect_ng_candidates(
+                df_pseudo_full=df_pseudo_full,
+                df_pseudo_filtered_pos=positives_df,
+                ion_masses=ion_masses,
+                ppm=ppm,
+                low_score_col=low_score_col,
+                low_score_cut=low_score_cut,
+                use_low_score=True,
+                use_no_hit=True,
+                manual_unknown_df=None,  # or your MSlist slice if available
+                scan_col="MS2scan_no",
+            )
+            if ng_strategy in ("cap_ng", "undersample"):
+                comb = pd.concat([train_df, ng_df], ignore_index=True)
+                train_df = resample_by_strategy(
+                    comb, label_col="Structure", strategy=ng_strategy, max_ng_ratio=max_ng_ratio
+                )
+            else:
+                train_df = pd.concat([train_df, ng_df], ignore_index=True)
 
     def select_model_file():
         nonlocal model_file_path
@@ -2734,6 +3478,7 @@ def open_ml_analysis_window():
         messagebox.showinfo("Not Yet Implemented", "This feature will allow you to select an experiment and automatically create a feature-matched dataset from its annotation and early raw-converted CSV.")
 
     def run_prediction():
+        import numpy as np
         try:
             import joblib
         except ImportError:
@@ -2761,6 +3506,43 @@ def open_ml_analysis_window():
         try:
             X = df.drop(columns=["MS2scan_no"], errors="ignore")
             y_pred = model.predict(X)
+
+            #applying same filter to prediction model
+            # --- optional: apply the same margin-aware demotion in prediction ---
+            try:
+                tau = float(thresh_val_var.get())
+            except Exception:
+                tau = 0.60  # sensible fallback
+
+            margin = 0.05
+
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X)
+                # work in encoded-space (ints). If y_pred are strings because of a prior transform, re-encode temporarily.
+                if le is not None and (len(y_pred) > 0 and isinstance(y_pred[0], str)):
+                    y_pred_enc = le.transform(y_pred)
+                    classes_ = list(le.classes_)
+                else:
+                    y_pred_enc = y_pred
+                    classes_ = list(model.classes_)
+                try:
+                    majority_idx = classes_.index(majority_label_var.get())
+                except ValueError:
+                    majority_idx = None
+
+                if majority_idx is not None:
+                    maxp = proba.max(axis=1)
+                    p_major = proba[:, majority_idx]
+                    demote = (y_pred_enc != majority_idx) & (maxp < tau) & (p_major >= (maxp - margin))
+                    if np.any(demote):
+                        y_pred_enc = y_pred_enc.copy()
+                        y_pred_enc[demote] = majority_idx
+                    # push back to strings if we have a label encoder
+                    if le is not None:
+                        y_pred = le.inverse_transform(y_pred_enc)
+                    else:
+                        y_pred = y_pred_enc
+            # --- end optional demotion at prediction ---
 
             # If encoder available, decode
             if le is not None:
@@ -2869,7 +3651,7 @@ def open_ml_analysis_window():
 
     subwin = tk.Toplevel(root)
     subwin.title("ML Analysis")
-    subwin.geometry("650x520")
+    subwin.geometry("680x560")
 
     notebook = ttk.Notebook(subwin)
     notebook.pack(fill="both", expand=True)
@@ -2877,6 +3659,7 @@ def open_ml_analysis_window():
     # ... [no changes below this line: GUI layout remains as-is]
 
 
+    
     # --- Tab 1: Train Model ---
     train_tab = ttk.Frame(notebook)
     notebook.add(train_tab, text="Train Model")
@@ -2884,6 +3667,15 @@ def open_ml_analysis_window():
     tk.Label(train_tab, text="Step 1: Load Trainable Dataset (.csv)").grid(row=0, column=0, sticky="w", padx=10, pady=5)
     train_load_button = tk.Button(train_tab, text="Select CSV File", command=select_train_csv)
     train_load_button.grid(row=0, column=1, padx=5, pady=5)
+    # flag: manual vs pseudo-labeled
+    is_pseudolabel_var = tk.BooleanVar(value=False)
+    pseudo_check = tk.Checkbutton(
+        train_tab,
+        text="This is a pseudo-labeled dataset",
+        variable=is_pseudolabel_var
+    )
+    pseudo_check.grid(row=0, column=2, padx=10, pady=5, sticky="w")
+
 
     tk.Label(train_tab, text="Step 2: Select Label Column").grid(row=1, column=0, sticky="w", padx=10, pady=5)
     label_dropdown = ttk.Combobox(train_tab, values=['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID'])
@@ -2914,7 +3706,7 @@ def open_ml_analysis_window():
     # -- Training tab and prediction tab UI (end reminder buttons) --
     tk.Label(train_tab, text="(🔜) Combine Datasets for Training").grid(row=10, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
     tk.Button(train_tab, text="[Placeholder] Combine Datasets").grid(row=11, column=0, columnspan=2, padx=10, pady=5)
-
+    
     # --- Tab 2: Predict ---
     predict_tab = ttk.Frame(notebook)
     notebook.add(predict_tab, text="Predict")
@@ -2936,6 +3728,332 @@ def open_ml_analysis_window():
     # -- Training tab and prediction tab UI (end reminder buttons) --
     tk.Label(predict_tab, text="(🔜) Combine Datasets for Prediction").grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
     tk.Button(predict_tab, text="[Placeholder] Combine Datasets").grid(row=6, column=0, columnspan=2, padx=10, pady=5)
+
+    # --- Tab 3 Build Trainable from Pseudolabels ---
+    build_tab = ttk.Frame(notebook)
+    # let the rightmost column expand so long paths aren’t cramped
+    build_tab.columnconfigure(2, weight=1)
+
+    # tiny status label above the Build button
+    build_status_var = tk.StringVar(value="")
+    tk.Label(build_tab, textvariable=build_status_var, fg="gray").grid(
+        row=6, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4)
+    )
+    notebook.add(build_tab, text="From Pseudolabels")
+    ng_frame = ttk.LabelFrame(build_tab, text="Include Non-glycan (NG) candidates")
+    ng_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=(0,10))
+
+    use_low_score_ng = tk.BooleanVar(value=True)
+    use_nohit_ng     = tk.BooleanVar(value=True)
+    low_score_cut    = tk.DoubleVar(value=0.07)
+
+    ttk.Checkbutton(ng_frame, text="Include low-score bin as NG", variable=use_low_score_ng).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+    ttk.Label(ng_frame, text="low-score cut").grid(row=0, column=1, padx=(12,4), pady=6, sticky="e")
+    tk.Spinbox(ng_frame, from_=0.0, to=0.5, increment=0.01, textvariable=low_score_cut, width=6).grid(row=0, column=2, padx=4, pady=6, sticky="w")
+
+    ttk.Checkbutton(ng_frame, text="Include 'no-hit' spectra as NG", variable=use_nohit_ng).grid(row=0, column=3, padx=12, pady=6, sticky="w")
+
+    # ---- Normalization / feature build options ----
+    norm_frame = ttk.LabelFrame(build_tab, text="Feature normalization & ion list")
+    norm_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=10, pady=(0,10))
+
+    rebuild_all_features = tk.BooleanVar(value=False)
+    ttk.Checkbutton(norm_frame, text="Rebuild ALL features from long-form (ensure log10(I)+1 baseline=1.0)", 
+                    variable=rebuild_all_features).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+
+    tk.Label(norm_frame, text="Ion list (CSV/XLSX with a 'mass' column)").grid(row=1, column=0, padx=8, pady=4, sticky="w")
+    ionlist_path_var2 = tk.StringVar(value="")
+    def _pick_ionlist():
+        p = filedialog.askopenfilename(title="Select Ion List", 
+                                    filetypes=[("CSV/XLSX", "*.csv;*.xlsx;*.xls"), ("All files", "*.*")])
+        if p: ionlist_path_var2.set(p)
+    ttk.Button(norm_frame, text="Choose…", command=_pick_ionlist).grid(row=1, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(norm_frame, textvariable=ionlist_path_var2, wraplength=360).grid(row=1, column=2, columnspan=2, padx=6, pady=4, sticky="w")
+
+
+    # State
+    pseudo_path_var = tk.StringVar(value="")
+    features_path_var = tk.StringVar(value="")
+    out_path_var = tk.StringVar(value="(auto, next to features)")
+
+    # Row 0: selectors
+    tk.Label(build_tab, text="1) Pseudolabeled TSV/CSV (long form)").grid(row=0, column=0, sticky="w", padx=10, pady=6)
+    def _sel_pseudo():
+        p = filedialog.askopenfilename(title="Select pseudolabel TSV/CSV",
+                                       filetypes=[("TSV/CSV", "*.tsv *.csv"), ("All files", "*.*")])
+        if p: pseudo_path_var.set(os.path.abspath(p))
+    tk.Button(build_tab, text="Choose…", command=_sel_pseudo).grid(row=0, column=1, padx=6, pady=6, sticky="w")
+    tk.Label(build_tab, textvariable=pseudo_path_var, wraplength=360, anchor="w", justify="left").grid(row=0, column=2, sticky="w", padx=6, pady=6)
+
+    tk.Label(build_tab, text="2) Feature/Merged CSV (wide, same sample)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+    def _sel_features():
+        p = filedialog.askopenfilename(title="Select feature/merged CSV (wide)",
+                                       filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+        if p: features_path_var.set(os.path.abspath(p))
+    tk.Button(build_tab, text="Choose…", command=_sel_features).grid(row=1, column=1, padx=6, pady=6, sticky="w")
+    tk.Label(build_tab, textvariable=features_path_var, wraplength=360, anchor="w", justify="left").grid(row=1, column=2, sticky="w", padx=6, pady=6)
+
+    # Row 2: thresholds
+    thr_frame = ttk.LabelFrame(build_tab, text="3) Thresholds / selection")
+    thr_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(4,10))
+    thr_frame.columnconfigure(4, weight=1)
+
+    tk.Label(thr_frame, text="min ion score").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+    ion_score_min = tk.DoubleVar(value=0.07)
+    tk.Spinbox(thr_frame, from_=0.00, to=1.00, increment=0.01, textvariable=ion_score_min, width=6).grid(row=0, column=1, padx=6, pady=6)
+
+    tk.Label(thr_frame, text="max |ppm_error|").grid(row=0, column=2, padx=12, pady=6, sticky="w")
+    ppm_abs_max = tk.DoubleVar(value=20.0)
+    tk.Spinbox(thr_frame, from_=0.0, to=200.0, increment=1.0, textvariable=ppm_abs_max, width=6).grid(row=0, column=3, padx=6, pady=6)
+
+    tk.Label(thr_frame, text="Top N per scan (by ion score)").grid(row=0, column=4, padx=12, pady=6, sticky="w")
+    topn_var = tk.IntVar(value=1)
+    tk.Spinbox(thr_frame, from_=1, to=5, textvariable=topn_var, width=4).grid(row=0, column=5, padx=6, pady=6)
+
+    # Row 3: label mapping
+    map_frame = ttk.LabelFrame(build_tab, text="4) Map composition → label column")
+    map_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=(0,10))
+    tk.Label(map_frame, text="Target label column").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+    label_target = ttk.Combobox(map_frame,
+        values=['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID'])
+    label_target.set('Structure')
+    label_target.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+
+    fill_unlabeled_as_none = tk.BooleanVar(value=False)
+    ttk.Checkbutton(map_frame, text="Fill non-matched scans as 'None' (negative class)",
+                    variable=fill_unlabeled_as_none).grid(row=0, column=2, padx=12, pady=6, sticky="w")
+    
+    # Output line → row 5 (moved down so it doesn’t overlap)
+    tk.Label(build_tab, text="5) Output (auto-named):").grid(row=5, column=0, sticky="w", padx=10, pady=6)
+    tk.Label(build_tab, textvariable=out_path_var, anchor="w", justify="left").grid(row=5, column=1, columnspan=2, sticky="w", padx=6, pady=6)
+
+
+    """
+    # Row 4: output
+    tk.Label(build_tab, text="5) Output (auto-named):").grid(row=4, column=0, sticky="w", padx=10, pady=6)
+    tk.Label(build_tab, textvariable=out_path_var, anchor="w", justify="left").grid(row=4, column=1, columnspan=2, sticky="w", padx=6, pady=6)
+    """
+    # Helpers
+    def _read_any_table(p):
+        # try TSV first, then CSV with common settings
+        try:
+            return pd.read_csv(p, sep="\t", engine="python")
+        except Exception:
+            return pd.read_csv(p, engine="python")
+
+    def _choose_scan_col(df):
+        for c in ["MS2scan_no","unique_ID","ScanNum","scan","Scan"]:
+            if c in df.columns: return c
+        return None
+
+    def _save_and_autoload(df_out, base_features_path):
+        base, ext = os.path.splitext(base_features_path)
+        out_path = base + "_PLabeled.csv"
+        df_out.to_csv(out_path, index=False)
+        out_path_var.set(out_path)
+
+        # auto-load into Train tab
+        nonlocal train_csv_path, linked_exp_json
+        train_csv_path = os.path.abspath(out_path)
+        origin_info.configure(state="normal")
+        origin_info.delete(1.0, "end")
+        origin_info.insert("end", f"Loaded file: {os.path.basename(out_path)}\n")
+        origin_info.insert("end", f"Path: {out_path}")
+        origin_info.configure(state="disabled")
+
+        messagebox.showinfo("Done", f"Trainable CSV saved:\n{out_path}\n\nYou can now click “Train Model” in the first tab.")
+
+    # Action
+    def _build_from_pseudolabels():
+        p_path = pseudo_path_var.get().strip()      # long-form pseudolabels (full TSV/CSV)
+        f_path = features_path_var.get().strip()    # existing wide feature CSV (optional if rebuilding all)
+        if not p_path or not os.path.exists(p_path):
+            messagebox.showwarning("Missing pseudolabels", "Please choose a pseudolabeled TSV/CSV (long form).")
+            return
+        if not rebuild_all_features.get() and (not f_path or not os.path.exists(f_path)):
+            messagebox.showwarning("Missing features", "Choose a wide feature CSV (or enable 'Rebuild ALL features').")
+            return
+
+        try:
+            df_full = _read_any_table(p_path)     # full long-form pseudolabels
+            df_feat = pd.read_csv(f_path) if (f_path and os.path.exists(f_path)) else None
+        except Exception as e:
+            messagebox.showerror("Read error", str(e)); return
+
+        # --- scan column detection ---
+        scan_col = _choose_scan_col(df_full) or "MS2scan_no"
+        if df_feat is not None:
+            scan_feat = _choose_scan_col(df_feat) or "MS2scan_no"
+
+        # --- positives (keep best composition per scan after your score/ppm filters) ---
+        pos = df_full.copy()
+        if "ion score" in pos.columns:
+            pos = pos[pos["ion score"].astype(float) >= float(ion_score_min.get())]
+        if "ppm_error" in pos.columns:
+            pos = pos[pos["ppm_error"].abs().astype(float) <= float(ppm_abs_max.get())]
+        # rank by score (or |ppm|)
+        use_score = "ion score" in pos.columns
+        sort_cols = [scan_col] + (["ion score"] if use_score else ["ppm_error"])
+        ascending = [True] + ([False] if use_score else [True])
+        pos = pos.sort_values(by=sort_cols, ascending=ascending).groupby(scan_col, as_index=False).head(int(topn_var.get()))
+        # map composition -> chosen label col
+        labcol = label_target.get().strip()
+        if "composition" in pos.columns:
+            pos[labcol] = pos["composition"].astype(str)
+        elif labcol not in pos.columns:
+            messagebox.showerror("No composition", "Neither 'composition' nor the chosen label column exist in the pseudolabels."); return
+        pos_labels = pos[[scan_col, labcol]].drop_duplicates()
+
+        # --- decide feature source & ion masses ---
+        ion_masses = None
+        if rebuild_all_features.get():
+            # we will rebuild ALL features from long-form peaks using an ion list
+            ion_df = _read_ion_df(ionlist_path_var2.get().strip())
+            if ion_df is None or "mass" not in ion_df.columns:
+                messagebox.showerror("Ion list required", "Provide an ion list with a 'mass' column to rebuild features."); return
+            ion_masses = ion_df["mass"].astype(float).tolist()
+        else:
+            # use the existing wide matrix’ feature columns as the ion set (drop admin/label)
+            drop_cols = {labcol, "ID", "Source", "IUPACname(optional)", "Glycanannotation2", "GlyToucan ID", "unique_ID"}
+            ion_masses = [c for c in df_feat.columns if c not in drop_cols and c != scan_feat]
+
+
+        # --- build NG from FULL long-form (complement of positives) ---
+        # 1) unique scans from the long TSV (carry only peaks we need to build features)
+        all_scans_unique = (df_full.drop_duplicates(subset=[scan_col])
+                            [[scan_col, "peaklist", "peakintensity"]]
+                            .copy())
+
+        # 2) complement = all scans not in the positive set
+        pos_set = set(pd.to_numeric(pos_labels[scan_col], errors="coerce").astype("Int64").dropna().tolist())
+        neg_scans_df = all_scans_unique[~pd.to_numeric(all_scans_unique[scan_col], errors="coerce")
+                                        .astype("Int64").isin(pos_set)].reset_index(drop=True)
+
+        # 3) build NG features with the same normalization (log10(I)+1; miss=1.0)
+        ng_feat = build_features_from_peaks_log10_plus1(neg_scans_df, ion_masses, ppm=float(ppm_abs_max.get()))
+
+        # 4) assemble NG table (rename scan col and set label)
+        ng_df = pd.concat([neg_scans_df[[scan_col]].reset_index(drop=True), ng_feat], axis=1)
+        ng_df = ng_df.rename(columns={scan_col: "MS2scan_no"})
+        ng_df["Structure"] = "Non-glycan"
+        if labcol != "Structure":
+            ng_df = ng_df.rename(columns={"Structure": labcol})
+
+        """
+        # --- build NG candidates (low-score + no-hit) with reference normalization ---
+        ng_df = pd.DataFrame(columns=[scan_col])
+        try:
+            from ml_ng_utils import collect_ng_candidates, build_features_from_peaks_log10_plus1
+        except Exception:
+            messagebox.showerror("Import error", "Could not import ml_ng_utils helpers."); return
+
+        if use_low_score_ng.get() or use_nohit_ng.get():
+            ng_df = collect_ng_candidates(
+                df_pseudo_full=df_full,
+                df_pseudo_filtered_pos=pos,
+                ion_masses=ion_masses,
+                ppm=float(ppm_abs_max.get()),
+                low_score_col="ion score",
+                low_score_cut=float(low_score_cut.get()),
+                use_low_score=bool(use_low_score_ng.get()),
+                use_no_hit=bool(use_nohit_ng.get()),
+                manual_unknown_df=None,
+                scan_col=scan_col,
+            )
+            # ng_df contains features (rebuilt with log10(I)+1) and Structure='Non-glycan'
+            # ensure label column name matches UI selection
+            if "Structure" in ng_df.columns and labcol != "Structure":
+                ng_df = ng_df.rename(columns={"Structure": labcol})
+
+        # --- assemble final wide matrix ---
+        
+        if rebuild_all_features.get():
+            # positives: rebuild features directly from long-form to match NG normalization
+            feat_pos = build_features_from_peaks_log10_plus1(df_full.set_index(scan_col).loc[pos_labels[scan_col]].reset_index(),
+                                                            ion_masses, ppm=float(ppm_abs_max.get()))
+            feat_pos.insert(0, "MS2scan_no", pos_labels[scan_col].values)
+            feat_pos[labcol] = pos_labels[labcol].values
+            wide = feat_pos
+            if not ng_df.empty:
+                wide = pd.concat([wide, ng_df], ignore_index=True)
+        else:
+            # keep the existing wide features for positives + merge labels; then append NG (already wide)
+            wide = df_feat.copy()
+            if labcol not in wide.columns:
+                wide[labcol] = None
+            # join labels into wide
+            wide = wide.merge(pos_labels, how="left", left_on=scan_feat, right_on=scan_col, suffixes=("", "_pl"))
+            wide[labcol] = wide[labcol + "_pl"].where(wide[labcol + "_pl"].notna(), wide[labcol])
+            wide = wide.drop(columns=[c for c in [labcol + "_pl", scan_col] if c in wide.columns])
+
+            # append NG rows that aren’t already in wide
+            if not ng_df.empty:
+                already = set(wide[scan_feat].astype(int).tolist())
+                ng_add = ng_df[~ng_df["MS2scan_no"].astype(int).isin(already)].copy()
+                # align columns
+                for c in wide.columns:
+                    if c not in ng_add.columns:
+                        ng_add[c] = None
+                ng_add = ng_add[wide.columns]
+                wide = pd.concat([wide, ng_add], ignore_index=True)
+        
+        # optional: fill unlabeled as 'None'
+        if fill_unlabeled_as_none.get():
+            wide[labcol] = wide[labcol].fillna("None")
+        """
+
+        # positives: rebuild features directly from long-form to match NG normalization 20250830
+        # 1) make one row per positive scan (carry peaks only)
+        scans_unique = (df_full.drop_duplicates(subset=[scan_col])
+                        [[scan_col, "peaklist", "peakintensity"]]
+                        .copy())
+
+        # ensure consistent dtypes for the join
+        scans_unique[scan_col] = pd.to_numeric(scans_unique[scan_col], errors="coerce").astype("Int64")
+        pos_labels[scan_col]   = pd.to_numeric(pos_labels[scan_col],   errors="coerce").astype("Int64")
+
+        # pull exactly the positive scans, preserving order of pos_labels
+        scans_for_pos = scans_unique.set_index(scan_col).loc[pos_labels[scan_col]].reset_index()
+
+        # 2) build features (log10(I)+1; miss=1.0) with the agreed ion set
+        feat_pos = build_features_from_peaks_log10_plus1(
+            scans_for_pos, ion_masses, ppm=float(ppm_abs_max.get())
+        )
+
+        # 3) insert aligned scan id and label (sizes match)
+        feat_pos.insert(0, "MS2scan_no", scans_for_pos[scan_col].to_numpy())
+        feat_pos[labcol] = pos_labels.set_index(scan_col).loc[scans_for_pos[scan_col], labcol].to_numpy()
+
+        wide = feat_pos
+        if not ng_df.empty:
+            wide = pd.concat([wide, ng_df], ignore_index=True)
+
+
+        # --- status readout: counts ---
+        try:
+            # positives = unique scans that survived score/ppm and were labeled
+            pos_count = int(pos_labels[scan_col].nunique()) if 'pos_labels' in locals() and not pos_labels.empty else 0
+        except Exception:
+            pos_count = 0
+
+        ng_count = int(len(ng_df)) if 'ng_df' in locals() and ng_df is not None and not ng_df.empty else 0
+        total_count = int(len(wide))
+
+        # IMPORTANT: NG is derived from the full long-form table, excluding positive scans.
+        # This ensures NG is NOT a subset of the 2,481 filtered rows, but from the complement in df_full.
+        build_status_var.set(f"Built dataset → positives={pos_count}, NG={ng_count}, total={total_count}")
+
+        _save_and_autoload(wide, f_path or p_path)
+
+    #tk.Button(build_tab, text="Build Trainable CSV", command=_build_from_pseudolabels, bg="#E6FFE6").grid(row=5, column=0, columnspan=3, pady=12)
+
+    
+    # Build button → row 7 (status label sits on row 6)
+    tk.Button(build_tab, text="Build Trainable CSV", command=_build_from_pseudolabels, bg="#E6FFE6").grid(
+        row=7, column=0, columnspan=3, pady=12
+    )
+
+
 
     close_button = tk.Button(subwin, text="Close", command=subwin.destroy)
     close_button.pack(pady=5)
@@ -2983,7 +4101,7 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v0.4a")
+root.title("GlycoMSP File Manager GUI v0.5")
 root.geometry("840x600")
 root.minsize(840, 600)
 
