@@ -1219,6 +1219,20 @@ def open_prepare_dataset_window():
     experiment_method_paths = {}  # Store .exp.json path per experiment
     sample_method_folder = None  # Global path for saving per-sample method.json files
     experiment_status_labels = {}  # GUI labels for status display, indexed by experiment
+
+    #20250905 added for negative label
+    # --- Negative sampling (Prepare Dataset) ---
+    add_negatives_var   = tk.BooleanVar(value=False)
+    neg_ratio_var       = tk.DoubleVar(value=3.0)   # max neg : pos
+    #neg_scorecol_var    = tk.StringVar(value="score")
+    #neg_scorethr_var    = tk.DoubleVar(value=0.05)  # keep scans with max(score) < thr
+    neg_markercols_var  = tk.StringVar(value="")    # e.g. "core_marker_b,core_marker_y"
+    neg_markermin_var   = tk.IntVar(value=1)        # require < this many marker hits
+    min_hits_var      = tk.IntVar(value=3)      # keep scans with < min_hits hits
+    ppm_tol_var       = tk.StringVar(value="10")# ppm tolerance; text with validation
+    n_features_var    = tk.IntVar(value=0)      # total ion features (from ion_df)
+    gate_hint_var     = tk.StringVar(value="Ion features not loaded yet")
+
     # --- Treeview UI ---
     tree = ttk.Treeview(subwin)
     tree.heading("#0", text="Dataset Explorer", anchor="w")
@@ -1440,6 +1454,181 @@ def open_prepare_dataset_window():
         else:
             print(f"[debug] skipping loading raw file")
 
+    #live update of ion hits
+
+    def current_selected_files():
+        """Return the files dict for the currently selected sample,
+        even if a child file node is selected."""
+        sel = tree.selection()
+        if not sel:
+            return None
+
+        node = sel[0]
+        text = tree.item(node, "text")
+
+        # If a file row like 'CSV: ...' is selected, go up to the sample row
+        if ":" in text:
+            node = tree.parent(node)
+            text = tree.item(node, "text")
+
+        # Now `node` should be a sample row; derive sample & experiment names
+        sample_name = clean_sample_name(text)
+        exp_node    = tree.parent(node)
+        if not exp_node:
+            return None
+
+        exp_text = tree.item(exp_node, "text") or ""
+        exp_name = exp_text.replace("Experiment: ", "").split(" (")[0].strip()
+
+        try:
+            return experiment_projects[exp_name]["samples"][sample_name]
+        except KeyError:
+            return None
+
+    def _fetch_ion_count_for_dialog():
+        # Try: current sample’s Excel; else let user pick one.
+        from tkinter import filedialog, messagebox
+        files = current_selected_files()
+        excel_path = None
+        try:
+            # replace this with how you access the selected sample's file map
+            # e.g., files = get_selected_sample_files()
+            #files = experiment_projects["samples"]#current_selected_files()  # <-- implement this small accessor
+            excel_path = files.get("excel")
+        except Exception:
+            excel_path = None
+
+        if not excel_path:
+            excel_path = filedialog.askopenfilename(
+                title="Select manual annotation Excel (ionlist)",
+                filetypes=[("Excel", "*.xlsx *.xls")]
+            )
+            if not excel_path:
+                return  # user cancelled
+
+        try:
+            n, _ = mspval.peek_ion_feature_count(excel_path)
+            n_features_var.set(int(n))
+            _update_gate_hint()
+        except Exception as e:
+            messagebox.showwarning("Ion list", f"Could not read ionlist:\n{e}")
+
+    def _update_gate_hint():
+        try:
+            k = int(min_hits_var.get())
+        except Exception:
+            k = 3
+        n = int(n_features_var.get())
+        if n > 0:
+            pct = 100.0 * k / n
+            gate_hint_var.set(f"Gating non-glycan: ion matches < {k} hits (~{pct:.1f}% ; {k} of {n})")
+        else:
+            gate_hint_var.set(f"Gating non-glycan: ion matches < {k} hits (feature count unknown yet)")
+
+    # added 20250905 place here bc validate+merge use this function
+    def open_negative_options_dialog():
+        import re
+        dlg = tk.Toplevel(root)        # you already switched to root
+        dlg.title("Negative Sampling Options")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        # Try to auto-load ion feature count from the selected sample
+        try:
+            files = current_selected_files()
+            excel_or_ion_path = None
+            if files:
+                # Prefer annotated Excel; if your pipeline sometimes stores an external ion file, check those too
+                excel_or_ion_path = (
+                    files.get("excel") or
+                    files.get("ion_sheet_file") or
+                    files.get("ionlist_path")
+                )
+            if excel_or_ion_path:
+                n, _ = mspval.peek_ion_feature_count(excel_or_ion_path)
+                n_features_var.set(int(n))
+        except Exception as e:
+            print("[neg opts] auto ionlist load failed:", e)
+
+        # Update the hint line (uses n_features_var + min_hits_var)
+        _update_gate_hint()
+
+        tk.Checkbutton(dlg, text="Add Non-glycan entries (easy negatives)",
+                    variable=add_negatives_var).grid(row=0, column=0, columnspan=2,
+                                                        sticky="w", padx=10, pady=(10,6))
+
+        # ratio row
+        tk.Label(dlg, text="Max ratio (neg:pos):").grid(row=1, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=0.0, to=10.0, increment=0.5, width=6,
+                textvariable=neg_ratio_var).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
+        # ion-hit gate
+        tk.Label(dlg, text="Keep scans with < min hits to ion list:").grid(row=2, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=0, to=50, increment=1, width=6,
+                textvariable=min_hits_var).grid(row=2, column=1, sticky="w", padx=6, pady=2)
+
+        # ppm tolerance with float validation
+        def _valid_float(s: str) -> bool:
+            # allow empty (user mid-typing), or digits/one dot (no lone '.')
+            return (s == "") or (re.fullmatch(r"\d+(\.\d+)?", s) is not None)
+        vcmd = dlg.register(lambda P: _valid_float(P))
+
+        tk.Label(dlg, text="Ion match tolerance (ppm):").grid(row=3, column=0, sticky="e", padx=10)
+        tk.Entry(dlg, textvariable=ppm_tol_var, width=8,
+                validate="key", validatecommand=(vcmd, "%P")
+                ).grid(row=3, column=1, sticky="w", padx=6, pady=2)
+
+        # live hint
+        tk.Label(dlg, textvariable=gate_hint_var, fg="#555").grid(row=4, column=0, columnspan=2,
+                                                                sticky="w", padx=10, pady=(6,10))
+
+        tk.Button(dlg, text="Load ion list now…",
+          command=_fetch_ion_count_for_dialog).grid(row=4, column=0, columnspan=2,
+                                                            sticky="w", padx=10, pady=(6,0))
+        # move the hint to next row
+        tk.Label(dlg, textvariable=gate_hint_var, fg="#555").grid(row=5, column=0, columnspan=2,
+                                                                sticky="w", padx=10, pady=(6,10))
+
+        # react when min-hits changes
+        def _on_hits_change(*_): _update_gate_hint()
+        min_hits_var.trace_add("write", _on_hits_change)
+
+        # initialize text
+        _update_gate_hint()
+
+        tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=5, column=0, columnspan=2, pady=(4,10))
+
+    """ #score version
+    def open_negative_options_dialog():
+        dlg = tk.Toplevel(root)  # use the same parent you use elsewhere
+        dlg.title("Negative Sampling Options")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Checkbutton(dlg, text="Add Non-glycan entries (easy negatives)",
+                    variable=add_negatives_var).grid(row=0, column=0, columnspan=2,
+                                                        sticky="w", padx=10, pady=(10,4))
+
+        tk.Label(dlg, text="Max ratio (neg:pos):").grid(row=1, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=0.0, to=10.0, increment=0.5, width=6,
+                textvariable=neg_ratio_var).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
+        #tk.Label(dlg, text="Score column:").grid(row=2, column=0, sticky="e", padx=10)
+        #tk.Entry(dlg, textvariable=neg_scorecol_var, width=18).grid(row=2, column=1, sticky="w", padx=6, pady=2)
+
+        #tk.Label(dlg, text="Score threshold:").grid(row=3, column=0, sticky="e", padx=10)
+        #tk.Spinbox(dlg, from_=0.00, to=1.00, increment=0.01, width=6,
+        #        textvariable=neg_scorethr_var).grid(row=3, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(dlg, text="Marker cols (comma):").grid(row=4, column=0, sticky="e", padx=10)
+        tk.Entry(dlg, textvariable=neg_markercols_var, width=28).grid(row=4, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(dlg, text="Max allowed marker hits:").grid(row=5, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=0, to=5, increment=1, width=6,
+                textvariable=neg_markermin_var).grid(row=5, column=1, sticky="w", padx=6, pady=(2,10))
+
+        tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=6, column=0, columnspan=2, pady=(4,10))
+        """
 
     # --- link and validate the grouped sample ---
     def link_and_validate_sample(exp_name, sample_name):
@@ -1518,6 +1707,42 @@ def open_prepare_dataset_window():
         messagebox.showinfo("Validated", f"Sample '{sample_name}' under '{exp_name}' is now validated.")
         refresh_tree()
 
+    from pathlib import Path
+
+    def _resolve_method_json(files: dict) -> str | None:
+        """
+        Return an absolute path to the sample's method JSON.
+        Works whether files['json'] is absolute, relative, or just a basename.
+        Searches (in order): as-given, CSV folder, Excel folder, CWD.
+        """
+        cand = (files.get("json") or "").strip()
+        if not cand:
+            return None
+
+        p = Path(cand)
+        if p.is_absolute() and p.exists():
+            return str(p.resolve())
+
+        # Use the basename (user may have stored only the filename)
+        name = p.name if p.name else cand
+
+        # search roots: where users most often keep the JSON
+        roots = []
+        csvp   = files.get("csv")
+        excelp = files.get("excel")
+        if csvp:   roots.append(Path(csvp).parent)
+        if excelp: roots.append(Path(excelp).parent)
+        roots.append(Path.cwd())
+
+        for r in roots:
+            try:
+                q = (r / name)
+                if q.exists():
+                    return str(q.resolve())
+            except Exception:
+                pass
+        return None
+
     def try_merge_selected_sample():
         sel = tree.selection()
         if not sel:
@@ -1540,8 +1765,21 @@ def open_prepare_dataset_window():
 
         # Ask user for ion sheet name (later we will allow external ion file)
         #ion_sheet_name = simpledialog.askstring("Ion Sheet", "Enter ion sheet name (in Excel):", initialvalue="core_OG")
-        metadata_path=files["json"]
-        print(f"debug: metadata file: {metadata_path}")
+        
+        #20250905 quick fix on path issue
+        #metadata_path=files["json"]
+        metadata_path = _resolve_method_json(files)
+        if not metadata_path:
+            messagebox.showerror(
+                "Merge Failed",
+                "Could not locate the sample method JSON.\n\n"
+                f"Original value: {files.get('json')}\n"
+                "Tried: CSV folder, Excel folder, and the current working directory."
+            )
+            return
+
+        print(f"[DEBUG] Method JSON resolved to: {metadata_path}")
+        #print(f"debug: metadata file: {metadata_path}")
         try:
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
@@ -1559,8 +1797,80 @@ def open_prepare_dataset_window():
             today = datetime.now().strftime("%Y%m%d")
             outname = f"{sample_name}_merged_{today}.csv"
             outpath = os.path.join(outdir, outname)
-            
+            #quick fix on path
+
+
             pre_df, iondfindex, ion_df = mspval.directassign_files(files["excel"], files["csv"],derivatization_type, debug = False)
+            try:
+                n_feats = int(ion_df["mass"].notna().sum()) if ("mass" in ion_df.columns) else int(len(ion_df))
+            except Exception:
+                n_feats = 0
+            n_features_var.set(n_feats)
+            _update_gate_hint()
+
+            if add_negatives_var.get():
+                try:
+                    ppm = float(ppm_tol_var.get() or 10)
+                except Exception:
+                    ppm = 10.0
+                neg_df = mspval.sample_real_negatives(
+                    raw_tsv_path = files["csv"],
+                    annotated_scans = pre_df["MS2scan_no"],
+                    ion_df = ion_df,
+                    ppm_tol = ppm,
+                    min_hits = int(min_hits_var.get()),
+                    max_neg_ratio = float(neg_ratio_var.get())
+                )
+                added = len(neg_df)
+                if added:
+                    pre_df = pd.concat([pre_df, neg_df], ignore_index=True)
+                    print(f"[Prepare] Added {added} Non-glycan negatives (ppm={ppm}, min_hits<{int(min_hits_var.get())}, cap {neg_ratio_var.get():.1f}×).")
+                else:
+                    print("[Prepare] No eligible negatives found with current gates.")
+            #another old version
+            """
+            if add_negatives_var.get():
+                try:
+                    neg_df = mspval.sample_real_negatives(
+                        raw_tsv_path = files["csv"],
+                        annotated_scans = pre_df["MS2scan_no"],
+                        ion_df = ion_df,               # <-- use the same ion list you export with
+                        ppm_tol = 10.0,                # match your exporter tolerance (you use 10 here) 
+                        min_hits = int(neg_markermin_var.get()),  # e.g., 1 → keep only scans with 0 hits
+                        max_neg_ratio = float(neg_ratio_var.get())
+                    )
+                    if len(neg_df):
+                        pre_df = pd.concat([pre_df, neg_df], ignore_index=True)
+                        print(f"[Prepare] Added {len(neg_df)} Non-glycan negatives (cap {neg_ratio_var.get():.1f}×).")
+                    else:
+                        print("[Prepare] No eligible negatives with current gates.")
+                except Exception as e:
+                    print(f"[Prepare] Negative sampling skipped due to error: {e}")
+            """
+            """ #old version using score
+            if add_negatives_var.get():
+                try:
+                    marker_cols = [c.strip() for c in neg_markercols_var.get().split(",") if c.strip()] or None
+                    score_col = (neg_scorecol_var.get().strip() or None)
+                    neg_df = mspval.sample_real_negatives(
+                        raw_tsv_path = files["csv"],
+                        annotated_scans = pre_df["MS2scan_no"],
+                        score_col = score_col,
+                        score_thr = float(neg_scorethr_var.get()),
+                        marker_cols = marker_cols,
+                        marker_min = int(neg_markermin_var.get()),
+                        max_neg_ratio = float(neg_ratio_var.get()),
+                    )
+                    added = len(neg_df)
+                    if added:
+                        pre_df = pd.concat([pre_df, neg_df], ignore_index=True)
+                        print(f"[Prepare] Added {added} Non-glycan negatives (cap {neg_ratio_var.get():.1f}×).")
+                    else:
+                        print("[Prepare] No eligible negatives found with current gates.")
+                except Exception as e:
+                    print(f"[Prepare] Negative sampling skipped due to error: {e}")
+            """
+
             mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
         except Exception as e:
@@ -2543,7 +2853,9 @@ def open_prepare_dataset_window():
     link_button.grid
     merge_button = tk.Button(button_frame, text="Merge Sample", state="disabled", command=lambda: try_merge_selected_sample())
     merge_button.grid(row=2, column=1, padx=5)
-    tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=2, column=2, padx=5)
+    tk.Button(button_frame, text="Negative options…",
+          command=open_negative_options_dialog).grid(row=2, column=2, padx=5)
+    tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=2, column=3, padx=5)
     ttk.Button(button_frame, text="Assign Pseudo-Labels by Glycan Composition", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
     #GPT said without () it only passes the function, and work only if clicked
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
@@ -2567,6 +2879,7 @@ def open_prepare_dataset_window():
     #bottom place for "global" exp method file
     tk.Button(btn_frame, text="Load .exp.json", command=load_experiment_method_file).pack(side=tk.LEFT, padx=10)
     tk.Button(btn_frame, text="Save .exp.json", command=save_current_experiment_method).pack(side=tk.LEFT)
+
 
     # --- Right-click bind ---
     #tree.bind("<Button-3>", on_right_click)
@@ -3095,6 +3408,17 @@ def open_ml_analysis_window():
         # evaluate with proba
         # raw predictions
         y_pred = model.predict(X_test)
+
+        #extra binary glycan-vs-non-glycan report (print in terminal only)
+        from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+
+        maj_idx = list(le.classes_).index(majority_label_var.get())
+        y_true_bin = (y_test_enc != maj_idx).astype(int)   # 1=glycan, 0=non
+        y_pred_bin = (y_pred      != maj_idx).astype(int)
+
+        p,r,f,_ = precision_recall_fscore_support(y_true_bin, y_pred_bin, average="binary", zero_division=0)
+        acc = accuracy_score(y_true_bin, y_pred_bin)
+        print(f"[ML] Binary glycan-vs-non :: P={p:.2f} R={r:.2f} F1={f:.2f} Acc={acc:.2f}")
 
         # --- NEW: glycan-only confidence threshold -> fallback to majority label ---
         if enable_thresh_var.get():

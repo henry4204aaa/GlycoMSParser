@@ -1,5 +1,6 @@
-version = 0.9
-last_update = 20250411
+version = 0.93
+last_update = 20250905
+#v0.93 add negative label (non-glycans) back to manual annotation workflow
 #v0.9 workable file and awaiting to be merged to main workflow. Validation prototype built and tested.
 #v0.8 workable file (w/o validation)
 
@@ -469,6 +470,288 @@ def directassign_files(annotation_file, raw_csv, derivatizationtags, debug = Fal
 
 #pre_df = expandpeaklist(pre_df)
 
+#20250905 added by GPT
+#to read ion list feature counts before proceeding to merge
+def peek_ion_feature_count(excel_path: str):
+    """Read 'ionlist' sheet and count masses; return (count, masses_series)."""
+    import pandas as pd
+    xls = pd.ExcelFile(excel_path)
+    # be lenient with sheet name
+    cand = [s for s in xls.sheet_names if s.lower().replace("_","") in ("ionlist","ionlists")]
+    if not cand:
+        raise ValueError("No 'ionlist' sheet found")
+    df = pd.read_excel(excel_path, sheet_name=cand[0])
+    # be lenient with column name
+    mass_col = next((c for c in df.columns if str(c).strip().lower() == "mass"), None)
+    if mass_col is None:
+        raise ValueError("No 'mass' column in ionlist")
+    masses = pd.to_numeric(df[mass_col], errors="coerce").dropna()
+    return int(masses.size), masses
+
+
+#20250905 added by GPT
+#notice that our feature extraction approach will make decoy method no effect at all. Consider adding this back in future if we have other approach
+def append_feature_space_decoys(
+    wide_df,
+    *,
+    label_col: str = "Structure",
+    exclude_cols: tuple[str, ...] = (
+        "Structure", "IUPACname(optional)", "Glycanannotation2",
+        "MS2scan_no", "unique_ID", "protonatedmass"
+    ),
+    method: str = "permute",     # "permute" | "sparse_mask" | "mixup"
+    ratio: float = 0.5,          # decoys per *positive* row (0.5 = half as many)
+    sparse_keep: float = 0.2,    # for sparse_mask: keep 20% of nonzeros
+    noise_sd: float = 0.05,      # small feature noise
+    random_state: int = 42
+):
+    """
+    Return a new DataFrame with extra Non-glycan decoys created in *feature space*.
+    """
+    import numpy as np, pandas as pd
+    rs = np.random.RandomState(random_state)
+    df = wide_df.copy()
+
+    feat_cols = [c for c in df.columns if c not in exclude_cols]
+    if not feat_cols:
+        return df
+
+    # base pool: use existing Non-glycan if present; otherwise positives
+    base_neg = df[df[label_col] == "Non-glycan"]
+    base = base_neg if len(base_neg) else df[df[label_col] != "Non-glycan"]
+    if base.empty:
+        return df
+
+    n_decoys = int(max(1, ratio * len(df[df[label_col] != "Non-glycan"])))
+    src = base.sample(n=min(len(base), n_decoys), random_state=random_state, replace=(len(base) < n_decoys))
+
+    rows = []
+    for _, r in src.iterrows():
+        v = r[feat_cols].astype(float).values.copy()
+
+        if method == "permute":
+            # permute a random slice of columns
+            k = max(1, int(0.5 * len(feat_cols)))
+            idx = rs.choice(len(feat_cols), size=k, replace=False)
+            rs.shuffle(v[idx])
+
+        elif method == "sparse_mask":
+            # keep a small subset of non-zero features, zero the rest
+            nz = np.where(v != 0)[0]
+            if len(nz) > 0:
+                keep = rs.choice(nz, size=max(1, int(sparse_keep * len(nz))), replace=False)
+                mask = np.ones_like(v, dtype=bool)
+                mask[keep] = False
+                v[mask] = 0.0
+
+        elif method == "mixup":
+            # average with another negative row and add small noise
+            r2 = base.sample(n=1, random_state=rs.randint(0, 1_000_000)).iloc[0]
+            v = 0.5 * (v + r2[feat_cols].astype(float).values)
+
+        # light noise
+        if noise_sd > 0:
+            v = v + rs.normal(0.0, noise_sd, size=v.shape)
+
+        new_r = r.copy()
+        new_r[feat_cols] = v
+        new_r[label_col] = "Non-glycan"
+        rows.append(new_r)
+
+    decoys = pd.DataFrame(rows, columns=df.columns)
+    return pd.concat([df, decoys], ignore_index=True)
+
+def sample_real_negatives(
+    raw_tsv_path: str,
+    annotated_scans,                  # iterable of MS2scan_no already in pre_df
+    *,
+    ion_df=None,                      # pass the ionlist df you already loaded
+    ppm_tol: float = 10.0,            # mass tolerance for ion hits
+    min_hits: int = 1,                # keep scans with < min_hits glycan-ion matches
+    max_neg_ratio: float = 3.0,       # cap negatives to ratio × positives
+    random_state: int = 42
+):
+    """
+    Build Non-glycan rows from raw TSV scans NOT annotated.
+    Gate by glycan-ion 'hits' using ion_df['mass'] and ppm tolerance.
+    Returns rows aligned with your exporter expectations:
+      MS2scan_no, protonatedmass, peaklist, peakintensity, Structure, IUPACname(optional), Glycanannotation2
+    """
+    import numpy as np, pandas as pd
+    from ast import literal_eval
+
+    raw = pd.read_csv(raw_tsv_path, sep="\t")
+    # Schema is validated elsewhere: peaklist/peakintensity objects exist. 
+
+    # Parse list-like columns if they are strings
+    def to_list_safe(x):
+        if isinstance(x, (list, tuple, np.ndarray)): return list(x)
+        s = str(x).strip()
+        try:
+            return list(literal_eval(s))
+        except Exception:
+            # handle "(1,2,3)"-style or comma-only strings
+            s = s.strip("()[]")
+            return [float(z) for z in s.split(",") if z.strip()]
+
+    raw["peaklist"] = raw["peaklist"].apply(to_list_safe)
+    raw["peakintensity"] = raw["peakintensity"].apply(to_list_safe)
+    raw["MS2scan_no"] = raw["MS2scan_no"].astype(int)
+
+    annotated_set = set(map(int, annotated_scans))
+    all_scans = set(raw["MS2scan_no"].unique())
+    cand_scans = list(all_scans - annotated_set)
+    if not cand_scans:
+        return pd.DataFrame(columns=[
+            "MS2scan_no","protonatedmass","peaklist","peakintensity",
+            "Structure","IUPACname(optional)","Glycanannotation2"
+        ])
+
+    # Prepare ion masses
+    ion_masses = None
+    if ion_df is not None and "mass" in ion_df.columns:
+        ion_masses = ion_df["mass"].astype(float).values
+
+    # Quick helper: count matches to ionlist within ppm
+    def count_hits(mz_list):
+        if ion_masses is None or len(mz_list) == 0:
+            return 0
+        mz = np.asarray(mz_list, dtype=float)
+        # vectorized: for each ion mass, check any mz within ppm window
+        hits = 0
+        for mi in ion_masses:
+            tol = mi * ppm_tol * 1e-6
+            if np.any((mz >= mi - tol) & (mz <= mi + tol)):
+                hits += 1
+        return hits
+
+    # Summarize per-scan and gate
+    rows = []
+    sub = raw[raw["MS2scan_no"].isin(cand_scans)]
+    g = sub.groupby("MS2scan_no", sort=False)
+    for scan_id, gdf in g:
+        # Each row already holds one scan; if multiple rows, take the first (they should be identical by schema)
+        r = gdf.iloc[0]
+        hits = count_hits(r["peaklist"])
+        if hits < min_hits:
+            rows.append({
+                "MS2scan_no": int(scan_id),
+                "protonatedmass": float(r.get("protonatedmass", np.nan)),
+                "peaklist": list(map(float, r["peaklist"])),
+                "peakintensity": list(map(float, r["peakintensity"])),
+                "Structure": "Non-glycan",
+                "IUPACname(optional)": "",
+                "Glycanannotation2": ""
+            })
+
+    neg = pd.DataFrame(rows)
+    if neg.empty:
+        return neg
+
+    # Cap by ratio
+    n_pos = max(1, len(annotated_set))
+    keep = min(len(neg), int(max_neg_ratio * n_pos))
+    if len(neg) > keep:
+        neg = neg.sample(n=keep, random_state=random_state).reset_index(drop=True)
+    return neg
+
+
+#added 20250905 old version of adding negative label (but rely on score - which is not presented in manual anno workflow)
+"""
+def sample_real_negatives(
+    raw_tsv_path: str,
+    annotated_scans,                  # iterable of MS2scan_no already in pre_df
+    *,
+    scan_col: str = "MS2scan_no",
+    precursor_col: str = "precursor_mz",
+    frag_mz_col: str = "fragment_mz",
+    frag_int_col: str = "fragment_intensity",
+    score_col: str = "score",         # set to None if you don't have one
+    score_thr: float = 0.05,          # keep scans with max(score) < score_thr
+    marker_cols: list[str] | None = None,  # e.g., ["core_marker_b", "core_marker_y"]
+    marker_min: int = 1,              # require < marker_min markers to keep (0 or 1)
+    max_neg_ratio: float = 3.0,       # cap negatives to ratio × positives
+    random_state: int = 42
+):
+    """
+"""
+    Build Non-glycan rows from raw TSV scans that are NOT annotated.
+    Gating:
+      - if score_col present: keep scans with max(score) < score_thr
+      - if marker_cols present: keep scans with sum(marker_flags) < marker_min
+    Returns a DataFrame aligned to pre_df's expected columns:
+      MS2scan_no, protonatedmass, peaklist, peakintensity, Structure, IUPACname(optional), Glycanannotation2
+"""
+"""
+    import numpy as np, pandas as pd
+
+    raw = pd.read_csv(raw_tsv_path, sep="\t")
+    if scan_col not in raw.columns:
+        raise ValueError(f"'{scan_col}' not found in {raw_tsv_path}")
+    raw = raw.copy()
+    raw[scan_col] = raw[scan_col].astype(int)
+    annotated_set = set(map(int, annotated_scans))
+
+    # 1) candidate scans = not annotated
+    all_scans = set(raw[scan_col].unique())
+    cand_scans = all_scans - annotated_set
+    if not cand_scans:
+        return pd.DataFrame(columns=[
+            "MS2scan_no", "protonatedmass", "peaklist", "peakintensity",
+            "Structure", "IUPACname(optional)", "Glycanannotation2"
+        ])
+
+    # 2) score gate
+    if score_col and score_col in raw.columns:
+        per_scan_score = raw.groupby(scan_col)[score_col].max()
+        cand_scans &= set(per_scan_score.index[per_scan_score < score_thr])
+
+    # 3) marker-ion absence gate (optional)
+    if marker_cols:
+        missing = [c for c in marker_cols if c not in raw.columns]
+        if missing:
+            print(f"[mspval] marker columns missing in raw TSV, skipping: {missing}")
+        else:
+            flags = raw.groupby(scan_col)[marker_cols].max()  # assumes 0/1
+            allowed = flags.index[(flags.sum(axis=1) < marker_min)]
+            cand_scans &= set(allowed)
+
+    if not cand_scans:
+        return pd.DataFrame(columns=[
+            "MS2scan_no", "protonatedmass", "peaklist", "peakintensity",
+            "Structure", "IUPACname(optional)", "Glycanannotation2"
+        ])
+
+    # 4) build one row per scan
+    df = raw[raw[scan_col].isin(cand_scans)].copy()
+    if frag_mz_col not in df.columns or frag_int_col not in df.columns:
+        raise ValueError(f"'{frag_mz_col}'/'{frag_int_col}' not found in raw TSV")
+
+    g = df.groupby(scan_col)
+
+    def _one_scan(gdf):
+        pmass = float(gdf[precursor_col].iloc[0]) if precursor_col in gdf.columns else float("nan")
+        plist = gdf[frag_mz_col].astype(float).to_list()
+        pint  = gdf[frag_int_col].astype(float).to_list()
+        return pd.Series({
+            "MS2scan_no": int(gdf.name),
+            "protonatedmass": pmass,
+            "peaklist": plist,
+            "peakintensity": pint,
+            "Structure": "Non-glycan",
+            "IUPACname(optional)": "",
+            "Glycanannotation2": ""
+        })
+
+    neg = g.apply(_one_scan).reset_index(drop=True)
+
+    # 5) cap by ratio
+    n_pos = max(1, len(annotated_set))
+    n_keep = min(len(neg), int(max_neg_ratio * n_pos))
+    neg = neg.sample(n=n_keep, random_state=random_state) if len(neg) > n_keep else neg
+
+    return neg
+"""
 
 #autofilled by copilot. Need manual validation
 def createnormailzedionlistcsv(ionindex, converted_df, ion_df, filename):
