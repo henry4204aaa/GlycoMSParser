@@ -2869,6 +2869,8 @@ def open_ml_analysis_window():
     # Confidence thresholding (post-prediction) 20250902, final addition
     enable_thresh_var = tk.BooleanVar(value=True)   # default ON
     thresh_val_var    = tk.DoubleVar(value=0.65)    # τ in [0,1]
+    margin_val_var = tk.DoubleVar(value=0.05)  # δ for majority-support check
+
     # ---------------------------------------------------------
 
     def select_train_csv():
@@ -2991,6 +2993,11 @@ def open_ml_analysis_window():
         tk.Spinbox(row_thr, from_=0.00, to=0.99, increment=0.01,
                 textvariable=thresh_val_var, width=6).pack(side="left", padx=6)
 
+        row_margin = tk.Frame(settings); row_margin.pack(pady=2)
+        tk.Label(row_margin, text="Majority support margin δ (0.00–0.20):").pack(side="left")
+        tk.Spinbox(row_margin, from_=0.00, to=0.20, increment=0.01,
+                textvariable=margin_val_var, width=6).pack(side="left", padx=6)
+
         tk.Button(settings, text="Close", command=settings.destroy).pack(pady=12)
     # -----------------------------------------------
 
@@ -3001,6 +3008,7 @@ def open_ml_analysis_window():
             from sklearn.preprocessing import LabelEncoder
             from sklearn.utils.multiclass import unique_labels
             import joblib
+            import pretrain_normalizer as normalizer
         except ImportError:
             messagebox.showerror("Missing Dependencies",
                                  "Please install scikit-learn and joblib.")
@@ -3022,6 +3030,13 @@ def open_ml_analysis_window():
             messagebox.showerror("Read Error", str(e)); return
         if label_col not in df.columns:
             messagebox.showerror("Missing Column", f"{label_col} not found."); return
+
+        #convert the composition to man-readable one
+        try:
+            df[label_col] = df[label_col].apply(normalizer.parse_structure_to_manual)
+        except Exception as e:
+            print(f"[dev]Encounter structure conversion error")
+            messagebox.showerror("Can't convert the structure(composition) to man-like format", str(e)); return
 
         # encode label AFTER any string/tuple harmonization (if needed)
         y_raw = df[label_col].astype(str)
@@ -3085,7 +3100,8 @@ def open_ml_analysis_window():
         if enable_thresh_var.get():
             tau = float(thresh_val_var.get())
             #newly added
-            margin = 0.05  # δ: only demote if majority prob is within 0.05 of best predicted prob
+            #margin = 0.05  # δ: only demote if majority prob is within 0.05 of best predicted prob
+            margin = float(margin_val_var.get())
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X_test)      # [n_samples, n_classes]
                 maxp = proba.max(axis=1)                 # best class prob per sample
@@ -3238,7 +3254,7 @@ def open_ml_analysis_window():
                f"{'balanced' if class_weight_var.get() else 'none'}")
         msg.insert(1, f"Mode: {'Cap training only' if real_world_test_var.get() else 'Cap before split'}")
         msg.insert(1, f"Thresholding: {'ON τ=' + format(thresh_val_var.get(), '.2f') + ' → ' + majority_label_var.get() if enable_thresh_var.get() else 'OFF'}")
-
+        msg.insert(1, f"Thresholding: {'ON τ=' + format(thresh_val_var.get(), '.2f') + ', δ=' + format(margin_val_var.get(), '.2f') + ' → ' + majority_label_var.get() if enable_thresh_var.get() else 'OFF'}")
         messagebox.showinfo("Training Complete", "\n".join(msg))
 
         # save artifacts
@@ -3269,6 +3285,7 @@ def open_ml_analysis_window():
                     "real_world_test_cap_training_only": bool(real_world_test_var.get()),
                     "threshold_enabled": bool(enable_thresh_var.get()),
                     "threshold_tau": float(thresh_val_var.get()),
+                    "threshold_margin": float(margin_val_var.get()),
                     "model_path": model_path,
                     "labelencoder_path": enc_path,
                     "report_path": report_path
@@ -3513,8 +3530,11 @@ def open_ml_analysis_window():
                 tau = float(thresh_val_var.get())
             except Exception:
                 tau = 0.60  # sensible fallback
-
-            margin = 0.05
+            #similar to tau, use same pattern on margin
+            try:
+                margin = float(margin_val_var.get())
+            except Exception:
+                margin = 0.05
 
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X)

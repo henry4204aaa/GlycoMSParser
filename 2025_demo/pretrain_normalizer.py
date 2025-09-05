@@ -239,3 +239,44 @@ y_pred = rf.predict(packs["test"]["X"])
 print(classification_report(packs["test"]["y"], y_pred, digits=2))
 
 """
+
+#similar function somewhere, need to eliminate (or use the one that most accurate and good in performance)
+import re, numpy as np
+
+# tuple order coming in
+_IN = ["H","N","S","G","K","F"]
+# output order for manual annotation
+_OUT = ["F","H","N","S","G","KDN"]
+
+def _comp_to_manual(counts):
+    d = dict(zip(_IN, map(int, counts)))
+    parts = []
+    for t in _OUT:
+        if t == "KDN":
+            c = d["K"]
+        else:
+            c = d[t]
+        if c > 0:
+            parts.append(f"{t}{c}")
+    return "".join(parts)
+
+def parse_structure_to_manual(x):
+    # (1) tuple/list/np.array like (5,4,0,0,0,1)
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return _comp_to_manual(x)
+    # (2) string "(5, 4, 0, 0, 0, 1)"
+    if isinstance(x, str) and re.fullmatch(r"\(\s*\d+(?:\s*,\s*\d+){5}\s*\)", x):
+        vals = list(map(int, re.findall(r"\d+", x)))
+        return _comp_to_manual(vals)
+    # (3) composition string like "H5N4K1F1" or any order incl. "KDN1"
+    if isinstance(x, str) and re.fullmatch(r"(?:[A-Za-z]+?\d+)+", x.strip()):
+        pairs = re.findall(r"([A-Za-z]+?)(\d+)", x)
+        d = {"H":0,"N":0,"S":0,"G":0,"K":0,"F":0}
+        for k,v in pairs:
+            k = k.upper()
+            if k == "KDN": k = "K"
+            if k in d:
+                d[k] += int(v)
+        return _comp_to_manual([d["H"], d["N"], d["S"], d["G"], d["K"], d["F"]])
+    # (4) passthrough for named buckets like "Non-glycan", "Unknown"
+    return x
