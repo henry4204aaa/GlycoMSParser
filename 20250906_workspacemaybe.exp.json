@@ -1,5 +1,6 @@
 {
     "experiment": "zebrafish extracted glycans",
+    "generated_on": "2025-09-06 16:52",
     "samples": {
         "zf_sPerMeOG_intestine": {
             "csv": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\ms2_zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.csv",
@@ -7,7 +8,13 @@
             "metadata": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.json",
             "raw_file": "E:\\rawfiles\\zf_sPerMeOG_intestine",
             "validated": true
+        },
+        "zf_sPerMeNG_brain": {
+            "csv": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\ms2_zebrafish_Yann_glycome_20240921_zf_sPerMeNG_brain_20240921_zf_sPerMeNG_brain.raw.csv",
+            "excel": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\src\\zf_NG_brain_annotation_20240922.xlsx",
+            "metadata": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\zebrafish_Yann_glycome_20240921_zf_sPerMeNG_brain_20240921_zf_sPerMeNG_brain.raw.json",
+            "raw_file": "G:\\zf_sPerMeNG_brain",
+            "validated": false
         }
-    },
-    "generated_on": "2025-09-06 20:03"
+    }
 }

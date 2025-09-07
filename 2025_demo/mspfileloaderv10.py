@@ -1,6 +1,6 @@
 import os
-version = "0.9925"
-last_update = 20250901
+version = "0.9958"
+last_update = 20250906
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -19,9 +19,17 @@ import pandas as pd
 import platform
 import msp_insilicomarker_withGPT as marker
 
+# Ion mining feature (safe to import even if file is absent)
+try:
+    from msp_ion_mining import export_ion_suggestions_csv, SuggestParams
+except Exception:
+    export_ion_suggestions_csv = None
+    class SuggestParams:  # fallback stub
+        def __init__(self, **kw): pass
 
-
-# v1.00: Add Glypick-like autoannotation back (need to change UI)
+# v1.00: Able to write manuscript although some bug persists. 
+# v0.99: Add Glypick-like autoannotation back (need to change UI)
+# v0.996: Add ion (feature) mining method 
 # v0.993: able to apply pseudolabeling function (functional but may have bugs)
 # v0.9925: add split and stratified method when creating training set
 # v0.992: Link to pseudolabeling function
@@ -1232,6 +1240,13 @@ def open_prepare_dataset_window():
     ppm_tol_var       = tk.StringVar(value="10")# ppm tolerance; text with validation
     n_features_var    = tk.IntVar(value=0)      # total ion features (from ion_df)
     gate_hint_var     = tk.StringVar(value="Ion features not loaded yet")
+    # --- Ion suggestion options ---
+    ion_suggest_enable_var   = tk.BooleanVar(value=False)
+    ion_suggest_ppm_var      = tk.DoubleVar(value=10.0)
+    ion_suggest_dafloor_var  = tk.DoubleVar(value=0.03)
+    ion_suggest_minsupp_var  = tk.IntVar(value=5)     # min glycan support per ion
+    ion_suggest_topk_var     = tk.IntVar(value=60)    # how many to export
+    last_suggest_csv_var = tk.StringVar(value="")
 
     # --- Treeview UI ---
     tree = ttk.Treeview(subwin)
@@ -1629,6 +1644,34 @@ def open_prepare_dataset_window():
 
         tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=6, column=0, columnspan=2, pady=(4,10))
         """
+    #20250906 add ion suggestion method function
+    def open_ion_suggest_dialog():
+        dlg = tk.Toplevel(root)
+        dlg.title("Ion Suggestions")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Checkbutton(dlg, text="Generate ion suggestions on merge",
+                    variable=ion_suggest_enable_var).grid(row=0, column=0, columnspan=2,
+                                                            sticky="w", padx=10, pady=(10,6))
+
+        tk.Label(dlg, text="ppm tolerance:").grid(row=1, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=1.0, to=50.0, increment=0.5, width=6,
+                textvariable=ion_suggest_ppm_var).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(dlg, text="DA floor (low-m/z merge):").grid(row=2, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=0.00, to=0.10, increment=0.005, width=6,
+                format="%.3f", textvariable=ion_suggest_dafloor_var).grid(row=2, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(dlg, text="Min glycan support per ion:").grid(row=3, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=1, to=100, increment=1, width=6,
+                textvariable=ion_suggest_minsupp_var).grid(row=3, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(dlg, text="Top-K suggestions:").grid(row=4, column=0, sticky="e", padx=10)
+        tk.Spinbox(dlg, from_=5, to=500, increment=5, width=6,
+                textvariable=ion_suggest_topk_var).grid(row=4, column=1, sticky="w", padx=6, pady=(2,10))
+
+        tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=5, column=0, columnspan=2, pady=(2,10))
 
     # --- link and validate the grouped sample ---
     def link_and_validate_sample(exp_name, sample_name):
@@ -1871,11 +1914,117 @@ def open_prepare_dataset_window():
                     print(f"[Prepare] Negative sampling skipped due to error: {e}")
             """
 
+            #add ion suggestion
+
+            if ion_suggest_enable_var.get():
+                if export_ion_suggestions_csv is None:
+                    messagebox.showwarning("Ion suggestions",
+                                        "Module msp_ion_mining.py not found; skipping.")
+                else:
+                    try:
+                        # choose output path in the same folder as merged CSV
+                        suggest_csv = os.path.join(outdir, f"{sample_name}_ion_suggestions.csv")
+                        params = SuggestParams(
+                            ppm=float(ion_suggest_ppm_var.get()),
+                            da_floor=float(ion_suggest_dafloor_var.get()),
+                            min_cluster_count=3,
+                            min_support_glycan=int(ion_suggest_minsupp_var.get()),
+                            top_k=int(ion_suggest_topk_var.get())
+                        )
+                        # majority label is Non-glycan in our pipeline
+                        export_ion_suggestions_csv(
+                            pre_df, ion_df, out_csv=suggest_csv, params=params,
+                            label_col="Structure", majority_label="Non-glycan"
+                        )
+                        print(f"[Prepare] Ion suggestions saved: {suggest_csv}")
+                        messagebox.showinfo("Ion suggestions",
+                            f"Suggested ions written to:\n{os.path.basename(suggest_csv)}")
+                        last_suggest_csv_var.set(suggest_csv)
+                    except Exception as e:
+                        messagebox.showwarning("Ion suggestions", f"Suggestion failed:\n{e}")
+
             mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
         except Exception as e:
             messagebox.showerror("Merge Failed", f"Error:\n{str(e)}")
 
+    #added 20250906 ion suggestion window?
+    def open_ion_suggestions_viewer():
+        import os, pandas as pd
+        from tkinter import filedialog, messagebox, ttk
+
+        path = last_suggest_csv_var.get().strip()
+        if not path or not os.path.exists(path):
+            # let user pick if we don't have a saved path yet
+            path = filedialog.askopenfilename(
+                title="Open ion suggestions CSV",
+                filetypes=[("CSV files","*.csv"), ("All files","*.*")]
+            )
+            if not path:
+                return
+
+        try:
+            df = pd.read_csv(path)
+            if df.empty:
+                messagebox.showinfo("Ion suggestions", "No suggestions in file.")
+                return
+            # sort by lift desc, then support_glycan desc
+            df = df.sort_values(["lift","support_glycan"], ascending=[False, False]).reset_index(drop=True)
+            top = df.head(10)
+        except Exception as e:
+            messagebox.showerror("Ion suggestions", f"Could not read CSV:\n{e}")
+            return
+
+        dlg = tk.Toplevel(root)
+        dlg.title(f"Ion suggestions — {os.path.basename(path)}")
+        dlg.geometry("620x260")
+        dlg.resizable(True, True)
+        dlg.grab_set()
+
+        cols = ["mz","support_glycan","support_non","lift","odds_ratio","already_in_list","recommended"]
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
+        for c in cols:
+            tree.heading(c, text=c)
+            width = 90 if c in ("mz","lift","odds_ratio") else 110
+            tree.column(c, width=width, anchor="center")
+
+        # insert rows
+        for _, r in top.iterrows():
+            mz = f"{float(r.get('mz', 0.0)):.4f}"
+            sg = int(r.get("support_glycan", 0))
+            sn = int(r.get("support_non", 0))
+            lift = f"{float(r.get('lift', 0.0)):.2f}"
+            orat = f"{float(r.get('odds_ratio', 0.0)):.2f}"
+            ai = str(bool(r.get("already_in_list", False)))
+            rec = str(bool(r.get("recommended", True)))
+            tree.insert("", "end", values=[mz, sg, sn, lift, orat, ai, rec])
+
+        tree.pack(fill="both", expand=True, padx=8, pady=(8,4))
+
+        def copy_mz():
+            sel = tree.selection()
+            if not sel: return
+            mz_val = tree.item(sel[0], "values")[0]
+            dlg.clipboard_clear()
+            dlg.clipboard_append(mz_val)
+            dlg.update()  # keep it on the clipboard
+        def open_csv_folder():
+            import subprocess, os
+            folder = os.path.dirname(path)
+            try:
+                if os.name == "nt":
+                    os.startfile(folder)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", folder])
+                else:
+                    subprocess.Popen(["xdg-open", folder])
+            except Exception:
+                pass
+
+        btns = tk.Frame(dlg); btns.pack(pady=4)
+        tk.Button(btns, text="Copy selected m/z", command=copy_mz).pack(side="left", padx=6)
+        tk.Button(btns, text="Open folder", command=open_csv_folder).pack(side="left", padx=6)
+        tk.Button(btns, text="Close", command=dlg.destroy).pack(side="left", padx=6)
 
     #newly added
     def append_runlog(files: dict, entry: dict):
@@ -2850,12 +2999,16 @@ def open_prepare_dataset_window():
     tk.Button(button_frame, text="Add Sample (missing metadata)", command=add_sample).grid(row=1, column=1, padx=5)
     tk.Button(button_frame, text="Clean up empty unassigned sample tags", command=clean_unassigned_samples).grid(row=1, column=2, padx=5)
     link_button = tk.Button(button_frame, text="Link Sample", state="disabled", command=lambda: try_link_selected_sample())
-    link_button.grid
+    link_button.grid(row=2, column=0, padx=5) #why it was gone?
     merge_button = tk.Button(button_frame, text="Merge Sample", state="disabled", command=lambda: try_merge_selected_sample())
     merge_button.grid(row=2, column=1, padx=5)
     tk.Button(button_frame, text="Negative options…",
           command=open_negative_options_dialog).grid(row=2, column=2, padx=5)
-    tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=2, column=3, padx=5)
+    tk.Button(button_frame, text="Ion suggestions…",
+          command=open_ion_suggest_dialog).grid(row=2, column=3, padx=5)
+    tk.Button(button_frame, text="View suggestions…",
+          command=open_ion_suggestions_viewer).grid(row=2, column=4, padx=5)
+    tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=3, column=1, padx=5)
     ttk.Button(button_frame, text="Assign Pseudo-Labels by Glycan Composition", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
     #GPT said without () it only passes the function, and work only if clicked
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)

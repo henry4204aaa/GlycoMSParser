@@ -1,0 +1,15 @@
+{
+    "Experiment Title": "zebrafish extracted glycans",
+    "Experiment Description": "zebrafish permethylated ovary N-glycan for validating 2017 natcomm paper from Yann",
+    "Author running this analysis": "Huan-Chuan TSENG",
+    "Raw data acquired date": "20190506",
+    "Glycan Type": "N",
+    "Mass Analyzer charge mode": "+",
+    "Derivatization Type": "PerMe(Freeend)",
+    "Parameters when GlycoMSP launched": [
+        "Autofilled by GUI"
+    ],
+    "Date of file extracted from raw file": "20250906",
+    "Original raw file path": "G:/zf_sPerMeNG_ovary.raw",
+    "Raw filename": "zf_sPerMeNG_ovary"
+}

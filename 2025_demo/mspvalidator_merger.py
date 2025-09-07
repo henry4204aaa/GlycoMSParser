@@ -347,6 +347,7 @@ def validate_annotation_structure(excel_df):#extra arguments may be asked in fut
             version_flags = 1
         else:
             print("Header mismatched, the file is invalid")
+            print(f"[debug] mismatch {excel_df.columns}")
             return False
 
         # Check certain dtypes
