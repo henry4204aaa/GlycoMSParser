@@ -1,6 +1,6 @@
 import os
-version = "0.9958"
-last_update = 20250906
+version = "0.9956"
+last_update = 20250907
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -18,15 +18,51 @@ import mspvalidator_merger as mspval
 import pandas as pd
 import platform
 import msp_insilicomarker_withGPT as marker
+# --- Add near top-level imports ---
+import os, joblib
 
 # Ion mining feature (safe to import even if file is absent)
+# 20250907 to solve ion suggest missing issue
+import importlib, sys, os, traceback
+def _load_ion_module():
+    try:
+        return importlib.import_module("msp_ion_mining")
+    except Exception as e:
+        # 2nd chance: try alongside this file and one level up
+        here = os.path.dirname(__file__)
+        for cand in (os.path.join(here, "msp_ion_mining.py"),
+                     os.path.join(os.path.dirname(here), "msp_ion_mining.py")):
+            if os.path.exists(cand):
+                try:
+                    spec = importlib.util.spec_from_file_location("msp_ion_mining", cand)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    sys.modules["msp_ion_mining"] = mod
+                    return mod
+                except Exception as e2:
+                    print("[IonSuggest] import failed from", cand, "→", repr(e2))
+                    traceback.print_exc()
+        print("[IonSuggest] import failed:", repr(e))
+        traceback.print_exc()
+        return None
+
+_ionmod = _load_ion_module()
+if _ionmod:
+    export_ion_suggestions_csv = _ionmod.export_ion_suggestions_csv
+    SuggestParams = _ionmod.SuggestParams
+else:
+    export_ion_suggestions_csv = None
+    class SuggestParams: pass
+
+"""
 try:
     from msp_ion_mining import export_ion_suggestions_csv, SuggestParams
+    print("[dev] loaded msp_ion_mining")
 except Exception:
     export_ion_suggestions_csv = None
     class SuggestParams:  # fallback stub
         def __init__(self, **kw): pass
-
+"""
 # v1.00: Able to write manuscript although some bug persists. 
 # v0.99: Add Glypick-like autoannotation back (need to change UI)
 # v0.996: Add ion (feature) mining method 
@@ -84,6 +120,13 @@ else:
 
 selected_files = {}  # Dictionary to keep track of selected files
 
+
+#20250907 preventing key error in GUI #need real test to see behavior changes
+FILETYPE_TO_KEY = {"csv": "csv", "excel": "excel", "json": "json",
+                   "method": "json", "metadata": "json"}  # extend if you add new labels
+def normalize_ftype(ft: str) -> str:
+    return FILETYPE_TO_KEY.get(ft.lower().strip(), ft.lower().strip())
+#
 
 #logger
 class AppLogger:
@@ -1915,7 +1958,43 @@ def open_prepare_dataset_window():
             """
 
             #add ion suggestion
+            if ion_suggest_enable_var.get():
+                global export_ion_suggestions_csv, SuggestParams, _ionmod
+                if export_ion_suggestions_csv is None:
+                    _ionmod = _load_ion_module()
+                    if _ionmod:
+                        export_ion_suggestions_csv = _ionmod.export_ion_suggestions_csv
+                        SuggestParams = _ionmod.SuggestParams
 
+                if export_ion_suggestions_csv is None:
+                    messagebox.showwarning("Ion suggestions",
+                                        "Ion module failed to import. Check console for the exact error.")
+                    return
+                else:
+                    try:
+                        # choose output path in the same folder as merged CSV
+                        suggest_csv = os.path.join(outdir, f"{sample_name}_ion_suggestions.csv")
+                        params = SuggestParams(
+                            ppm=float(ion_suggest_ppm_var.get()),
+                            da_floor=float(ion_suggest_dafloor_var.get()),
+                            min_cluster_count=3,
+                            min_support_glycan=int(ion_suggest_minsupp_var.get()),
+                            top_k=int(ion_suggest_topk_var.get())
+                        )
+                        # majority label is Non-glycan in our pipeline
+                        export_ion_suggestions_csv(
+                            pre_df, ion_df, out_csv=suggest_csv, params=params,
+                            label_col="Structure", majority_label="Non-glycan"
+                        )
+                        print(f"[Prepare] Ion suggestions saved: {suggest_csv}")
+                        messagebox.showinfo("Ion suggestions",
+                            f"Suggested ions written to:\n{os.path.basename(suggest_csv)}")
+                        last_suggest_csv_var.set(suggest_csv)
+                    except Exception as e:
+                        messagebox.showwarning("Ion suggestions", f"Suggestion failed:\n{e}")
+
+
+            """
             if ion_suggest_enable_var.get():
                 if export_ion_suggestions_csv is None:
                     messagebox.showwarning("Ion suggestions",
@@ -1942,7 +2021,7 @@ def open_prepare_dataset_window():
                         last_suggest_csv_var.set(suggest_csv)
                     except Exception as e:
                         messagebox.showwarning("Ion suggestions", f"Suggestion failed:\n{e}")
-
+            """
             mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
         except Exception as e:
@@ -2441,9 +2520,12 @@ def open_prepare_dataset_window():
             if not sample_id or not exp_id:
                 return  # Avoid broken context
         
-            drag_data["item"] = item_id
-            drag_data["filetype"] = item_text.split(":")[0].strip().lower()
+            ft_raw = item_text.split(":")[0].strip()
+            drag_data["filetype"] = normalize_ftype(ft_raw)              # <— was .lower()
             drag_data["filename"] = item_text.split(":")[1].strip()
+            drag_data["item"] = item_id
+            #drag_data["filetype"] = item_text.split(":")[0].strip().lower()
+            #drag_data["filename"] = item_text.split(":")[1].strip()
             drag_data["from_sample"] = clean_sample_name(tree.item(sample_id, "text"))
             drag_data["from_exp"] = tree.item(exp_id, "text").replace("Experiment: ", "")
         else:
@@ -2503,8 +2585,11 @@ def open_prepare_dataset_window():
 
             refresh_tree()
 
-        filetype = selected_text.split(":")[0].strip().lower()
+        filetype_raw = selected_text.split(":")[0].strip().lower()
+        filetype = normalize_ftype(filetype_raw)                     # <— normalize before use
         filename = selected_text.split(":")[1].strip()
+        #filetype = selected_text.split(":")[0].strip().lower()
+        #filename = selected_text.split(":")[1].strip()
 
         menu = tk.Menu(subwin, tearoff=0)
         move_menu = tk.Menu(menu, tearoff=0)
@@ -3060,6 +3145,53 @@ def open_ml_analysis_window():
         build_features_from_peaks_log10_plus1,  # optional if you need it directly
     )
     from ml_ng_utils_extras import resample_by_strategy, tau_sweep_summary
+
+    #20250909
+    def load_model_any(model_path: str):
+        ext = os.path.splitext(model_path)[1].lower()
+        if ext in (".joblib", ".pkl"):
+            model = joblib.load(model_path)
+            loader = "joblib"
+        elif ext == ".skops":
+            try:
+                from skops.io import load as sk_load
+            except Exception as e:
+                raise ImportError(
+                    "This model is a .skops file but 'skops' is not installed. "
+                    "Install it in this environment: pip install skops"
+                ) from e
+            model = sk_load(model_path, trusted=True)
+            loader = "skops"
+        else:
+            raise ValueError(f"Unsupported model file extension: {ext}")
+        if not hasattr(model, "predict"):
+            raise TypeError(
+                f"Loaded object is {type(model).__name__} and has no .predict(). "
+                "Did you select the *_labelencoder.joblib by mistake?"
+            )
+        return model, loader
+
+    def get_training_features(model, model_path: str):
+        # 1) native sklearn attribute (best)
+        feats = getattr(model, "feature_names_in_", None)
+        # 2) skops metadata (if exported with metadata)
+        if feats is None:
+            meta = getattr(model, "__skops_metadata__", None)
+            if isinstance(meta, dict):
+                feats = meta.get("feature_names") or meta.get("feature_names_in_")
+        # 3) sidecar JSON saved at train time
+        if feats is None:
+            sidecar = (model_path
+                    .replace("_rf_model.joblib", "_features.json")
+                    .replace(".skops", "_features.json"))
+            if os.path.exists(sidecar):
+                with open(sidecar, "r", encoding="utf-8") as f:
+                    try:
+                        feats = json.load(f)
+                    except Exception:
+                        pass
+        return [str(c) for c in feats] if feats is not None else None
+
 
     def balance_and_split(
         df: pd.DataFrame,
@@ -3956,7 +4088,8 @@ def open_ml_analysis_window():
 
     def select_model_file():
         nonlocal model_file_path
-        path = filedialog.askopenfilename(filetypes=[("Model files", "*.joblib *.pkl")])
+        path = filedialog.askopenfilename(title="Select Model File",filetypes=[("Model files", "*.joblib *.pkl *.skops"), ("All files", "*.*")])
+        #path = filedialog.askopenfilename(filetypes=[("Model files", "*.joblib *.pkl")])
         if path:
             model_file_path = os.path.abspath(path)
             messagebox.showinfo("Model Loaded", f"Model loaded from:\n{model_file_path}")
@@ -3968,8 +4101,8 @@ def open_ml_analysis_window():
             predict_input_path = os.path.abspath(path)
             messagebox.showinfo("Input File Selected", f"Data loaded from:\n{predict_input_path}")
 
-    def create_unlabeled_dataset():
-        messagebox.showinfo("Not Yet Implemented", "This feature will allow you to select an experiment and automatically create a feature-matched dataset from its annotation and early raw-converted CSV.")
+    #def create_unlabeled_dataset():
+    #    messagebox.showinfo("Not Yet Implemented", "This feature will allow you to select an experiment and automatically create a feature-matched dataset from its annotation and early raw-converted CSV.")
 
     def run_prediction():
         import numpy as np
@@ -3983,8 +4116,12 @@ def open_ml_analysis_window():
             messagebox.showwarning("Missing Info", "Please select both a model file and an input CSV file.")
             return
 
+        #20250909 add import for prediction report
+        from prediction_report import (ReportParams, summarize_predictions,write_prediction_report, show_prediction_summary_popup)
+
         try:
-            model = joblib.load(model_file_path)
+            model, loader = load_model_any(model_file_path)
+            #model = joblib.load(model_file_path)
             df = pd.read_csv(predict_input_path)
 
             # Try loading label encoder if available
@@ -3994,12 +4131,68 @@ def open_ml_analysis_window():
             else:
                 le = None
         except Exception as e:
-            messagebox.showerror("Load Error", str(e))
+                # Suggestion to user if it's a version mismatch crash
+            if ".joblib" in model_file_path and "InconsistentVersionWarning" in str(e) or "dtype" in str(e):
+                messagebox.showerror(
+                    "Model version mismatch",
+                    "This joblib model was trained with a different scikit-learn version.\n\n"
+                    "Fix: re-export as .skops on the training machine (or retrain), then load the .skops here."
+                )
+                return
+            else:
+                messagebox.showerror("Load Error", str(e))
             return
+        #in case error occurs, add the debug lines
+        """
+        import sys, sklearn, os
+        print("[env] python:", sys.executable)
+        print("[env] sklearn:", sklearn.__version__)
+        print("[model] file:", model_path)
+        print("[model] type:", type(model).__name__)
+
+        # Before aligning:
+        print("[features] input cols:", len(df.columns))
+        X = df.drop(columns=["MS2scan_no", "protonatedmass"], errors="ignore")
+        print("[features] after drop:", len(X.columns))
+
+        # After aligning:
+        missing = sorted(set(train_feats) - set(X.columns))
+        extra   = sorted(set(X.columns) - set(train_feats))
+        for c in missing: X[c] = 0.0
+        X = X[list(train_feats)]
+        print(f"[features] +{len(missing)} filled, -{len(extra)} dropped, final={X.shape[1]}")
+        """
 
         try:
-            X = df.drop(columns=["MS2scan_no"], errors="ignore")
+            # Build X, drop traceability cols
+            X = df.drop(columns=["MS2scan_no", "protonatedmass"], errors="ignore")
+
+            # Align features to training set
+            train_feats = get_training_features(model, model_file_path)
+            if train_feats is None:
+                raise RuntimeError("Cannot determine training feature list. "
+                                "Re-export the model with embedded feature names or provide *_features.json.")
+
+            missing = sorted(set(train_feats) - set(X.columns))
+            extra   = sorted(set(X.columns) - set(train_feats))
+            for c in missing: X[c] = 0.0
+            X = X[list(train_feats)]  # enforce order
+
+            # Predict
             y_pred = model.predict(X)
+
+            # Optional probabilities & margin
+            """
+            if hasattr(model, "predict_proba"):
+                import numpy as np
+                proba = model.predict_proba(X)
+                top1 = proba.max(axis=1)
+                top2 = np.partition(proba, -2, axis=1)[:, -2] if proba.shape[1] > 1 else np.zeros(len(top1))
+                df["proba_top1"], df["proba_top2"] = top1, top2
+                df["margin"] = top1 - top2
+            """
+            #X = df.drop(columns=["MS2scan_no"], errors="ignore")
+            #y_pred = model.predict(X)
 
             #applying same filter to prediction model
             # --- optional: apply the same margin-aware demotion in prediction ---
@@ -4013,6 +4206,7 @@ def open_ml_analysis_window():
             except Exception:
                 margin = 0.05
 
+            proba = None
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X)
                 # work in encoded-space (ints). If y_pred are strings because of a prior transform, re-encode temporarily.
@@ -4051,6 +4245,91 @@ def open_ml_analysis_window():
                 y_pred = [model.classes_[i] if isinstance(i, int) else i for i in y_pred]
 
             df['Predicted_Label'] = y_pred
+
+            #add prediction reports
+            # --- START: Prediction summary integration ---
+
+            # 1) Collect class names (for readable labels in the report)
+            try:
+                class_names = list(le.classes_) if le is not None else list(getattr(model, "classes_", []))
+            except Exception:
+                class_names = list(getattr(model, "classes_", []))
+
+            # 2) If available, get probabilities for margins/entropy
+            #already declaired before, with more functionality?
+            """
+            y_proba = None
+            if hasattr(model, "predict_proba"):
+                try:
+                    y_proba = model.predict_proba(X)  # shape: [n_samples, n_classes]
+                except Exception:
+                    y_proba = None
+            """
+            # 3) Build a compact DataFrame for the reporter
+            pred_df = df.copy()
+            pred_df = pred_df.rename(columns={"Predicted_Label": "pred_label"})  # reporter expects 'pred_label'
+
+            # Prefer a single vector column to keep CSV lean
+            # adjust y_proba (duplicated) to proba that holding same meanings
+            proba_cols = None
+            if proba is not None and isinstance(proba, (list, tuple)) or hasattr(proba, "shape"):
+                try:
+                    import numpy as _np
+                    pred_df["proba_vector"] = [ _np.asarray(row, dtype=float) for row in proba ]
+                except Exception:
+                    # fallback: expand into columns if needed
+                    if class_names:
+                        proba_cols = [f"proba_{c}" for c in class_names]
+                    else:
+                        proba_cols = [f"proba_{i}" for i in range(proba.shape[1])]
+                    for j, col in enumerate(proba_cols):
+                        pred_df[col] = proba[:, j]
+            """
+            if y_proba is not None and isinstance(y_proba, (list, tuple)) or hasattr(y_proba, "shape"):
+                try:
+                    import numpy as _np
+                    pred_df["proba_vector"] = [ _np.asarray(row, dtype=float) for row in y_proba ]
+                except Exception:
+                    # fallback: expand into columns if needed
+                    if class_names:
+                        proba_cols = [f"proba_{c}" for c in class_names]
+                    else:
+                        proba_cols = [f"proba_{i}" for i in range(y_proba.shape[1])]
+                    for j, col in enumerate(proba_cols):
+                        pred_df[col] = y_proba[:, j]
+            """
+            # 4) Parameters (use the same thresholds you apply in your pipeline)
+            params = ReportParams(tau=0.60, margin=0.05, topk=5, sample_cols=("experiment_title", "sample_name"))
+
+            # 5) Choose output folder (same folder as input unlabeled CSV)
+            from pathlib import Path
+            out_dir = Path(os.path.dirname(predict_input_path))
+
+            # 6) Run summarization + write artifacts
+            pred_rows, class_sum, by_sample_sum, run_sum = summarize_predictions(
+                pred_df,
+                class_names=class_names if class_names else None,
+                proba_cols=proba_cols,  # None if using 'proba_vector'
+                params=params,
+            )
+
+            arts = write_prediction_report(
+                out_dir=out_dir,
+                pred_rows=pred_rows,
+                class_summary=class_sum,
+                by_sample=by_sample_sum,
+                run_summary=run_sum,
+                params=params,
+            )
+
+            # 7) Show popup (we're on the Tk main thread here; if you later thread this, wrap with root.after)
+            try:
+                show_prediction_summary_popup(root, run_summary=run_sum, artifacts=arts, class_summary_df=class_sum)
+            except Exception as _e:
+                print("[warn] Failed to show summary popup:", _e)
+
+            # --- END: Prediction summary integration ---
+
             out_path = os.path.splitext(predict_input_path)[0] + "_predicted.csv"
             df.to_csv(out_path, index=False)
             messagebox.showinfo("Prediction Complete", f"Predictions saved to:\n{out_path}")
@@ -4092,7 +4371,7 @@ def open_ml_analysis_window():
                     intensity = float(np.max(intensity_array[mask]))
                     feature_row[str(target)] = np.log10(intensity + 1)
                 else:
-                    feature_row[str(target)] = 0.0
+                    feature_row[str(target)] = 1.0 #0.0
 
             result.append(feature_row)
 

@@ -1,13 +1,13 @@
 {
-    "experiment": "Unassigned",
+    "experiment": "zebrafish extract glycans",
+    "generated_on": "2025-09-08 15:51",
     "samples": {
         "(not linked)": {
             "csv": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\ms2_zebrafish extracted glycans_20250908_zf_PerMeOG_brain.csv",
             "excel": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\src\\online_annotation_revised_2024_glycan_zf_OG_brain_20240817temp.xlsx",
-            "metadata": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\zebrafish extracted glycans_20250908_no_raw.json",
+            "metadata": "W:\\\GlycoMSP_temp\\man_data\\zf_OG_br\\zebrafish extracted glycans_20250908_no_raw.json",
             "raw_file": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\not linked",
             "validated": true
         }
-    },
-    "generated_on": "2025-09-08 15:40"
+    }
 }

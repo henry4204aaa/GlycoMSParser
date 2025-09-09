@@ -1,7 +1,7 @@
 # msp_ion_mining.py
 version = "0.1"
 last_update = 20250906
-from __future__ import annotations
+#from __future__ import annotations
 import math, re
 from ast import literal_eval
 from dataclasses import dataclass

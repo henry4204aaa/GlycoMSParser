@@ -1,0 +1,13 @@
+{
+    "experiment": "zebrafish extracted glycans",
+    "samples": {
+        "zf_sPerMeOG_ovary": {
+            "csv": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\ms2_zebrafish_Yann_glycome_20241008_zf_sPerMeOG_ovary.raw.csv",
+            "excel": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\src\\zf_OG_ovary_annotation_202410.xlsx",
+            "metadata": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\zebrafish_Yann_glycome_20241008_zf_sPerMeOG_ovary.raw.json",
+            "raw_file": "E:\\rawfiles\\zf_sPerMeOG_ovary",
+            "validated": true
+        }
+    },
+    "generated_on": "2025-09-08 15:54"
+}

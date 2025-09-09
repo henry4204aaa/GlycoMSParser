@@ -335,6 +335,9 @@ def convert_raw_to_csv(rawfileinput, debug=False): #split peak_extractor to 2 fu
     #make filename
     #os.path.splitext(rawfile)[0]
     #filename = str(generatefilename(rawfileinput)) #mind that rawfile is MSLoader.raw, not path like object
+
+    #20250908: observed ms2, ms3 tmp persist issue, I/O performed twice, consider if we can simplify it to one
+
     filename = os.path.splitext(os.path.basename(rawfileinput))[0]
     ms2output = "ms2tmp_" + filename
     ms3output = "ms3tmp_" + filename
