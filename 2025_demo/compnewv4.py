@@ -1,3 +1,5 @@
+version = "1.03"
+last_update = 20250910
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -28,9 +30,11 @@
 #--- able to write manuscript for this part ---
 #v1.0? for finished O-glycan
 #v1.1 for finished O-glycan integration with mspcomposition.py -> code will move there
-version = "1.01"
-last_update = 20250825
+
 #version changelog:
+#v1.1 (future): finished version for publication
+#v1.05 (future): support negative mode calculation
+#v1.03: fix composition limit not applying bug
 #v1.01: fix derivatization flags not passing issue
 #v1.0: 20250819 fix mass calc error
 #v0.48 export composition
@@ -561,11 +565,27 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
         debug_preview(final_set, limit=10, sort_if_set=False, random_sample=True, label="Final composition")  
     if flags["compcheck"]:
         if flags["debug"]:
-             print("[debug] Allow composition check by sugar unit numbers")
-        checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
-                                  flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
+            print("[debug] Allow composition check by sugar unit numbers")
+            print(f'Ranges H, N, Ac, Gc, KDN, Fuc = '
+            f'{tuple(flags["Hex_range"])}, {tuple(flags["HexNAc_range"])}, '
+            f'{tuple(flags["Neu5Ac_range"])}, {tuple(flags["Neu5Gc_range"])}, '
+            f'{tuple(flags["KDN_range"])}, {tuple(flags["Fucose_range"])}')
+             
+        #checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
+        #                          flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
         #save_glycan_pseudocomp_to_csv(checked_final, filename=filename, include_header=True)
-        save_glycan_pseudocomp_to_csv(checked_final,filename=filename,include_header=True,derivatization=deri,reduced=reduced) 
+        #save_glycan_pseudocomp_to_csv(checked_final,filename=filename,include_header=True,derivatization=deri,reduced=reduced) 
+        #20250910 fix the flatten issue that rejoin the failed composition back to final output csv (same fix in OGlaunch)
+        res = compcheck(final_set,
+                        flags["Hex_range"], flags["HexNAc_range"],
+                        flags["Neu5Ac_range"], flags["Neu5Gc_range"],
+                        flags["KDN_range"],  flags["Fucose_range"],
+                        debug=flags["debug"])
+        passed = res[0] #if flags["debug"] else res
+        if flags["debug"]:
+            print(f"[debug] passed={len(passed)}  failed={len(res[1])}")
+        save_glycan_pseudocomp_to_csv(passed, filename=filename,
+                                    include_header=True, derivatization=deri, reduced=reduced)
 
         #return checked_final, True
     else:
@@ -992,6 +1012,7 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
     flags = NG_flags.copy()
     if user_flags:
         flags.update(user_flags)
+    deri, reduced = _normalize_derivatization(user_flags or {})
     #Thinking how to pass the flag to 
     OG_comps = OGcorev2(coretype,keep_topology,debug, OGflags=flags)#test1=flag1)
     #try to avoid multiple core type errors
@@ -1022,22 +1043,31 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
             print(f"[debug]: the unique composition count is {len(OG_comps)} \n")#{len(OG_comps[0])} \n")
             debug_preview(OG_comps, limit=10, sort_if_set=False, random_sample=False,
          label="Final composition")   #OG_comps[0] -> OG_comps
+            print(f"coretype input is {coretype}")
         else:
             print("OG_comps is empty.")
                 
     if flags["compcheck"]:
         if flags["debug"]:
              print("[debug] Allow composition check by sugar unit numbers")
-        checked_final = compcheck(OG_comps, flags["Hex_range"], flags["HexNAc_range"],
-                                  flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
-        return checked_final, True
+        #checked_final = compcheck(OG_comps, flags["Hex_range"], flags["HexNAc_range"],
+        #                          flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
+        
+        res = compcheck(OG_comps,
+                        flags["Hex_range"], flags["HexNAc_range"],
+                        flags["Neu5Ac_range"], flags["Neu5Gc_range"],
+                        flags["KDN_range"],  flags["Fucose_range"],
+                        debug=flags["debug"])
+        passed = res[0] #if flags["debug"] else res
+        save_glycan_pseudocomp_to_csv(passed, filename=filename,
+                                    include_header=True, derivatization=deri, reduced=reduced)        
+        #return checked_final, True
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
+            save_glycan_pseudocomp_to_csv(OG_comps, filename=filename, include_header=True)
         #return OG_comps, False
-
-    #write file name
-    save_glycan_pseudocomp_to_csv(OG_comps, filename=filename, include_header=True)
+    
 
 #OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4], debug=True, filename="testifbreakOG_delaftertest")
 

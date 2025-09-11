@@ -1,6 +1,6 @@
 import os
-version = "0.9956"
-last_update = 20250907
+version = "0.9963"
+last_update = 20250910
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -20,7 +20,7 @@ import platform
 import msp_insilicomarker_withGPT as marker
 # --- Add near top-level imports ---
 import os, joblib
-
+import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
 # Ion mining feature (safe to import even if file is absent)
 # 20250907 to solve ion suggest missing issue
 import importlib, sys, os, traceback
@@ -63,14 +63,15 @@ except Exception:
     class SuggestParams:  # fallback stub
         def __init__(self, **kw): pass
 """
+# v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists. 
-# v0.99: Add Glypick-like autoannotation back (need to change UI)
+# v0.9963: fix OG in pseudolabeling
 # v0.996: Add ion (feature) mining method 
 # v0.993: able to apply pseudolabeling function (functional but may have bugs)
 # v0.9925: add split and stratified method when creating training set
 # v0.992: Link to pseudolabeling function
 # v0.991: Make the software functional to work on MacOS
-# v0.99: demo version before cleaning code
+# v0.99: Add Glypick-like autoannotation back (need to change UI)
 # v0.91: ML added. Lacking combining data and include "Non-glycan labels for training"
 # v0.9: add ML window
 # v0.81: adding derivatization flag
@@ -292,7 +293,196 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
                 self.meta_vars[k].set(v)
 
         ttk.Button(meta_frame, text="Reset from file", command=_reset_meta).grid(row=0, column=2, rowspan=3, padx=8)
+        #20250910
+        # --- Flag editor (dynamic by glycan type) ---
+        flags_frame = ttk.LabelFrame(self, text="In-Silico Generation Flags")
+        flags_frame.pack(fill="both", expand=True, padx=12, pady=6)
 
+        # Full spec (we'll subset by glycan type)
+        flag_spec = {
+            # monitoring / flow
+            "debug": ("bool", None),
+            "dev": ("bool", None),
+            "force_exit": ("bool", None),
+            # composition options
+            "alphagal_like": ("bool", None),
+            "allowldnc": ("bool", None),
+            "allowleby": ("bool", None),
+            "allow5ac": ("bool", None),
+            "allow5gc": ("bool", None),
+            "allowkdn": ("bool", None),
+            "allowfuc": ("bool", None),
+            "allowpsa": ("int", (0, 3)),
+            "allowldnf": ("bool", None),
+            # iteration logic
+            "arm_count": ("int", (0, 8)),
+            "internal_minrep": ("int", (0, 6)),
+            "internal_maxrep": ("int", (0, 10)),
+            "topology": ("bool", None),
+            # NG-only core flags (hide for O)
+            "corefuc": ("bool", None),
+            "bicorefuc": ("bool", None),
+            "highman": ("bool", None),
+            "perman": ("bool", None),
+            "hybrid": ("bool", None),
+            # optional composition check
+            "compcheck": ("bool", None),
+            "Hex_range": ("range", (0, 20)),
+            "HexNAc_range": ("range", (0, 20)),
+            "Neu5Ac_range": ("range", (0, 10)),
+            "Neu5Gc_range": ("range", (0, 10)),
+            "KDN_range": ("range", (0, 10)),
+            "Fucose_range": ("range", (0, 10)),
+        }
+
+        # Which keys to show per glycan type
+        NG_KEYS = {
+            "debug","dev","force_exit",
+            "alphagal_like","allowldnc","allowleby","allow5ac","allow5gc","allowkdn","allowfuc","allowpsa","allowldnf",
+            "arm_count","internal_minrep","internal_maxrep","topology",
+            "corefuc","bicorefuc","highman","perman","hybrid",
+            "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
+        }
+        OG_KEYS = {
+            "debug","dev","force_exit",
+            "allow5ac","allow5gc","allowkdn","allowfuc","allowpsa",
+            "arm_count","internal_minrep","internal_maxrep","topology",
+            "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
+        }
+
+        self.flag_vars = {}
+
+        left = ttk.Frame(flags_frame)
+        right = ttk.Frame(flags_frame)
+        left.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=8)
+        right.pack(side="left", fill="both", expand=True, padx=(5, 10), pady=8)
+
+        def _coerce_int_like(val, default=0):
+            return int(val) if isinstance(val, (int, float, str)) and str(val).strip() != "" else int(default)
+
+        def add_bool(parent, key, row):
+            var = tk.BooleanVar(value=bool(self.flags.get(key, False)))
+            ttk.Checkbutton(parent, text=key, variable=var).grid(row=row, column=0, sticky="w", pady=3)
+            self.flag_vars[key] = var
+            if key == "hybrid":
+                ttk.Label(parent, text="(components auto-filled on submit)").grid(row=row, column=1, sticky="w")
+
+        def add_int(parent, key, row, lo, hi):
+            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
+            var = tk.IntVar(value=_coerce_int_like(self.flags.get(key, 0), 0))
+            ttk.Spinbox(parent, from_=lo, to=hi, textvariable=var, width=6).grid(row=row, column=1, sticky="w", padx=6)
+            self.flag_vars[key] = var
+
+        def add_range(parent, key, row, lo, hi):
+            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
+            default = self.flags.get(key, [0, 0])
+            vmin = tk.IntVar(value=_coerce_int_like(default[0] if isinstance(default, (list, tuple)) else 0, 0))
+            vmax = tk.IntVar(value=_coerce_int_like(default[1] if isinstance(default, (list, tuple)) else 0, 0))
+            wrap = ttk.Frame(parent)
+            wrap.grid(row=row, column=1, sticky="w")
+            ttk.Spinbox(wrap, from_=lo, to=hi, textvariable=vmin, width=5).pack(side="left")
+            ttk.Label(wrap, text=" to ").pack(side="left")
+            ttk.Spinbox(wrap, from_=lo, to=hi, textvariable=vmax, width=5).pack(side="left")
+            self.flag_vars[key] = (vmin, vmax)
+
+        def _current_keys():
+            gtype = self.meta_vars["Glycan Type"].get().strip().upper()
+            return NG_KEYS if gtype == "N" else OG_KEYS
+
+        def _snapshot_flags():
+            snap = {}
+            # flags
+            for k, w in self.flag_vars.items():
+                if isinstance(w, tuple):
+                    snap[k] = (int(w[0].get()), int(w[1].get()))
+                elif isinstance(w, tk.BooleanVar):
+                    snap[k] = bool(w.get())
+                else:
+                    snap[k] = int(w.get())
+            # OG core types (added below)
+            snap["_ogcore"] = {i: v.get() for i, v in self.og_core_vars.items()}
+            return snap
+
+        def _restore_flags(snap):
+            if not snap: return
+            for k, w in self.flag_vars.items():
+                if k not in snap: continue
+                v = snap[k]
+                if isinstance(w, tuple):
+                    w[0].set(int(v[0] if isinstance(v, (list, tuple)) else 0))
+                    w[1].set(int(v[1] if isinstance(v, (list, tuple)) else 0))
+                elif isinstance(w, tk.BooleanVar):
+                    w.set(bool(v))
+                else:
+                    w.set(int(v))
+            for i, val in snap.get("_ogcore", {}).items():
+                if i in self.og_core_vars:
+                    self.og_core_vars[i].set(bool(val))
+
+        def _rebuild_flag_panel(*_):
+            # preserve state
+            snap = _snapshot_flags()
+            # clear frames
+            for child in left.winfo_children(): child.destroy()
+            for child in right.winfo_children(): child.destroy()
+            self.flag_vars.clear()
+            # choose keys
+            keys = [k for k in flag_spec.keys() if k in _current_keys()]
+            half = (len(keys) + 1) // 2
+            left_keys, right_keys = keys[:half], keys[half:]
+            # (re)render
+            def render_column(parent, keys_subset):
+                r = 0
+                for k in keys_subset:
+                    ftype, extra = flag_spec[k]
+                    if ftype == "bool":
+                        add_bool(parent, k, r)
+                    elif ftype == "int":
+                        lo, hi = extra
+                        add_int(parent, k, r, lo, hi)
+                    elif ftype == "range":
+                        lo, hi = extra
+                        add_range(parent, k, r, lo, hi)
+                    r += 1
+            render_column(left, left_keys)
+            render_column(right, right_keys)
+            # show/hide O-core panel according to glycan type
+            _toggle_og_core_panel()
+            # restore state
+            _restore_flags(snap)   
+
+        # --- O-glycan core types (multi-select) ---
+        core_frame = ttk.LabelFrame(self, text="O-glycan core types (select 1–4)")
+        core_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+        self.og_core_vars = {i: tk.BooleanVar(value=False) for i in (1, 2, 3, 4)}
+
+        row = 0
+        for i, label in [(1, "Core 1"), (2, "Core 2"), (3, "Core 3"), (4, "Core 4")]:
+            ttk.Checkbutton(core_frame, text=label, variable=self.og_core_vars[i]).grid(
+                row=row // 2, column=row % 2, sticky="w", padx=8, pady=3
+            )
+            row += 1
+
+        def _selected_coretypes():
+            sel = [i for i, v in self.og_core_vars.items() if v.get()]
+            return sel if sel else [1, 2, 3, 4]  # sensible default
+
+        def _toggle_og_core_panel():
+            # Show only for O-glycan
+            gtype = self.meta_vars["Glycan Type"].get().strip().upper()
+            core_frame.pack_forget()
+            if gtype == "O":
+                core_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+        # After creating the Glycan Type combobox (named via self.meta_vars["Glycan Type"])
+        gly_cb = meta_frame.grid_slaves(row=0, column=1)[0]  # the Combobox you just created
+        gly_cb.bind("<<ComboboxSelected>>", _rebuild_flag_panel)
+
+        # Initial render
+        _rebuild_flag_panel()
+
+        """
         # --- Flag editor (selected subset; excludes termi_comp/internal_comp) ---
         flags_frame = ttk.LabelFrame(self, text="In-Silico Generation Flags")
         flags_frame.pack(fill="both", expand=True, padx=12, pady=6)
@@ -389,6 +579,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         render_column(left, left_keys)
         render_column(right, right_keys)
         """
+        """
         btns = ttk.Frame(self)
         btns.pack(fill="x", padx=12, pady=(6, 12))
         ttk.Button(btns, text="Load Flags…", command=self.load_flags).pack(side="left", padx=4)
@@ -420,7 +611,26 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         ttk.Button(btns, text="Save Flags…", command=self.save_flags).pack(side="left", padx=4)
 
         ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
+        #20250910
+        def _on_generate():
+            payload = {"flags": self.collect_flags(),
+                    "metadata": {
+                        "Glycan Type": self.meta_vars["Glycan Type"].get(),
+                        "Mass Analyzer charge mode": self.meta_vars["Mass Analyzer charge mode"].get(),
+                        "Derivatization Type": self.meta_vars["Derivatization Type"].get(),
+                        "_meta_json": self.meta_json_path or "",
+                        "_overrides_applied": any(self.meta_vars[k].get() != self._meta_original.get(k, "")
+                                                    for k in self._meta_original)
+                    },
+                    "coretype": _selected_coretypes(),   # NEW
+                    }
+            cb = self.on_submit or self.on_generate
+            if cb:
+                maybe_path = cb(payload)
+                if isinstance(maybe_path, str) and os.path.exists(maybe_path):
+                    self.insilico_path_var.set(maybe_path)
 
+        """
         # Generate in-silico: call the provided on_generate/on_submit callback
         def _on_generate():
             payload = {"flags": self.collect_flags(),
@@ -439,7 +649,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
                 maybe_path = cb(payload)
                 if isinstance(maybe_path, str) and os.path.exists(maybe_path):
                     self.insilico_path_var.set(maybe_path)
-
+        """
         ttk.Button(btns, text="Generate In-Silico CSV", command=_on_generate).pack(side="left", padx=4)
 
         # Link existing in-silico (no auto popups unless user clicks)
@@ -483,7 +693,8 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
                                                     for k in self._meta_original)
                     },
                     "insilico_csv": self.insilico_path_var.get().strip(),
-                    "ionlist_path": self.ionlist_path_var.get().strip()}
+                    "ionlist_path": self.ionlist_path_var.get().strip(),
+                    "coretype": _selected_coretypes()}  # <-- NEW
             cb = self.on_start
             if cb:
                 cb(payload)
@@ -2191,6 +2402,31 @@ def open_prepare_dataset_window():
             columns=["MS2scan_no","observed_mass","theoretical_mass","ppm_error","comp_str","comp_tuple"]
         )
         matched = matched.rename(columns={"comp_str": "composition"})
+        import math
+
+        def _tuple_to_FHNSGKDN(t):
+            # t: (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc)
+            h, n, s, g, kdn, f = [int(x) for x in t]
+            parts = []
+            if f:   parts.append(f"F{f}")
+            if h:   parts.append(f"H{h}")
+            if n:   parts.append(f"N{n}")
+            if s:   parts.append(f"S{s}")
+            if g:   parts.append(f"G{g}")
+            if kdn: parts.append(f"KDN{kdn}")
+            return "".join(parts) or "Non-glycan"
+
+        if "comp_tuple" in matched.columns:
+            # Build compact labels from tuples (most reliable)
+            matched["composition"] = matched["comp_tuple"].apply(_tuple_to_FHNSGKDN)
+        else:
+            # Fallback: if composition already looks compact, keep it; else leave as-is
+            import re
+            _FHNSKDN_RE = re.compile(r"^(F\d+)?(H\d+)?(N\d+)?(S\d+)?(G\d+)?(KDN\d+)?$")
+            looks_compact = matched["composition"].astype(str).str.match(_FHNSKDN_RE).all()
+            if not looks_compact:
+                print("[label] 'comp_tuple' missing; keeping composition as-is")
+
 
         if matched.empty:
             messagebox.showinfo("Pseudolabeling", "No precursor matches within tolerance.")
@@ -2870,7 +3106,7 @@ def open_prepare_dataset_window():
 
     # -- pseudo labeling --
     def launch_pseudo_labeling():
-        import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
+        #import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
         from datetime import datetime
 
         sel = tree.selection()
@@ -2983,8 +3219,12 @@ def open_prepare_dataset_window():
                 messagebox.showerror("Generation failed", str(e))
 
         def on_generate(payload):
+            
+            # 20250910 not sure if GPT is asking here
+            flags = dict(payload["flags"])
+            #glycan_type = payload["metadata"]["Glycan Type"].strip().upper()
             # Generate NG/OG and link the path; also append run log
-            flags = dict(compv4.NG_flags); flags.update(payload.get("flags", {}))
+            #flags = dict(compv4.NG_flags); flags.update(payload.get("flags", {}))
             glycan_type = (payload["metadata"].get("Glycan Type") or "").strip().upper()
             # NEW: carry derivatization into flags
             deriv_raw = (payload["metadata"].get("Derivatization Type") or "").strip().lower()
@@ -3001,7 +3241,8 @@ def open_prepare_dataset_window():
                 if glycan_type == "N":
                     compv4.NGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
                 elif glycan_type == "O":
-                    compv4.OGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
+                    cores = payload.get("coretype") or [1,2,3,4]
+                    compv4.OGlaunch(user_flags=flags, coretype=cores,filename=outpath, debug=flags.get("debug", False))
                 else:
                     messagebox.showwarning("Glycan Type Missing",
                                         "Select 'N' or 'O' in the metadata panel.")
@@ -4639,6 +4880,38 @@ def open_ml_analysis_window():
 
         messagebox.showinfo("Done", f"Trainable CSV saved:\n{out_path}\n\nYou can now click “Train Model” in the first tab.")
 
+    # 20250910 convert tuple to canonical label FxHxNxSxGxKDNx
+    import re, ast
+    def _tuple_to_FHNSGKDN(t):
+        # comp tuple order is (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc)
+        h, n, s, g, kdn, f = map(int, t)
+        parts = []
+        if f:   parts.append(f"F{f}")
+        if h:   parts.append(f"H{h}")
+        if n:   parts.append(f"N{n}")
+        if s:   parts.append(f"S{s}")
+        if g:   parts.append(f"G{g}")
+        if kdn: parts.append(f"KDN{kdn}")
+        return "".join(parts) or "Non-glycan"
+
+    _TUPLE_LIKE_RE = re.compile(r"^\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$")
+    _FHNSKDN_RE    = re.compile(r"^(F\d+)?(H\d+)?(N\d+)?(S\d+)?(G\d+)?(KDN\d+)?$")
+
+    def _coerce_comp_to_tuple(x):
+        # return a (H,N,S,G,KDN,F) tuple or None
+        if isinstance(x, (list, tuple)) and len(x) == 6:
+            return tuple(int(v) for v in x)
+        s = str(x).strip()
+        if _TUPLE_LIKE_RE.match(s):
+            try:
+                t = ast.literal_eval(s)
+                if isinstance(t, (list, tuple)) and len(t) == 6:
+                    return tuple(int(v) for v in t)
+            except Exception:
+                return None
+        return None
+    # --- end helpers ---
+
     # Action
     def _build_from_pseudolabels():
         p_path = pseudo_path_var.get().strip()      # long-form pseudolabels (full TSV/CSV)
@@ -4674,11 +4947,106 @@ def open_ml_analysis_window():
         pos = pos.sort_values(by=sort_cols, ascending=ascending).groupby(scan_col, as_index=False).head(int(topn_var.get()))
         # map composition -> chosen label col
         labcol = label_target.get().strip()
+
         if "composition" in pos.columns:
-            pos[labcol] = pos["composition"].astype(str)
+            # DEBUG: print dtype and a few sample types/values
+            try:
+                sample_vals = pos["composition"].head(5).tolist()
+                sample_types = [type(v).__name__ for v in sample_vals]
+                logger.log(f"[PL] composition dtype={pos['composition'].dtype}; sample types={sample_types}; samples={sample_vals}")
+                print("[11111debug]")
+                print({pos['composition'].dtype})
+            except Exception:
+                pass
+
+            # Prefer comp_tuple if present (most reliable)
+            if "comp_tuple" in pos.columns:
+                logger.log("[PL] Using 'comp_tuple' to build FHNSGKDN labels")
+                pos[labcol] = pos["comp_tuple"].apply(_tuple_to_FHNSGKDN)
+
+            else:
+                # Try to coerce 'composition' to tuple
+                tuples = pos["composition"].apply(_coerce_comp_to_tuple)
+                n_tuples = tuples.notna().sum()
+                logger.log(f"[PL] tuple coercion from 'composition' → {n_tuples} rows")
+
+                if n_tuples > 0:
+                    pos[labcol] = tuples.apply(lambda t: _tuple_to_FHNSGKDN(t) if t is not None else "")
+                else:
+                    # If already in FHNSGKDN format, just use it; otherwise fallback to str
+                    looks_compact = pos["composition"].astype(str).str.match(_FHNSKDN_RE).all()
+                    if looks_compact:
+                        logger.log("[PL] 'composition' already in FHNSGKDN format; using as-is")
+                        pos[labcol] = pos["composition"].astype(str)
+                    else:
+                        logger.log("[PL] 'composition' not tuple-like; falling back to string cast")
+                        pos[labcol] = pos["composition"].astype(str)
+
         elif labcol not in pos.columns:
-            messagebox.showerror("No composition", "Neither 'composition' nor the chosen label column exist in the pseudolabels."); return
-        pos_labels = pos[[scan_col, labcol]].drop_duplicates()
+            messagebox.showerror("No composition",
+                                "Neither 'composition' nor the chosen label column exist in the pseudolabels.")
+            return
+
+        pos_labels = pos[[scan_col, labcol]].drop_duplicates()        
+        
+        """
+        # map composition -> chosen label col
+        labcol = label_target.get().strip()
+        if "composition" in pos.columns:
+            # DEBUG: print dtype and a few sample types/values
+            try:
+                sample_vals = pos["composition"].head(5).tolist()
+                sample_types = [type(v).__name__ for v in sample_vals]
+                logger.log(f"[PL] composition dtype={pos['composition'].dtype}; sample types={sample_types}; samples={sample_vals}")
+            except Exception:
+                pass
+
+            # Prefer comp_tuple if present (most reliable)
+            if "comp_tuple" in pos.columns:
+                logger.log("[PL] Using 'comp_tuple' to build FHNSGKDN labels")
+                pos[labcol] = pos["comp_tuple"].apply(_tuple_to_FHNSGKDN)
+
+            else:
+                # Try to coerce 'composition' to tuple
+                tuples = pos["composition"].apply(_coerce_comp_to_tuple)
+                n_tuples = tuples.notna().sum()
+                logger.log(f"[PL] tuple coercion from 'composition' → {n_tuples} rows")
+
+                if n_tuples > 0:
+                    pos[labcol] = tuples.apply(lambda t: _tuple_to_FHNSGKDN(t) if t is not None else "")
+                else:
+                    # If already in FHNSGKDN format, just use it; otherwise fallback to str
+                    looks_compact = pos["composition"].astype(str).str.match(_FHNSKDN_RE).all()
+                    if looks_compact:
+                        logger.log("[PL] 'composition' already in FHNSGKDN format; using as-is")
+                        pos[labcol] = pos["composition"].astype(str)
+                    else:
+                        logger.log("[PL] 'composition' not tuple-like; falling back to string cast")
+                        pos[labcol] = pos["composition"].astype(str)
+
+        elif labcol not in pos.columns:
+            messagebox.showerror("No composition",
+                                "Neither 'composition' nor the chosen label column exist in the pseudolabels.")
+            return
+        """
+        """
+        if "composition" in pos.columns:
+            print(f"[debug]:type of composition")
+            print(pos["composition"].dtype)
+            if pos["composition"].dtype == "object" and any(isinstance(x, (tuple, list)) for x in pos["composition"].head(5)):
+                # convert tuple → compact string like F1H4N2S3
+                pos[labcol] = pos["composition"].apply(_tuple_to_FHNSGKDN)
+            else:
+                pos[labcol] = pos["composition"].astype(str)
+        elif labcol not in pos.columns:
+            messagebox.showerror("No composition", "Neither 'composition' nor the chosen label column exist in the pseudolabels.")
+            return
+            """
+        #if "composition" in pos.columns:
+        #    pos[labcol] = pos["composition"].astype(str)
+        #elif labcol not in pos.columns:
+        #    messagebox.showerror("No composition", "Neither 'composition' nor the chosen label column exist in the pseudolabels."); return
+        #pos_labels = pos[[scan_col, labcol]].drop_duplicates()
 
         # --- decide feature source & ion masses ---
         ion_masses = None
