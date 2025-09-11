@@ -4912,6 +4912,50 @@ def open_ml_analysis_window():
         return None
     # --- end helpers ---
 
+
+    # 20250911 added for solving ion list required issue when rebuild feature is not needed 
+    import math
+
+    def _load_ion_masses_from_file(path):
+        if not path:
+            return None
+        try:
+            # supports .csv or .xlsx (pandas can read both if engine installed)
+            df = _robust_read_csv(path)
+            # common column names: 'mass', 'mz'
+            for col in ("mass", "Mass", "mz", "m/z", "MZ"):
+                if col in df.columns:
+                    vals = []
+                    for v in df[col].tolist():
+                        try:
+                            vals.append(float(v))
+                        except Exception:
+                            pass
+                    return sorted(set(vals))
+        except Exception:
+            pass
+        return None
+
+    _EXCLUDE_NONMASS = {
+        "entry_no","MS1scan_no","MS1_isolationmass","MS1_monoisolationmass",
+        "chargeState","protonatedmass","MS2scan_no","label","Structure",
+        "composition","theoretical_mass","observed_mass","ppm_error",
+        # add any other metadata headers you know appear in your feature CSV
+    }
+
+    def _infer_ion_masses_from_feature_df(feat_df):
+        masses = []
+        for c in feat_df.columns:
+            if c in _EXCLUDE_NONMASS:
+                continue
+            try:
+                masses.append(float(c))
+            except Exception:
+                # ignore headers that aren't pure numeric (e.g., 'HCD_energy')
+                continue
+        return sorted(set(masses))
+
+
     # Action
     def _build_from_pseudolabels():
         p_path = pseudo_path_var.get().strip()      # long-form pseudolabels (full TSV/CSV)
@@ -5048,6 +5092,47 @@ def open_ml_analysis_window():
         #    messagebox.showerror("No composition", "Neither 'composition' nor the chosen label column exist in the pseudolabels."); return
         #pos_labels = pos[[scan_col, labcol]].drop_duplicates()
 
+        #20250911 
+        ion_path = ionlist_path_var2.get().strip()
+        try:
+            ion_masses = _load_ion_masses_from_file(ion_path)
+        except:
+            ion_masses = None
+        if not ion_masses:
+            ion_masses = _infer_ion_masses_from_feature_df(df_feat)
+
+        print(f"[features] using {len(ion_masses)} ion masses "
+            f"(first 8: {ion_masses[:8] if ion_masses else []})")
+        if not ion_masses:
+            messagebox.showerror("No ion masses",
+                "Could not obtain ion masses from ion list file or feature CSV headers.")
+            return
+        if ion_masses is None:
+            if rebuild_all_features.get():
+                # we will rebuild ALL features from long-form peaks using an ion list
+                ion_df = _read_ion_df(ionlist_path_var2.get().strip())
+                if ion_df is None or "mass" not in ion_df.columns:
+                    messagebox.showerror("Ion list required", "Provide an ion list with a 'mass' column to rebuild features."); return
+                ion_masses = ion_df["mass"].astype(float).tolist()
+            else:
+                # use the existing wide matrix's feature columns as the ion set (drop admin/label)
+                drop_cols = {
+                    labcol, "ID", "Source", "IUPACname(optional)", "Glycanannotation2",
+                    "GlyToucan ID", "unique_ID", scan_feat, "MS2scan_no", "protonatedmass",
+                    "theoretical_mass", "observed_mass", "ppm_error", "ion score",
+                    "ion hit count", "ion hits m/z", "ion hits intensity", "ion hits logI", "ion hits relI"
+                }
+                ion_masses = []
+                for c in df_feat.columns:
+                    if c in drop_cols:
+                        continue
+                    try:
+                        ion_masses.append(float(c))
+                    except Exception:
+                        # ignore non-numeric headers
+                        continue
+
+        """
         # --- decide feature source & ion masses ---
         ion_masses = None
         if rebuild_all_features.get():
@@ -5060,7 +5145,7 @@ def open_ml_analysis_window():
             # use the existing wide matrix’ feature columns as the ion set (drop admin/label)
             drop_cols = {labcol, "ID", "Source", "IUPACname(optional)", "Glycanannotation2", "GlyToucan ID", "unique_ID"}
             ion_masses = [c for c in df_feat.columns if c not in drop_cols and c != scan_feat]
-
+        """
 
         # --- build NG from FULL long-form (complement of positives) ---
         # 1) unique scans from the long TSV (carry only peaks we need to build features)
@@ -5074,7 +5159,10 @@ def open_ml_analysis_window():
                                         .astype("Int64").isin(pos_set)].reset_index(drop=True)
 
         # 3) build NG features with the same normalization (log10(I)+1; miss=1.0)
+        #20250911 ver
         ng_feat = build_features_from_peaks_log10_plus1(neg_scans_df, ion_masses, ppm=float(ppm_abs_max.get()))
+
+        #ng_feat = build_features_from_peaks_log10_plus1(neg_scans_df, ion_masses, ppm=float(ppm_abs_max.get()))
 
         # 4) assemble NG table (rename scan col and set label)
         ng_df = pd.concat([neg_scans_df[[scan_col]].reset_index(drop=True), ng_feat], axis=1)
