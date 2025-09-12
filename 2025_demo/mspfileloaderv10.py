@@ -1,6 +1,6 @@
 import os
-version = "0.9963"
-last_update = 20250910
+version = "0.9965"
+last_update = 20250912
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -64,7 +64,9 @@ except Exception:
         def __init__(self, **kw): pass
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
-# v1.00: Able to write manuscript although some bug persists. 
+# v1.00: Able to write manuscript although some bug persists.
+# v0.9966: incorporate random sampling manner also in PL trainable dataset generation 
+# v0.9965: finished GUI pseudolabeling -> trainable csv 
 # v0.9963: fix OG in pseudolabeling
 # v0.996: Add ion (feature) mining method 
 # v0.993: able to apply pseudolabeling function (functional but may have bugs)
@@ -2112,7 +2114,7 @@ def open_prepare_dataset_window():
                     ppm = 10.0
                 neg_df = mspval.sample_real_negatives(
                     raw_tsv_path = files["csv"],
-                    annotated_scans = pre_df["MS2scan_no"],
+                    annotated_scans = pre_df["MS2Scan_no"],
                     ion_df = ion_df,
                     ppm_tol = ppm,
                     min_hits = int(min_hits_var.get()),
@@ -2237,6 +2239,780 @@ def open_prepare_dataset_window():
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
         except Exception as e:
             messagebox.showerror("Merge Failed", f"Error:\n{str(e)}")
+
+    #20250911 move convert pseudolabeled data to trainable csv functionality to here
+    # ---------- PSEUDOLABEL → TRAINABLE (one-pass) ----------
+    import ast, re, math
+    from datetime import datetime
+
+    _TUPLE_LIKE_RE = re.compile(r"^\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$")
+    _FHNSKDN_RE    = re.compile(r"^(F\d+)?(H\d+)?(N\d+)?(S\d+)?(G\d+)?(KDN\d+)?$")
+    _NONMASS = {
+        "entry_no","MS1scan_no","MS1_isolationmass","MS1_monoisolationmass","chargeState",
+        "protonatedmass","MS2scan_no","label","Structure","composition","theoretical_mass",
+        "observed_mass","ppm_error","ion score","ion hit count","ion hits m/z",
+        "ion hits intensity","ion hits logI","ion hits relI","ID","Source","unique_ID",
+        "IUPACname(optional)","Glycanannotation2","GlyToucan ID"
+    }
+
+    def _tuple_to_FHNSGKDN(t):
+        # (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc) -> compact string, zeros omitted
+        h, n, s, g, kdn, f = map(int, t)
+        parts = []
+        if f:   parts.append(f"F{f}")
+        if h:   parts.append(f"H{h}")
+        if n:   parts.append(f"N{n}")
+        if s:   parts.append(f"S{s}")
+        if g:   parts.append(f"G{g}")
+        if kdn: parts.append(f"KDN{kdn}")
+        return "".join(parts) or "Non-glycan"
+
+    #20250912@mark fix MS2Scan_no missing in pseudo -> trainable csv
+    SCAN_CANDIDATES = ("MS2scan_no", "MS2Scan_no", "ScanNum", "scan", "Scan", "unique_ID")
+    def _canonicalize_scan_column(df):
+        """
+        Ensure there is a canonical 'MS2scan_no' string column in df.
+        If a candidate exists, copy/rename it; otherwise leave df unchanged.
+        Drops duplicate candidate columns after promoting.
+        """
+        import pandas as pd
+        if df is None or df.empty:
+            return df
+        src = next((c for c in SCAN_CANDIDATES if c in df.columns), None)
+        if not src:
+            return df
+        # create/overwrite canonical
+        df = df.copy()
+        df["MS2Scan_no"] = df[src].astype(str)
+        # drop other candidates except the canonical
+        for c in SCAN_CANDIDATES:
+            if c in df.columns and c != "MS2scan_no":
+                df.drop(columns=[c], inplace=True)
+        return df
+
+    def _coerce_comp_to_tuple(x):
+        if isinstance(x, (list, tuple)) and len(x) == 6:
+            return tuple(int(v) for v in x)
+        s = str(x).strip()
+        if _TUPLE_LIKE_RE.match(s):
+            try:
+                t = ast.literal_eval(s)
+                if isinstance(t, (list, tuple)) and len(t) == 6:
+                    return tuple(int(v) for v in t)
+            except Exception:
+                return None
+        return None
+
+    def _infer_ion_masses_from_wide_df(df):
+        masses = []
+        for c in df.columns:
+            if c in _NONMASS: continue
+            try:
+                masses.append(float(c))
+            except Exception:
+                continue
+        return sorted(set(masses))
+    #20250912 fix MS2scan missing issue
+    SCAN_CANDIDATES = ("MS2scan_no","MS2Scan_no","ScanNum","scan","Scan","unique_ID")
+
+    def _ensure_scan(df, fallback=None):
+        """
+        Guarantee a canonical string column 'MS2scan_no' exists in df.
+        If a candidate exists, copy→cast→drop dups.
+        Else, if fallback (Series/array) matches length, insert it.
+        Returns df (copy).
+        """
+        import pandas as pd
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+        found = next((c for c in SCAN_CANDIDATES if c in out.columns), None)
+        if found:
+            out["MS2scan_no"] = out[found].astype(str)
+            for c in SCAN_CANDIDATES:
+                if c in out.columns and c != "MS2scan_no":
+                    out.drop(columns=[c], inplace=True)
+            return out
+        if fallback is not None and len(fallback) == len(out):
+            out.insert(0, "MS2scan_no", pd.Series(fallback, index=out.index, dtype="string"))
+            return out
+        # last resort: fail early with context
+        print("[PL→Train][debug] _ensure_scan failed; df cols:", list(df.columns)[:20], "len=", len(df))
+        raise KeyError("MS2scan_no")
+
+    #20250912 fix bad calls (the function looks not identical to score_counter in marker)
+
+    def _clean_cols(df):
+        if df is None or df.empty: 
+            return df
+        df = df.copy()
+        df.columns = [str(c).strip().replace("\ufeff","") for c in df.columns]
+        return df
+
+    def _comp_tuple_to_label(x):
+        """
+        Accepts a tuple/list/str and returns compact label like F1H4N2S3 (omit zeros).
+        Order: (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc) → H,N,S,G,K,F in label
+        If you use F,H,N,S,G,K as your canonical, adjust the mapping below.
+        """
+        import ast, json
+        if x is None or x == "" or (isinstance(x, float) and str(x) == "nan"):
+            return None
+        if isinstance(x, str):
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    x = parser(x)
+                    break
+                except Exception:
+                    pass
+            if isinstance(x, str):  # fallback simple split
+                parts = [p for p in x.replace("(","").replace(")","").split(",") if p.strip()!=""]
+                x = [int(float(p)) for p in parts] if parts else []
+        if isinstance(x, (list, tuple)):
+            # Assume library order: Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc
+            # Label order (O/N both): F, H, N, S(=NeuAc), G(=NeuGc), K(=KDN)
+            if len(x) < 6:
+                x = list(x) + [0]*(6-len(x))
+            hex_, hexc, neuac, neugc, kdn, fuc = [int(v) for v in x[:6]]
+            parts = []
+            if fuc:   parts.append(f"F{fuc}")
+            if hex_:  parts.append(f"H{hex_}")
+            if hexc:  parts.append(f"N{hexc}")
+            if neuac: parts.append(f"S{neuac}")
+            if neugc: parts.append(f"G{neugc}")
+            if kdn:   parts.append(f"K{kdn}")
+            return "".join(parts) if parts else None
+        return None
+
+    def _count_hits_to_ionlist(peaklist, peakintensity, ion_masses, ppm: float) -> int:
+        """
+        Count how many reference ion_masses have at least one observed peak within +/- ppm window.
+        Accepts list/ndarray OR stringified lists/tuples for peaks & intensities.
+        """
+        import numpy as np, json, ast
+
+        def _to_array(x):
+            # Already array-like?
+            if isinstance(x, (list, tuple)):
+                return np.asarray(x, dtype=float)
+            # String → try JSON, else Python literal, else comma/semicolon split
+            s = str(x).strip()
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    v = parser(s)
+                    return np.asarray(v, dtype=float)
+                except Exception:
+                    pass
+            # fallback: split by common separators
+            try:
+                parts = [p for p in s.replace(';', ',').split(',') if p.strip() != ""]
+                return np.asarray([float(p) for p in parts], dtype=float) if parts else np.asarray([], dtype=float)
+            except Exception:
+                return np.asarray([], dtype=float)
+
+        peaks = _to_array(peaklist)
+        ints  = _to_array(peakintensity)
+        if peaks.size == 0 or ints.size == 0 or peaks.size != ints.size:
+            return 0
+
+        hits = 0
+        for m in ion_masses or []:
+            tol = abs(float(m)) * float(ppm) / 1e6
+            if np.any(np.abs(peaks - float(m)) <= tol):
+                hits += 1
+        return hits
+
+    def build_trainable_from_pseudolabels(
+        sample_name: str,
+        pseudo_path: str,
+        ion_file_path: str | None,
+        ion_sheet_name: str | None,
+        salvage_path: str | None,
+        thresholds: dict,
+        neg_opts: dict,
+        feature_mode: str,          # "rebuild" or "reuse"
+        wide_feat_csv: str | None,  # used when feature_mode == "reuse"
+        output_path: str | None,
+        logger=None,
+    ):
+        """
+        One-pass builder:
+        - Load pseudolabeled long TSV
+        - Normalize labels (compact FHNSGKDN)
+        - Threshold selection (min ion score, max |ppm|, Top-N)
+        - Optional salvage override
+        - Build/Reuse features + optional negatives
+        - Save trainable CSV
+        Returns: (outpath, summary_dict)
+        """
+        import pandas as pd, os
+
+        log = (logger.log if logger else print)
+        log(f"[PL→Train] starting for sample={sample_name}")
+
+        # 1) Load pseudo TSV (long form)
+        pl = _robust_read_csv(pseudo_path, prefer_tab=True) #always tsv
+        #new
+        pl = _clean_cols(pl)
+        if pl is None or pl.empty:
+            raise RuntimeError("Pseudolabeled TSV is empty or unreadable.")
+        # unify case/aliases early
+        aliases = {c.lower(): c for c in pl.columns}
+        def has(col): return col in pl.columns
+        def has_lower(col): return col.lower() in aliases
+
+        # preferred canonical names
+        scan_candidates = ("MS2scan_no","MS2Scan_no","ScanNum","scan","Scan","unique_ID")
+        scan_col = next((c for c in scan_candidates if has(c) or has_lower(c)), None)
+        if scan_col and scan_col not in pl.columns and has_lower(scan_col):
+            scan_col = aliases[scan_col.lower()]
+
+        # make/standardize 'composition'
+        if not has("composition"):
+            if has("comp_str"):  # some runs write comp_str
+                pl.rename(columns={"comp_str": "composition"}, inplace=True)
+            elif has_lower("comp_str"):
+                pl.rename(columns={aliases["comp_str"]: "composition"}, inplace=True)
+            elif has("comp_tuple") or has_lower("comp_tuple"):
+                ct = "comp_tuple" if has("comp_tuple") else aliases["comp_tuple"]
+                pl["composition"] = pl[ct].apply(_comp_tuple_to_label)
+            elif has("pseudo compositions") or has_lower("pseudo compositions"):
+                pc = "pseudo compositions" if has("pseudo compositions") else aliases["pseudo compositions"]
+                # if it’s a single best composition string, take it; if it’s a list, take first
+                pl["composition"] = pl[pc].apply(
+                    lambda v: v if isinstance(v, str) 
+                    else (v[0] if isinstance(v, (list, tuple)) and v else None)
+                )
+
+        # final sanity
+        if "composition" not in pl.columns:
+            print("[PL→Train][debug] pseudolabel headers:", pl.columns.tolist()[:30])
+            raise RuntimeError("No composition/comp_tuple column in pseudolabels.")        
+        """
+        # columns we rely on (fallbacks handled below)
+        scan_col = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in pl.columns), None)
+        if not scan_col:
+            raise RuntimeError("MS2scan_no/Scan column not found in pseudolabels.")
+        # normalize label column
+        if "comp_tuple" in pl.columns:
+            pl["Structure"] = pl["comp_tuple"].apply(_tuple_to_FHNSGKDN)
+        elif "composition" in pl.columns:
+            tups = pl["composition"].apply(_coerce_comp_to_tuple)
+            if tups.notna().any():
+                pl["Structure"] = tups.apply(lambda t: _tuple_to_FHNSGKDN(t) if t else "")
+            else:
+                looks_compact = pl["composition"].astype(str).str.match(_FHNSKDN_RE).all()
+                pl["Structure"] = pl["composition"].astype(str) if looks_compact else pl["composition"].astype(str)
+        
+        else:
+            raise RuntimeError("No composition/comp_tuple column in pseudolabels.")
+        """
+        # 2) Thresholding / selection
+        min_score = float(thresholds.get("min_ion_score", 0.0))
+        max_abs_ppm = float(thresholds.get("max_abs_ppm", 20.0))
+        topn = int(thresholds.get("topn", 1))
+        use_score = ("ion score" in pl.columns)
+        if "ppm_error" not in pl.columns:
+            pl["ppm_error"] = 9e9  # fallback if missing
+
+        sel = pl.copy()
+        if use_score:
+            sel = sel[sel["ion score"] >= min_score]
+        sel = sel[sel["ppm_error"].abs() <= max_abs_ppm]
+        order_cols = [scan_col] + (["ion score"] if use_score else ["ppm_error"])
+        ascending  = [True] + ([False] if use_score else [True])
+        sel = sel.sort_values(order_cols, ascending=ascending).groupby(scan_col, as_index=False).head(topn)
+        #20250912 fix critical root cause: no Structure column if we have pure pl datasets. It's composition!
+        # --- normalize label column on the selection table ---
+        # we want a guaranteed 'Structure' column to merge later
+        if "Structure" not in sel.columns:
+            if "composition" in sel.columns:
+                sel["Structure"] = sel["composition"].astype(str)
+            elif "comp_tuple" in sel.columns:
+                sel["Structure"] = sel["comp_tuple"].apply(_comp_tuple_to_label)
+            elif "pseudo compositions" in sel.columns:
+                def _first_str(v):
+                    if isinstance(v, str): 
+                        return v
+                    if isinstance(v, (list, tuple)) and v:
+                        return v[0]
+                    return None
+                sel["Structure"] = sel["pseudo compositions"].apply(_first_str)
+            else:
+                # last resort — make it present to avoid KeyError, will become None on merge
+                sel["Structure"] = None
+        #20250912@mark
+        # ---- normalize scan key to string to avoid dtype mismatches ----
+        # keep scan key as string to avoid dtype mismatches
+        sel[scan_col] = sel[scan_col].astype(str)
+
+        #debug track
+        print("[PL→Train][dbg] sel cols:", [scan_col, "Structure"], 
+            "null_Struct:", int(sel["Structure"].isna().sum()))
+        # 3) Ion list
+        ion_df = _read_ion_df(ion_file_path) if ion_file_path else None
+        if ion_df is not None and ion_sheet_name:
+            # (optional) if your _read_ion_df can select sheet, pass it there; otherwise ignore
+            pass
+
+        # 4) Features
+        # If REBUILD: need long-form peaks and a numeric ion mass list
+        # If REUSE : use the provided wide feature CSV and infer numeric masses (for negatives later)
+        import numpy as np
+        from ml_ng_utils import build_features_from_peaks_log10_plus1
+
+        ion_masses = None
+        if feature_mode == "rebuild":
+            if ion_df is None or "mass" not in ion_df.columns:
+                raise RuntimeError("Ion list with a 'mass' column is required to rebuild features.")
+            ion_masses = ion_df["mass"].astype(float).tolist()
+
+            # require long-form peaks to build features
+            if not {"peaklist","peakintensity"}.issubset(pl.columns):
+                raise RuntimeError("Pseudolabeled TSV must contain 'peaklist' and 'peakintensity' to rebuild features.")
+            
+            #20250912@mark 
+            #pos_scans_df = sel[[scan_col,"peaklist","peakintensity"]].rename(columns={scan_col:"MS2scan_no"})
+            #pos_scans_df["MS2scan_no"] = pos_scans_df["MS2scan_no"].astype(str)
+
+
+            #pos_feat = build_features_from_peaks_log10_plus1(
+            #    pos_scans_df, ion_masses, ppm=float(thresholds.get("ion_ppm", 10.0))
+            #)
+            #pos_feat = _ensure_scan(pos_feat, fallback=pos_scans_df["MS2scan_no"])
+            # keep a private copy of scan ids for safety
+            #pos_feat["_scan_fallback"] = pos_scans_df["MS2scan_no"].values  # NEW
+            #20250912@mark fix MS2Scan missing
+            #pos_feat = _canonicalize_scan_column(pos_feat)
+            pos_scans_df = sel[[scan_col,"peaklist","peakintensity"]].rename(columns={scan_col:"MS2scan_no"})
+            pos_scans_df["MS2scan_no"] = pos_scans_df["MS2scan_no"].astype(str)
+
+            pos_feat = build_features_from_peaks_log10_plus1(pos_scans_df, ion_masses, ppm=float(thresholds.get("ion_ppm", 10.0)))
+            # positives
+            pos_feat = _ensure_scan(pos_feat, fallback=pos_scans_df["MS2scan_no"])
+            pos_feat["_scan_fallback"] = pos_feat["MS2scan_no"].astype(str).values
+
+            #debug print
+            print("[PL→Train][dbg] pos_feat pre-merge has:", 
+            [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
+
+            # attach label next; do NOT subset columns yet
+            pos_feat = pos_feat.merge(sel[[scan_col,"Structure"]],
+                                    left_on="MS2scan_no", right_on=scan_col,
+                                    how="left").drop(columns=[scan_col])            
+            #pos_feat = _ensure_scan(pos_feat, fallback=pos_scans_df["MS2scan_no"])
+            #pos_feat["_scan_fallback"] = pos_scans_df["MS2scan_no"].values  # KEEP THIS
+
+            #pos_scans_df["MS2scan_no"] = pos_scans_df["MS2scan_no"].astype(str)
+            #pos_feat = pos_feat.merge(
+            #    sel[[scan_col, "Structure"]],
+            #    left_on="MS2scan_no",
+            #    right_on=scan_col,
+            #    how="left"
+            #).drop(columns=[scan_col])
+
+            # ensure scan column exists (from the earlier patch) then cast to str
+            if "MS2scan_no" not in pos_feat.columns and len(pos_feat) == len(pos_scans_df):
+                pos_feat.insert(0, "MS2scan_no", pos_scans_df["MS2scan_no"].values)
+            pos_feat["MS2scan_no"] = pos_feat["MS2scan_no"].astype(str)
+
+            if "Structure" not in pos_feat.columns:
+                pos_feat = pos_feat.merge(
+                    sel[[scan_col, "Structure"]],
+                    left_on="MS2scan_no",
+                    right_on=scan_col,
+                    how="left",
+                    suffixes=("", "_pl")  # avoid _x/_y confusion
+                ).drop(columns=[scan_col])
+            else:
+                # Normalize any legacy duplicates from previous runs
+                if "Structure_x" in pos_feat.columns and "Structure_y" in pos_feat.columns:
+                    pos_feat["Structure"] = pos_feat["Structure_x"].fillna(pos_feat["Structure_y"])
+                    pos_feat.drop(columns=["Structure_x","Structure_y"], inplace=True, errors="ignore")
+                elif "Structure_pl" in pos_feat.columns:
+                    pos_feat["Structure"] = pos_feat.get("Structure").fillna(pos_feat["Structure_pl"])
+                    pos_feat.drop(columns=["Structure_pl"], inplace=True, errors="ignore")
+            #debug print
+            print("[PL→Train][dbg] pos_feat post-merge has:", 
+                [c for c in ("MS2scan_no","Structure","Structure_pl","Structure_x","Structure_y","_scan_fallback") 
+                if c in pos_feat.columns])
+            """
+            pos_scans_df = sel[[scan_col,"peaklist","peakintensity"]].rename(columns={scan_col:"MS2scan_no"})
+            pos_feat = build_features_from_peaks_log10_plus1(
+                pos_scans_df, ion_masses, ppm=float(thresholds.get("ion_ppm", 10.0))
+            )
+            # --- ensure scan column is present in pos_feat ---
+            scan_candidates = ("MS2scan_no","ScanNum","scan","Scan","unique_ID")
+            if not any(c in pos_feat.columns for c in scan_candidates):
+                # try to inject from the input (same row order expected)
+                if "MS2scan_no" in pos_scans_df.columns and len(pos_feat) == len(pos_scans_df):
+                    pos_feat.insert(0, "MS2scan_no", pos_scans_df["MS2scan_no"].values)
+                else:
+                    # last resort: align by index
+                    pos_feat = pos_feat.copy()
+                    pos_feat.insert(0, "MS2scan_no", pos_scans_df.reset_index(drop=True)["MS2scan_no"])
+            """
+
+            # attach labels
+            #scan_feat = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in feat.columns), None)
+            #if not scan_feat:
+            #    raise RuntimeError("No scan column found in wide feature CSV.")
+
+            # when adding labels to pos_feat:
+            #if "Structure" not in pos_feat.columns:
+            #    pos_feat = pos_feat.merge(
+            #        sel[[scan_col, "Structure"]],
+            #        left_on=scan_feat,          # <-- use scan_feat here
+            #        right_on=scan_col,
+            #        how="left"
+            #    ).drop(columns=[scan_col])
+            #pos_feat = pos_feat.merge(sel[[scan_col,"Structure"]], left_on="MS2scan_no", right_on=scan_col, how="left").drop(columns=[scan_col])
+        else:  # feature_mode == "reuse"
+            if not wide_feat_csv:
+                raise RuntimeError("Provide a wide feature CSV when feature_mode='reuse'.")
+
+            # 1) load the wide feature matrix
+            feat = _robust_read_csv(wide_feat_csv)  # CSV (wide)
+            if feat is None or feat.empty:
+                raise RuntimeError("Wide feature CSV unreadable or empty.")
+
+            # 2) detect its scan column *after* feat exists
+            scan_feat = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in feat.columns), None)
+            if not scan_feat:
+                raise RuntimeError("No scan column found in wide feature CSV.")
+
+            # 3) infer numeric ion masses from wide headers for later (negs)
+            ion_masses = _infer_ion_masses_from_wide_df(feat)
+            if not ion_masses:
+                raise RuntimeError("No numeric ion masses inferred from wide feature CSV headers.")
+            #20250912@mark
+            feat[scan_feat] = feat[scan_feat].astype(str)
+            # positives
+            pos_feat = _ensure_scan(pos_feat, fallback=pos_scans_df["MS2scan_no"])
+            pos_feat["_scan_fallback"] = pos_feat["MS2scan_no"].astype(str).values
+            #debug print
+            print("[PL→Train][dbg] pos_feat pre-merge has:", 
+            [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
+
+            # attach label next; do NOT subset columns yet
+            pos_feat = pos_feat.merge(sel[[scan_col,"Structure"]],
+                                    left_on="MS2scan_no", right_on=scan_col,
+                                    how="left").drop(columns=[scan_col])
+
+            #pos_feat = feat[feat[scan_feat].isin(sel[scan_col].astype(str))].copy()
+            #pos_feat.rename(columns={scan_feat: "MS2scan_no"}, inplace=True)
+            #pos_feat = _ensure_scan(pos_feat)
+            #pos_feat["_scan_fallback"] = pos_feat["MS2scan_no"].values      # KEEP THIS
+            #feat[scan_feat] = feat[scan_feat].astype(str)
+            # keep only selected, then canonicalize
+            #pos_feat = feat[feat[scan_feat].isin(sel[scan_col])].copy()
+            #pos_feat.rename(columns={scan_feat: "MS2scan_no"}, inplace=True)
+            #pos_feat = _ensure_scan(pos_feat)  # now guaranteed
+            #pos_feat["_scan_fallback"] = pos_feat["MS2scan_no"].values      # NEW
+            # attach label if missing
+            if "Structure" not in pos_feat.columns:
+                pos_feat = pos_feat.merge(
+                    sel[[scan_col, "Structure"]],
+                    left_on="MS2scan_no",
+                    right_on=scan_col,
+                    how="left",
+                    suffixes=("", "_pl")  # avoid _x/_y confusion
+                ).drop(columns=[scan_col])
+            else:
+                # Normalize any legacy duplicates from previous runs
+                if "Structure_x" in pos_feat.columns and "Structure_y" in pos_feat.columns:
+                    pos_feat["Structure"] = pos_feat["Structure_x"].fillna(pos_feat["Structure_y"])
+                    pos_feat.drop(columns=["Structure_x","Structure_y"], inplace=True, errors="ignore")
+                elif "Structure_pl" in pos_feat.columns:
+                    pos_feat["Structure"] = pos_feat.get("Structure").fillna(pos_feat["Structure_pl"])
+                    pos_feat.drop(columns=["Structure_pl"], inplace=True, errors="ignore")
+            #debug print
+            print("[PL→Train][dbg] pos_feat post-merge has:", 
+            [c for c in ("MS2scan_no","Structure","Structure_pl","Structure_x","Structure_y","_scan_fallback") 
+            if c in pos_feat.columns])
+            
+            """
+            feat[scan_feat] = feat[scan_feat].astype(str)
+            pos_ids = sel[scan_col].astype(str).unique().tolist()
+
+            pos_feat = feat[feat[scan_feat].isin(pos_ids)].copy()
+            feat[scan_feat] = feat[scan_feat].astype(str)
+            pos_feat = _canonicalize_scan_column(pos_feat.rename(columns={scan_feat: "MS2scan_no"}))
+
+            if "Structure" not in pos_feat.columns:
+                pos_feat = pos_feat.merge(
+                    sel[[scan_col, "Structure"]],
+                    left_on="MS2scan_no",
+                    right_on=scan_col,
+                    how="left"
+                ).drop(columns=[scan_col])
+            """
+            """
+            # 4) keep only selected positive scans
+            pos_ids = sel[scan_col].astype(str).unique().tolist()
+            pos_feat = feat[feat[scan_feat].astype(str).isin(pos_ids)].copy()
+
+            # 5) attach labels if needed (merge on scan_feat ↔ scan_col)
+            if "Structure" not in pos_feat.columns:
+                pos_feat = pos_feat.merge(
+                    sel[[scan_col, "Structure"]],
+                    left_on=scan_feat,
+                    right_on=scan_col,
+                    how="left"
+                ).drop(columns=[scan_col])
+            """
+        """
+        else:  # reuse
+            if not wide_feat_csv:
+                raise RuntimeError("Provide a wide feature CSV when feature_mode='reuse'.")
+            feat = _robust_read_csv(wide_feat_csv)
+            if feat is None or feat.empty:
+                raise RuntimeError("Wide feature CSV unreadable or empty.")
+            scan_feat = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in feat.columns), None)
+            if not scan_feat:
+                raise RuntimeError("No scan column found in wide feature CSV.")
+            # infer numeric feature set for later use (negatives)
+            ion_masses = _infer_ion_masses_from_wide_df(feat)
+            if not ion_masses:
+                raise RuntimeError("No numeric ion masses inferred from wide feature CSV headers.")
+
+            # keep only selected scans
+            pos_ids = sel[scan_col].astype(str).unique().tolist()
+            pos_feat = feat[feat[scan_feat].astype(str).isin(pos_ids)].copy()
+            # ensure label present (merge if needed)
+            if "Structure" not in pos_feat.columns:
+                pos_feat = pos_feat.merge(sel[[scan_col,"Structure"]], left_on=scan_feat, right_on=scan_col, how="left").drop(columns=[scan_col])
+            print("[reuse] sel columns:", sel.columns.tolist())
+            print("[reuse] pos_feat columns:", pos_feat.columns.tolist())
+            print("[reuse] scan_feat:", scan_feat, "scan_col:", scan_col)
+        """
+        # 5) Optionally add negatives (easy non-glycan) using the same ion set
+        pos_ids_set = set(sel[scan_col].astype(str))
+        add_negs = bool(neg_opts.get("enable", False))
+        final_df = pos_feat.copy()
+
+        if add_negs:
+            # Derive candidate negatives from pseudolabel table: scans with < min hits to ion list
+            min_hits = int(neg_opts.get("min_hits", 3))
+            ng_ppm  = float(neg_opts.get("ion_ppm", thresholds.get("ion_ppm", 10.0)))
+            max_ratio = float(neg_opts.get("max_ratio", 3.0))
+
+            # Expect long-form peaks for negatives; if reusing wide features, we can’t rebuild neg features without peaks
+            if feature_mode == "reuse" and not {"peaklist","peakintensity"}.issubset(pl.columns):
+                log("[PL→Train] Negatives skipped (no long-form peaks when reusing features).")
+            else:
+                # Count hits per scan against ion list
+                if ion_df is None or ion_df.empty:
+                    # fallback: use ion_masses we inferred or rebuilt
+                    ion_df = pd.DataFrame({"mass": ion_masses})
+
+                # simple gate: per scan, count peaks within ppm of any ion mass
+                neg_rows = []
+                for r in pl[[scan_col,"peaklist","peakintensity"]].dropna().itertuples(index=False):
+                    sid = str(getattr(r, scan_col))
+                    if sid in pos_ids_set:  # already positive
+                        continue
+                    hits = _count_hits_to_ionlist(
+                        getattr(r,"peaklist"), getattr(r,"peakintensity"),
+                        ion_df["mass"].tolist(), ppm=ng_ppm
+                    )
+                    if hits < min_hits:
+                        neg_rows.append((sid, getattr(r,"peaklist"), getattr(r,"peakintensity")))
+                # cap ratio
+                keep = min(len(neg_rows), int(max_ratio * len(pos_feat)))
+                neg_rows = neg_rows[:keep]
+
+                if neg_rows:
+                    neg_df = pd.DataFrame(neg_rows, columns=["MS2scan_no","peaklist","peakintensity"])
+                    #neg_df["MS2scan_no"] = neg_df["MS2scan_no"].astype(str)
+                    #neg_feat = build_features_from_peaks_log10_plus1(neg_df, ion_masses, ppm=ng_ppm)
+                    #neg_feat = _ensure_scan(neg_feat, fallback=neg_df["MS2scan_no"])
+                    #neg_feat = _canonicalize_scan_column(neg_feat)
+                    neg_df["MS2scan_no"] = neg_df["MS2scan_no"].astype(str)
+                    # DEBUG: confirm we have scan ids here
+                    print("[PL→Train][dbg][neg] neg_df rows:", len(neg_df), 
+                        "has MS2scan_no:", "MS2scan_no" in neg_df.columns,
+                        "first scans:", neg_df["MS2scan_no"].head(5).tolist() if "MS2scan_no" in neg_df.columns else "N/A")
+                    # build features from peaks for negatives
+                    neg_feat = build_features_from_peaks_log10_plus1(neg_df, ion_masses, ppm=ng_ppm)
+                    # Enforce canonical scan with a hard fallback from neg_df
+                    neg_feat = _ensure_scan(neg_feat, fallback=neg_df["MS2scan_no"])
+                    neg_feat["Structure"] = "Non-glycans"
+                    neg_feat["_scan_fallback"] = neg_feat["MS2scan_no"].astype(str).values      # NEW
+                    #debug print
+                    print("[PL→Train][dbg] neg_feat has:", 
+                    [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in neg_feat.columns])
+
+                    #if "MS2scan_no" not in neg_feat.columns and len(neg_feat) == len(neg_df):
+                    #    neg_feat.insert(0, "MS2scan_no", neg_df["MS2scan_no"].values)
+                    # --- normalize scan column name just in case the sampler used a variant ---
+                    if "MS2scan_no" not in neg_df.columns:
+                        for alt in ("MS2Scan_no", "ScanNum", "scan", "Scan", "unique_ID"):
+                            if alt in neg_df.columns:
+                                neg_df = neg_df.rename(columns={alt: "MS2scan_no"})
+                                break
+                    neg_df["MS2scan_no"] = neg_df["MS2scan_no"].astype(str)
+                    neg_seed = 42  # or expose a "Shuffle negatives" checkbox + seed field
+                    neg_df = neg_df.sample(frac=1, random_state=neg_seed).reset_index(drop=True)
+                    """
+                    neg_feat = build_features_from_peaks_log10_plus1(neg_df, ion_masses, ppm=ng_ppm)
+                    neg_feat["Structure"] = "None" #Non-glycans? #20250912@marked
+                    # ensure scan column survives negative feature build
+                    if "MS2scan_no" not in neg_feat.columns and "MS2scan_no" in neg_df.columns and len(neg_feat) == len(neg_df):
+                        neg_feat.insert(0, "MS2scan_no", neg_df["MS2scan_no"].values)
+                    """
+                    #final_df = pd.concat([final_df, neg_feat], ignore_index=True)
+                    #final_df = _canonicalize_scan_column(final_df)
+                    """
+                    final_df = _ensure_scan(final_df)
+                    if "_scan_fallback" in final_df.columns:
+                        print("[dev] doing feature transfer in negative adding phase")
+                        combined_fallback = final_df["_scan_fallback"].astype(str)
+                    else:
+                        try:
+                            combined_fallback = pd.concat(
+                                [
+                                    pos_feat.get("_scan_fallback"),
+                                    neg_feat.get("_scan_fallback") if 'neg_feat' in locals() else None
+                                ],
+                                ignore_index=True
+                            )
+                        except Exception:
+                            combined_fallback = None
+
+                    # enforce canonical scan column BEFORE any access/order
+                    final_df = _ensure_scan(final_df, fallback=combined_fallback)
+
+                    # optional peek
+                    print("[PL→Train][debug] first scans:", final_df["MS2scan_no"].head(5).tolist())
+
+                    # now it’s safe to drop the helper and order columns
+                    final_df.drop(columns=["_scan_fallback"], errors="ignore", inplace=True)
+                    feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no", "Structure")]
+                    final_df = final_df[["MS2scan_no", "Structure"] + feature_cols]
+                    """
+                    #20250912@mark Debug peek
+                    #print("[PL→Train][debug] first scans:", final_df["MS2scan_no"].head(5).tolist())
+                    # order columns
+                    #feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure")]
+                    #final_df = final_df[["MS2scan_no","Structure"] + feature_cols]
+                    #feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no", "Structure")]
+                    # (optionally sort numeric features here)
+                    #final_df = final_df[["MS2scan_no", "Structure"] + feature_cols]
+
+        # 6) Finalize + save
+        if output_path is None or output_path.strip() == "":
+            outdir = os.path.dirname(pseudo_path)
+            outname = f"{sample_name}_trainable_fromPL_{datetime.now().strftime('%Y%m%d')}.csv"
+            output_path = os.path.join(outdir, outname)
+
+        # Column order: [MS2scan_no, Structure, <sorted ion masses...>]
+        #scan_out = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in final_df.columns), None)
+        #if not scan_out:
+        #    print("[PL→Train][debug] final_df columns:", list(final_df.columns)[:30])
+        #    raise RuntimeError("No scan column in final feature table after merge. "
+        #           "Expected one of: MS2scan_no/ScanNum/scan/Scan/unique_ID.")
+        #feature_cols = [c for c in final_df.columns if c not in (scan_out, "Structure")]
+        #scan_out = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in final_df.columns), None)
+        #feature_cols = [c for c in sorted(final_df.columns, key=lambda x: (not isinstance(x, (int,float)) and not str(x).replace('.','',1).isdigit(), str(x)) )
+        #                if c not in (scan_out, "Structure")]
+        #cols = [scan_out, "Structure"] + feature_cols
+        #final_df = final_df[cols].copy()
+
+
+        # assemble
+        # --- assemble ---
+        final_df = pos_feat if 'neg_feat' not in locals() else \
+                pd.concat([pos_feat, neg_feat], ignore_index=True, sort=False)
+
+        # --- make sure we can reconstruct the scan column ---
+        combined_fallback = final_df["_scan_fallback"].astype(str) if "_scan_fallback" in final_df.columns else None
+
+        final_df = _ensure_scan(final_df, fallback=combined_fallback)
+
+        # DEBUG (safe now)
+        print("[PL→Train][dbg] after ensure_scan: has_scan=", "MS2scan_no" in final_df.columns,
+            "has_structure=", "Structure" in final_df.columns)
+        print("[PL→Train][dbg] first scans:", final_df["MS2scan_no"].head(5).tolist())
+
+        # drop helper only after ensure_scan
+        final_df.drop(columns=["_scan_fallback"], errors="ignore", inplace=True)
+
+        # order columns for saving
+        feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure")]
+        final_df = final_df[["MS2scan_no","Structure"] + feature_cols]
+        """
+        final_df = pos_feat if 'neg_feat' not in locals() else \
+                pd.concat([pos_feat, neg_feat], ignore_index=True, sort=False)
+
+        # FINALIZE (must come before any print or reordering)
+        combined_fallback = (final_df["_scan_fallback"].astype(str)
+                            if "_scan_fallback" in final_df.columns else None)
+        final_df = _ensure_scan(final_df, fallback=combined_fallback)
+
+        print("[PL→Train][debug] first scans:", final_df["MS2scan_no"].head(5).tolist())
+
+        # tidy for save
+        final_df.drop(columns=["_scan_fallback"], errors="ignore", inplace=True)
+        feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure")]
+        final_df = final_df[["MS2scan_no","Structure"] + feature_cols]
+        print("[PL→Train][debug] pos_feat has:", [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
+        if 'neg_feat' in locals():
+            print("[PL→Train][debug] neg_feat has:", [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in neg_feat.columns])
+        # Build a combined fallback in the exact row order of final_df
+        # --- FINALIZE BLOCK (must be right after final_df is assembled) ---
+        # Build a combined fallback in the exact row order of final_df
+        """
+        """
+        if "_scan_fallback" in final_df.columns:
+            combined_fallback = final_df["_scan_fallback"].astype(str)
+        else:
+            try:
+                combined_fallback = pd.concat(
+                    [
+                        pos_feat.get("_scan_fallback"),
+                        neg_feat.get("_scan_fallback") if 'neg_feat' in locals() else None
+                    ],
+                    ignore_index=True
+                )
+            except Exception:
+                combined_fallback = None
+
+        # Enforce canonical scan column BEFORE any access/print or column subsetting
+        final_df = _ensure_scan(final_df, fallback=combined_fallback)
+
+        # Debug peek (safe now)
+        print("[PL→Train][debug] first scans:", final_df["MS2scan_no"].head(5).tolist())
+        print("[PL→Train][debug] pos_feat cols has _scan_fallback:", "_scan_fallback" in pos_feat.columns)
+        if 'neg_feat' in locals():
+            print("[PL→Train][debug] neg_feat cols has _scan_fallback:", "_scan_fallback" in neg_feat.columns)
+        # Now it’s safe to drop the helper and order columns
+        final_df.drop(columns=["_scan_fallback"], errors="ignore", inplace=True)
+        feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no", "Structure")]
+        final_df = final_df[["MS2scan_no", "Structure"] + feature_cols]
+        # --- END FINALIZE BLOCK ---
+        """
+
+
+        final_df.to_csv(output_path, index=False)
+        log(f"[PL→Train] saved: {output_path}")
+
+        # summary
+        classes = final_df["Structure"].value_counts().to_dict()
+        summary = {
+            "rows": int(len(final_df)),
+            "cols": int(len(final_df.columns)),
+            "classes": classes,
+            "negatives_added": int((final_df["Structure"] == "None").sum()),
+            "feature_mode": feature_mode,
+            "ion_masses": len(ion_masses or []),
+            "thresholds": thresholds,
+            "neg_opts": neg_opts
+        }
+        return output_path, summary
+    # ---------- end PSEUDOLABEL → TRAINABLE ----------
+
+
 
     #added 20250906 ion suggestion window?
     def open_ion_suggestions_viewer():
@@ -3313,7 +4089,123 @@ def open_prepare_dataset_window():
             initial_ionlist=files.get("ionlist_path")
         )
 
+    #20250911 
+    def open_pl_to_trainable_modal(root, sample_name, files, logger):
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
 
+        win = tk.Toplevel(root)
+        win.title("Pseudolabel → Trainable (one-pass)")
+        win.grab_set()
+
+        # --- Inputs
+        frm = ttk.Frame(win, padding=10); frm.pack(fill="both", expand=True)
+
+        pseudo_var = tk.StringVar(value=files.get("pseudolabel_csv",""))
+        ion_var    = tk.StringVar(value=files.get("ionlist_path",""))
+        ion_sheet  = tk.StringVar(value="")
+        salvage_var= tk.StringVar(value="")
+        wide_var   = tk.StringVar(value=files.get("features_csv",""))
+
+        def browse(var, exts=(("All","*.*"),)):
+            p = filedialog.askopenfilename(filetypes=exts)
+            if p: var.set(p)
+
+        row=0
+        ttk.Label(frm, text="1) Pseudolabeled TSV/CSV (long):").grid(row=row, column=0, sticky="w"); 
+        ttk.Entry(frm, textvariable=pseudo_var, width=70).grid(row=row, column=1, sticky="we")
+        ttk.Button(frm, text="Choose…", command=lambda: browse(pseudo_var,(("TSV/CSV","*.tsv *.csv"),))).grid(row=row, column=2); row+=1
+
+        ttk.Label(frm, text="2) Ion sheet (CSV/XLSX) or Manual Excel:").grid(row=row, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=ion_var, width=70).grid(row=row, column=1, sticky="we")
+        ttk.Button(frm, text="Choose…", command=lambda: browse(ion_var,(("CSV/XLSX","*.csv *.xlsx"),))).grid(row=row, column=2); row+=1
+        ttk.Label(frm, text="   Sheet name (optional):").grid(row=row, column=0, sticky="e")
+        ttk.Entry(frm, textvariable=ion_sheet, width=20).grid(row=row, column=1, sticky="w"); row+=1
+
+        ttk.Label(frm, text="3) Salvage composition file (optional):").grid(row=row, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=salvage_var, width=70).grid(row=row, column=1, sticky="we")
+        ttk.Button(frm, text="Choose…", command=lambda: browse(salvage_var,(("TSV/CSV","*.tsv *.csv"),))).grid(row=row, column=2); row+=1
+
+        # --- Thresholds
+        min_score   = tk.DoubleVar(value=0.07)
+        max_ppm     = tk.DoubleVar(value=20.0)
+        topn        = tk.IntVar(value=1)
+        ion_ppm     = tk.DoubleVar(value=10.0)
+
+        thresh_box = ttk.LabelFrame(frm, text="4) Thresholds / selection"); thresh_box.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8,4))
+        ttk.Label(thresh_box, text="min ion score").grid(row=0, column=0, sticky="e")
+        ttk.Entry(thresh_box, textvariable=min_score, width=6).grid(row=0, column=1, sticky="w")
+        ttk.Label(thresh_box, text="max |ppm_error|").grid(row=0, column=2, sticky="e")
+        ttk.Entry(thresh_box, textvariable=max_ppm, width=6).grid(row=0, column=3, sticky="w")
+        ttk.Label(thresh_box, text="Top N per scan").grid(row=0, column=4, sticky="e")
+        ttk.Spinbox(thresh_box, from_=1, to=10, textvariable=topn, width=5).grid(row=0, column=5, sticky="w")
+        ttk.Label(thresh_box, text="ion list ppm").grid(row=0, column=6, sticky="e")
+        ttk.Entry(thresh_box, textvariable=ion_ppm, width=6).grid(row=0, column=7, sticky="w"); row+=1
+
+        # --- Negatives
+        neg_box = ttk.LabelFrame(frm, text="5) Negative sampling")
+        neg_box.grid(row=row, column=0, columnspan=3, sticky="we", pady=(4,4))
+        neg_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(neg_box, text="Add Non-glycan entries (easy negatives)", variable=neg_enable).grid(row=0, column=0, columnspan=3, sticky="w")
+        max_ratio = tk.DoubleVar(value=3.0)
+        min_hits  = tk.IntVar(value=3)
+        ttk.Label(neg_box, text="Max ratio (neg:pos)").grid(row=1, column=0, sticky="e")
+        ttk.Entry(neg_box, textvariable=max_ratio, width=5).grid(row=1, column=1, sticky="w")
+        ttk.Label(neg_box, text="Keep scans with < min hits to ion list").grid(row=1, column=2, sticky="e")
+        ttk.Entry(neg_box, textvariable=min_hits, width=5).grid(row=1, column=3, sticky="w"); row+=1
+
+        # --- Features
+        feat_box = ttk.LabelFrame(frm, text="6) Feature building")
+        feat_box.grid(row=row, column=0, columnspan=3, sticky="we", pady=(4,8))
+        mode = tk.StringVar(value="rebuild")
+        ttk.Radiobutton(feat_box, text="Rebuild ALL features from long-form peaks (log10(1+I))", variable=mode, value="rebuild").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Radiobutton(feat_box, text="Reuse existing wide features CSV", variable=mode, value="reuse").grid(row=1, column=0, columnspan=3, sticky="w")
+        ttk.Entry(feat_box, textvariable=wide_var, width=70).grid(row=2, column=0, sticky="we")
+        ttk.Button(feat_box, text="Choose…", command=lambda: browse(wide_var,(("CSV","*.csv"),))).grid(row=2, column=1, sticky="w")
+
+        # --- Output + Run
+        out_lbl = ttk.Label(frm, text="Output: (auto-named)"); out_lbl.grid(row=row+1, column=0, sticky="w")
+        status  = ttk.Label(frm, text="", foreground="gray"); status.grid(row=row+1, column=1, sticky="w")
+
+        def run_once():
+            try:
+                thresholds = {"min_ion_score": min_score.get(), "max_abs_ppm": max_ppm.get(),
+                            "topn": topn.get(), "ion_ppm": ion_ppm.get()}
+                neg_opts = {"enable": neg_enable.get(), "max_ratio": max_ratio.get(),
+                            "min_hits": min_hits.get(), "ion_ppm": ion_ppm.get()}
+                outpath, summary = build_trainable_from_pseudolabels(
+                    sample_name=sample_name,
+                    pseudo_path=pseudo_var.get().strip(),
+                    ion_file_path=ion_var.get().strip(),
+                    ion_sheet_name=ion_sheet.get().strip() or None,
+                    salvage_path=salvage_var.get().strip() or None,
+                    thresholds=thresholds,
+                    neg_opts=neg_opts,
+                    feature_mode=mode.get(),
+                    wide_feat_csv=wide_var.get().strip() or None,
+                    output_path=None,
+                    logger=logger
+                )
+                status.config(text=outpath)
+                messagebox.showinfo("Done", f"Saved trainable CSV:\n{outpath}\n\nSummary:\nrows={summary['rows']} cols={summary['cols']}\nclasses={summary['classes']}")
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                messagebox.showerror("Failed", str(e))
+
+        ttk.Button(frm, text="Build Trainable CSV", command=run_once).grid(row=row+2, column=1, pady=8)
+
+    def try_pl_to_trainable():
+        sel = tree.selection()
+        if not sel:
+            messagebox.showerror("No Selection", "Please select a sample first.")
+            return
+        sample_node = sel[0]
+        sample_name = clean_sample_name(tree.item(sample_node, "text"))
+        exp_node = tree.parent(sample_node)
+        exp_name = tree.item(exp_node, "text").replace("Experiment: ", "").split(" (")[0].strip()
+
+        files = experiment_projects[exp_name]["samples"][sample_name]
+        open_pl_to_trainable_modal(root, sample_name, files, logger)
 
     # --- Button panel ---
     button_frame = tk.Frame(subwin)
@@ -3337,8 +4229,12 @@ def open_prepare_dataset_window():
     tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=3, column=1, padx=5)
     ttk.Button(button_frame, text="Assign Pseudo-Labels by Glycan Composition", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
     #GPT said without () it only passes the function, and work only if clicked
-    tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
+    tk.Button(button_frame, text="Pseudolabel → Trainable",
+          command=try_pl_to_trainable).grid(row=2, column=3, padx=5)
+    #ttk.Button(button_frame, text="Build trainable CSV from pseudolabeled TSV",
+    #       command=lambda: open_pl_to_trainable_modal(root, sample_name, files, logger)).pack(pady=6)
 
+    tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
 
     #status label
     status_frame = tk.Frame(subwin, relief=tk.SUNKEN, borderwidth=1)
