@@ -1,5 +1,5 @@
 import os
-version = "0.9965"
+version = "0.9966"
 last_update = 20250912
 import msprawextractor as mspext
 import threading
@@ -2790,7 +2790,61 @@ def open_prepare_dataset_window():
         pos_ids_set = set(sel[scan_col].astype(str))
         add_negs = bool(neg_opts.get("enable", False))
         final_df = pos_feat.copy()
+        if add_negs:
+            # --- params ---
+            min_hits  = int(neg_opts.get("min_hits", 3))
+            ng_ppm    = float(neg_opts.get("ion_ppm", thresholds.get("ion_ppm", 10.0)))
+            max_ratio = float(neg_opts.get("max_ratio", 3.0))
+            mode      = str(neg_opts.get("sampling", "random")).lower()   # "random" | "first"
+            seed      = int(neg_opts.get("seed", 42))
+            NEG_LABEL = "Non-glycan"  # keep consistent with your ML prep
 
+            # --- sanity: ion masses source ---
+            if ion_df is None or ion_df.empty:
+                ion_df = pd.DataFrame({"mass": ion_masses})
+
+            # --- collect candidate negatives from long pseudolabel TSV ---
+            #   (scans with < min_hits glycan-ion matches and not already positive)
+            neg_rows = []
+            for r in pl[[scan_col, "peaklist", "peakintensity"]].dropna().itertuples(index=False):
+                sid = str(getattr(r, scan_col))
+                if sid in pos_ids_set:
+                    continue
+                hits = _count_hits_to_ionlist(
+                    getattr(r, "peaklist"), getattr(r, "peakintensity"),
+                    ion_df["mass"].tolist(), ppm=ng_ppm
+                )
+                if hits < min_hits:
+                    neg_rows.append((sid, getattr(r, "peaklist"), getattr(r, "peakintensity")))
+
+            # --- optional shuffle FIRST, then cap by ratio ---
+            if neg_rows:
+                if mode == "random":
+                    import random as _rnd
+                    _rnd.Random(seed).shuffle(neg_rows)   # in-place
+                n_pos  = int((pos_feat["Structure"] != "None").sum()) if "Structure" in pos_feat.columns else len(pos_feat)
+                keep   = min(len(neg_rows), int(max_ratio * max(1, n_pos)))
+                neg_rows = neg_rows[:keep]
+
+                # build DataFrame only for kept rows
+                neg_df = pd.DataFrame(neg_rows, columns=["MS2scan_no", "peaklist", "peakintensity"])
+                neg_df["MS2scan_no"] = neg_df["MS2scan_no"].astype(str)
+
+                # DEBUG: prove we have scan ids before featurizing
+                print("[PL→Train][dbg][neg] kept rows:", len(neg_df),
+                    "first scans:", neg_df["MS2scan_no"].head(5).tolist())
+
+                # --- build features for negatives (only kept rows) ---
+                neg_feat = build_features_from_peaks_log10_plus1(neg_df, ion_masses, ppm=ng_ppm)
+                neg_feat = _ensure_scan(neg_feat, fallback=neg_df["MS2scan_no"])
+                neg_feat["Structure"] = NEG_LABEL
+                neg_feat["_scan_fallback"] = neg_feat["MS2scan_no"].astype(str).values
+
+                print("[PL→Train][dbg][neg] after features:",
+                    [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in neg_feat.columns],
+                    "first scans:", neg_feat["MS2scan_no"].head(5).tolist())
+
+        """
         if add_negs:
             # Derive candidate negatives from pseudolabel table: scans with < min hits to ion list
             min_hits = int(neg_opts.get("min_hits", 3))
@@ -2854,16 +2908,17 @@ def open_prepare_dataset_window():
                     neg_df["MS2scan_no"] = neg_df["MS2scan_no"].astype(str)
                     neg_seed = 42  # or expose a "Shuffle negatives" checkbox + seed field
                     neg_df = neg_df.sample(frac=1, random_state=neg_seed).reset_index(drop=True)
-                    """
+                    
+                        
                     neg_feat = build_features_from_peaks_log10_plus1(neg_df, ion_masses, ppm=ng_ppm)
                     neg_feat["Structure"] = "None" #Non-glycans? #20250912@marked
                     # ensure scan column survives negative feature build
                     if "MS2scan_no" not in neg_feat.columns and "MS2scan_no" in neg_df.columns and len(neg_feat) == len(neg_df):
                         neg_feat.insert(0, "MS2scan_no", neg_df["MS2scan_no"].values)
-                    """
+                    
                     #final_df = pd.concat([final_df, neg_feat], ignore_index=True)
                     #final_df = _canonicalize_scan_column(final_df)
-                    """
+                    
                     final_df = _ensure_scan(final_df)
                     if "_scan_fallback" in final_df.columns:
                         print("[dev] doing feature transfer in negative adding phase")
@@ -2890,7 +2945,7 @@ def open_prepare_dataset_window():
                     final_df.drop(columns=["_scan_fallback"], errors="ignore", inplace=True)
                     feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no", "Structure")]
                     final_df = final_df[["MS2scan_no", "Structure"] + feature_cols]
-                    """
+                    
                     #20250912@mark Debug peek
                     #print("[PL→Train][debug] first scans:", final_df["MS2scan_no"].head(5).tolist())
                     # order columns
@@ -2899,7 +2954,7 @@ def open_prepare_dataset_window():
                     #feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no", "Structure")]
                     # (optionally sort numeric features here)
                     #final_df = final_df[["MS2scan_no", "Structure"] + feature_cols]
-
+        """
         # 6) Finalize + save
         if output_path is None or output_path.strip() == "":
             outdir = os.path.dirname(pseudo_path)
@@ -4153,6 +4208,30 @@ def open_prepare_dataset_window():
         ttk.Entry(neg_box, textvariable=max_ratio, width=5).grid(row=1, column=1, sticky="w")
         ttk.Label(neg_box, text="Keep scans with < min hits to ion list").grid(row=1, column=2, sticky="e")
         ttk.Entry(neg_box, textvariable=min_hits, width=5).grid(row=1, column=3, sticky="w"); row+=1
+        # --- Negative sampling options extra ---
+        neg_sampling_var = tk.BooleanVar(value=True)   # True = random, False = first
+        neg_seed_var = tk.IntVar(value=42)
+
+        # use grid (not pack) because neg_box uses grid
+        neg_sampling_frame = ttk.Frame(neg_box)
+        neg_sampling_frame.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        # lay out the children with grid, too
+        chk = ttk.Checkbutton(
+            neg_sampling_frame,
+            text="Shuffle negatives (random)",
+            variable=neg_sampling_var
+        )
+        chk.grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        ttk.Label(neg_sampling_frame, text="Seed:").grid(row=0, column=1, sticky="w")
+        ttk.Spinbox(
+            neg_sampling_frame,
+            from_=-2_147_483_648, to=2_147_483_647,
+            textvariable=neg_seed_var,
+            width=8
+        ).grid(row=0, column=2, sticky="w", padx=(4, 0))
+
 
         # --- Features
         feat_box = ttk.LabelFrame(frm, text="6) Feature building")
@@ -4172,7 +4251,8 @@ def open_prepare_dataset_window():
                 thresholds = {"min_ion_score": min_score.get(), "max_abs_ppm": max_ppm.get(),
                             "topn": topn.get(), "ion_ppm": ion_ppm.get()}
                 neg_opts = {"enable": neg_enable.get(), "max_ratio": max_ratio.get(),
-                            "min_hits": min_hits.get(), "ion_ppm": ion_ppm.get()}
+                            "min_hits": min_hits.get(), "ion_ppm": ion_ppm.get(),     # NEW: sampling + seed for randomness control
+                            "sampling": "random" if neg_sampling_var.get() else "first","seed": int(neg_seed_var.get()),}
                 outpath, summary = build_trainable_from_pseudolabels(
                     sample_name=sample_name,
                     pseudo_path=pseudo_var.get().strip(),
@@ -5473,6 +5553,70 @@ def open_ml_analysis_window():
         except Exception as e:
             messagebox.showerror("Prediction Failed", str(e))
 
+    #20250915 replace extract_fragment_masses for csv-only ion list
+    # --- replace extract_fragment_masses(...) with this ---
+    def read_fragment_masses_any(ion_path: str, sheet_name: str = "ionlist"):
+        """
+        Load fragment masses from either CSV/TSV (expects a 'mass' column)
+        or from an Excel sheet (default 'ionlist').
+        """
+        if not ion_path or not os.path.exists(ion_path):
+            raise FileNotFoundError(f"Ion list not found: {ion_path}")
+
+        ext = os.path.splitext(ion_path)[1].lower()
+        if ext in (".csv", ".tsv", ".txt"):
+            # try TSV if it looks like one; else default to CSV
+            sep = "\t" if ext == ".tsv" else ","
+            df = pd.read_csv(ion_path, sep=sep)
+            if "mass" not in df.columns:
+                raise ValueError(f"Ion list '{ion_path}' must contain a 'mass' column.")
+            return df["mass"].dropna().astype(float).tolist()
+        else:
+            xls = pd.ExcelFile(ion_path, engine="openpyxl")
+            ion_df = xls.parse(sheet_name or "ionlist")
+            if "mass" not in ion_df.columns:
+                raise ValueError(f"Ion sheet '{sheet_name}' missing 'mass' column.")
+            return ion_df["mass"].dropna().astype(float).tolist()
+
+    def _short_id(s: str) -> str:
+        import hashlib
+        return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:8]
+
+    def create_unlabeled_from_method(method_path: str, default_ppm: int | None = None) -> str:
+        with open(method_path, "r", encoding="utf-8") as f:
+            m = json.load(f)
+
+        # Resolve inputs from method.json (PL has no manual sheet)
+        raw_csv = (m.get("parents") or {}).get("converted_csv")
+        ion_path = (m.get("ionlist") or {}).get("path")
+        ion_sheet = (m.get("ionlist") or {}).get("sheet") or "ionlist"
+        ppm = default_ppm or (m.get("ionlist") or {}).get("ppm_tolerance") or 20
+
+        if not raw_csv or not os.path.exists(raw_csv):
+            raise FileNotFoundError(f"Converted CSV not found (method): {raw_csv}")
+        if not ion_path or not os.path.exists(ion_path):
+            raise FileNotFoundError(f"Ion list not found (method): {ion_path}")
+
+        frags = read_fragment_masses_any(ion_path, sheet_name=ion_sheet)
+        feat_df = extract_ion_intensities(raw_csv, frags, ppm=float(ppm))
+
+        # Add UID if possible
+        try:
+            exp_id = _short_id(m.get("experiment_title", ""))
+            samp_id = _short_id(m.get("sample_name", ""))
+            feat_df = feat_df.copy()
+            feat_df["UID"] = (
+                feat_df["MS2scan_no"].astype(int).astype(str).str.zfill(6)
+                .map(lambda s: f"{exp_id}:{samp_id}:{s}")
+            )
+        except Exception:
+            pass
+
+        out_path = os.path.splitext(raw_csv)[0] + f"_unlabeled_ppm{ppm}.csv"
+        feat_df.to_csv(out_path, index=False)
+        return out_path
+
+    #20250915 end here?    
 
     #creating unlabeled datasets
     def extract_fragment_masses(excel_path, sheet_name="ionlist"):
@@ -5513,7 +5657,92 @@ def open_ml_analysis_window():
             result.append(feature_row)
 
         return pd.DataFrame(result)
+    
+    #20250915 ver
+    def create_unlabeled_dataset():
+        # Let the user pick either an experiment .exp.json OR a single sample .method.json
+        exp_or_method = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if not exp_or_method:
+            return
 
+        # Try to detect which JSON it is
+        try:
+            with open(exp_or_method, "r", encoding="utf-8") as f:
+                J = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Failed to Load JSON", str(e))
+            return
+
+        # If it looks like a method.json (has ionlist + parents), do ONE sample now
+        if isinstance(J, dict) and J.get("ionlist") and J.get("parents"):
+            # PPM: prefer method value; if user inputs, it overrides
+            ppm_default = (J.get("ionlist") or {}).get("ppm_tolerance")
+            ppm_value = simpledialog.askinteger(
+                "PPM Tolerance",
+                f"Enter PPM tolerance (default {ppm_default or 20}):",
+                minvalue=1, maxvalue=100
+            )
+            ppm_value = ppm_value or ppm_default or 20
+
+            try:
+                out_path = create_unlabeled_from_method(exp_or_method, default_ppm=ppm_value)
+                messagebox.showinfo("Done", f"Unlabeled dataset saved:\n{out_path}")
+            except Exception as e:
+                messagebox.showerror("Unlabeled Build Failed", str(e))
+            return
+
+        # Else treat as experiment .exp.json (multi-sample)
+        ppm_value = simpledialog.askinteger("PPM Tolerance", "Enter PPM tolerance (e.g. 20):", minvalue=1, maxvalue=100)
+        if ppm_value is None:
+            return
+
+        # Expect exp["samples"] structure; each sample may have either:
+        #  (A) csv + excel  → use Excel ion sheet (legacy manual route)
+        #  (B) json (method.json) → use external ion list from the method (PL route)
+        changed = False
+        samples = J.get("samples", {}) if isinstance(J, dict) else {}
+        for sample_id, sample_info in samples.items():
+            try:
+                raw_csv = sample_info.get("csv")
+                annotation_excel = sample_info.get("excel")
+                method_json = sample_info.get("json")
+                out_path = None
+
+                if annotation_excel and raw_csv:
+                    # legacy/manual route (Excel ion sheet)
+                    ion_list = read_fragment_masses_any(annotation_excel, sheet_name="ionlist")
+                    feature_df = extract_ion_intensities(raw_csv, ion_list, ppm=float(ppm_value))
+                    out_path = os.path.splitext(raw_csv)[0] + f"_unlabeled_ppm{ppm_value}.csv"
+                    feature_df.to_csv(out_path, index=False)
+
+                elif method_json and os.path.exists(method_json):
+                    # PL route (external ion list via method.json)
+                    out_path = create_unlabeled_from_method(method_json, default_ppm=ppm_value)
+
+                if out_path:
+                    sample_info["unlabeled_dataset"] = out_path
+                    changed = True
+                else:
+                    print(f"[SKIP] sample '{sample_id}' has neither (csv+excel) nor method.json")
+
+            except Exception as e:
+                print(f"[ERROR] Failed on sample '{sample_id}':", e)
+
+        if changed:
+            # Persist ppm to the experiment JSON for traceability
+            J["prediction_parameters"] = {"ppm": int(ppm_value)}
+            try:
+                with open(exp_or_method, "w", encoding="utf-8") as f:
+                    json.dump(J, f, indent=4)
+            except Exception as e:
+                messagebox.showerror("Failed to Save JSON", str(e))
+                return
+
+            messagebox.showinfo("Done", "Unlabeled datasets saved and experiment file updated.")
+        else:
+            messagebox.showwarning("No Samples Processed", "No eligible samples were found in this experiment file.")
+
+    """
     def create_unlabeled_dataset():
         exp_path = filedialog.askopenfilename(filetypes=[("Experiment JSON", "*.json")])
         if not exp_path:
@@ -5551,6 +5780,7 @@ def open_ml_analysis_window():
             messagebox.showerror("Failed to Save JSON", str(e))
             return
         messagebox.showinfo("Done", f"Unlabeled datasets saved and experiment file updated.")
+    """
     # Predict tab state
     model_file_path = None
     predict_input_path = None
@@ -6273,7 +6503,38 @@ tk.Button(analysis_frame, text="Run ML Analysis", command=open_ml_analysis_windo
 
 
 # Run the GUI
-root.mainloop()
+#root.mainloop()
 
+#import safe
+if __name__ == "__main__":
+    root.mainloop()
 
+#20250915 import safe and no side effects by loading too many modules, consider activate it in future
+"""
+# --- at top of mspfileloaderv10.py ---
+root = None  # set up a module-global you can reference
 
+def build_gui():
+    global root
+    import tkinter as tk
+    from tkinter import ttk
+    root = tk.Tk()
+    root.title("GlycoMSParser v10")
+
+    # ... all your widget creation & menu wiring here ...
+    # e.g. TreeView, buttons, callbacks, etc.
+
+    return root
+
+# keep helpers importable for CLI/REPL
+__all__ = [
+    # your non-GUI helpers:
+    "read_fragment_masses_any",
+    "create_unlabeled_from_method",
+    # (add others you want to script against)
+]
+
+if __name__ == "__main__":
+    app = build_gui()
+    app.mainloop()
+"""
