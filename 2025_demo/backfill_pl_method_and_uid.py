@@ -3,6 +3,12 @@ import argparse, os, json, hashlib, glob, sys
 import pandas as pd
 from datetime import datetime
 
+# top of file
+from pathcanon import to_posix_str, strip_trailing_sep
+
+def _canon(p: str) -> str:
+    return to_posix_str(strip_trailing_sep(p)) if p else p
+
 REQUIRED_META_KEYS = ("Glycan Type", "Mass Analyzer charge mode")
 
 def short_id(s: str) -> str:
@@ -154,10 +160,12 @@ def main():
 
         # Write method.json
         parents = {
-            "converted_csv": conv or "(unknown)",
-            "pseudolabels_tsv": tsv or "(unknown)",
-            "trainable_csv": csv_final
+            "converted_csv": _canon(conv or "(unknown)"),
+            "pseudolabels_tsv": _canon(tsv or "(unknown)"),
+            "trainable_csv": _canon(csv_final),
         }
+        method = build_method(experiment_title, sample_name, parents,
+                            _canon(ion_path), args.ion_sheet, args.ppm)
         method = build_method(experiment_title, sample_name, parents, ion_path, args.ion_sheet, args.ppm)
         method_path = os.path.join(os.path.dirname(csv_final), f"{sample_name}.method.json")
         with open(method_path, "w", encoding="utf-8") as f:

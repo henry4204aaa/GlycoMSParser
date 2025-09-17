@@ -1,6 +1,6 @@
 import os
-version = "0.9966"
-last_update = 20250912
+version = "0.9967"
+last_update = 20250917
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -24,6 +24,10 @@ import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ 
 # Ion mining feature (safe to import even if file is absent)
 # 20250907 to solve ion suggest missing issue
 import importlib, sys, os, traceback
+from pathlib import Path
+from pathcanon import to_posix_str, to_native_path, ensure_dir
+from typing import Dict
+
 def _load_ion_module():
     try:
         return importlib.import_module("msp_ion_mining")
@@ -65,6 +69,9 @@ except Exception:
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
+# v0.997: update requirements.txt (the python version and packages needs to be updated)
+# v0.9969: fix pseudolabeling metadata logics
+# v0.9967 try to fix batch conversion issue
 # v0.9966: incorporate random sampling manner also in PL trainable dataset generation 
 # v0.9965: finished GUI pseudolabeling -> trainable csv 
 # v0.9963: fix OG in pseudolabeling
@@ -192,6 +199,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         self.on_start = on_start
         self.insilico_path_var = tk.StringVar(value=initial_insilico or "")
         self.ionlist_path_var  = tk.StringVar(value=initial_ionlist or "")
+
 
         """
         # --- Metadata summary (read-only) ---
@@ -785,12 +793,20 @@ class MetadataEditorWindow:
         self.output_dir = output_dir
         self.skip_conversion = skip_conversion
         self.entries = {}
+        self.files = {}   # ← add this line in 20250916
         fields = [
             "Experiment Title", "Experiment Description", "Author running this analysis",
             "Raw data acquired date", "Glycan Type", "Mass Analyzer charge mode", "Derivatization Type"
         ]
 
         self.window = tk.Toplevel(parent)
+        # 20250917
+        self._convert_in_progress = False          # NEW: track background conversion
+        self._error_mode = False            # ← NEW: allow close after failures
+        self._batch_halted = False          # ← NEW: treat batch as stopped after error
+
+        self.window.protocol("WM_DELETE_WINDOW", self._on_user_close)  # NEW: intercept user close (X)
+
         self.window.title("Enter Experiment Metadata")
         self.window.geometry("600x500")
         # Row 0: Status label placeholder (spans both columns)
@@ -857,8 +873,8 @@ class MetadataEditorWindow:
 
 
     def on_conversion_complete(self):
-        self.status_label.config(text="Conversion complete. Ready for metadata.", fg="green")
-
+        #self.status_label.config(text="Conversion complete. Ready for metadata.", fg="green")
+        self._safe_set_status("Conversion complete. Ready for metadata.", fg="green") #20250917 patch
         # Extract filename base for use in renaming
         self.rawfilename = os.path.splitext(os.path.basename(self.current_raw_file))[0]
 
@@ -876,6 +892,8 @@ class MetadataEditorWindow:
         self.window.title(f"Metadata for: {os.path.basename(self.current_raw_file)}")
 
     def load_file(self, raw_file):
+        self._error_mode = False        # ← NEW
+        self._batch_halted = False          # ← NEW: treat batch as stopped after error
         self.current_raw_file = raw_file
         self.window.title(f"Converting: {os.path.basename(raw_file)}")
         self.clear_fields()
@@ -884,7 +902,8 @@ class MetadataEditorWindow:
         if not hasattr(self, "status_label"):
             self.status_label = tk.Label(self.window, text="", fg="blue")
             self.status_label.grid(row=0, columnspan=2, pady=10)
-        self.status_label.config(text="Converting raw file... please wait.", fg="blue")
+        #self.status_label.config(text="Converting raw file... please wait.", fg="blue")
+        self._safe_set_status("Converting raw file... please wait.", fg="blue")
 
         # Disable form and buttons temporarily
         for entry in self.entries.values():
@@ -895,8 +914,105 @@ class MetadataEditorWindow:
 
         def background_conversion():
             if not self.skip_conversion:
+                self._convert_in_progress = True  # NEW: mark running
                 try:
-                    success = mspext.convert_raw_to_csv(raw_file, debug=True)
+                    tmp_ms2, tmp_ms3 = mspext.convert_raw_to_csv(
+                        raw_file,
+                        outdir=self.output_dir,
+                        debug=True
+                    )
+                    # Remember where the temps are for finalize()
+                    self.files["ms2tmp"] = tmp_ms2
+                    self.files["ms3tmp"] = tmp_ms3
+
+                    logger.log(f"[convert] Temp CSVs: {tmp_ms2}, {tmp_ms3}")
+
+                    # mark done BEFORE we notify UI
+                    self._convert_in_progress = False   # NEW
+                    # notify UI safely (toplevel may be recreated/closed)
+                    self._safe_after(0, self.on_conversion_complete)
+
+                except Exception as e:
+                    # mark done so UI can decide (batch may still have pending files)
+                    self._convert_in_progress = False   # NEW
+                    logger.log(f"[FATAL] Exception during raw file conversion: {e}")
+                    #self._safe_set_status("Exception occurred. Please check the log.", fg="red")
+                    self._enter_error_mode("An error occurred. Please check the log.")
+                    # best-effort cleanup
+                    try:
+                        for p in [self.files.get("ms2tmp"), self.files.get("ms3tmp")]:
+                            if p and os.path.exists(p):
+                                os.remove(p)
+                                logger.log(f"[Cleanup] Removed leftover temp file: {p}")
+                    except Exception as ce:
+                        logger.log(f"[WARNING] Cleanup failed: {ce}")
+
+                    # show error (capture 'e' into lambda safely)
+                    self._safe_after(
+                        0,
+                        lambda err=e: messagebox.showerror(
+                            "Thermo Library Error",
+                            f"Raw file could not be processed.\n\nDetails:\n{err}"
+                        )
+                    )
+
+                    # update MAIN status to Idle (this file failed)
+                    #self._safe_after(0, lambda: set_main_status("Idle"))
+                    self._safe_after(0, self._update_main_status_for_batch_state)
+                    # defer window close decision (safe close if not batching)
+                    self._safe_after(500, self._attempt_close_after_error)  # NEW
+                #20250917 what does finally do?
+                finally:
+                    # ensure flags are sane even if we bailed early
+                    self._convert_in_progress = False
+                    self._safe_after(0, self._update_main_status_for_batch_state)
+            """
+            if not self.skip_conversion:
+                try:
+                    tmp_ms2, tmp_ms3 = mspext.convert_raw_to_csv(
+                        raw_file,
+                        outdir=self.output_dir,
+                        debug=True
+                    )
+                    # Remember where the temps are for finalize()
+                    self.files["ms2tmp"] = tmp_ms2
+                    self.files["ms3tmp"] = tmp_ms3
+
+                    # (Optional) sanity log
+                    logger.log(f"[convert] Temp CSVs: {tmp_ms2}, {tmp_ms3}")
+
+                    # notify UI
+                    #self.window.after(0, self.on_conversion_complete)
+                    self._safe_after(0, self.on_conversion_complete) #20250917 patch
+
+                except Exception as e:
+                    logger.log(f"[FATAL] Exception during raw file conversion: {e}")
+                    self.status_label.config(text="Exception occurred. Please check the log.", fg="red")
+                    # best-effort cleanup
+                    try:
+                        for p in [self.files.get("ms2tmp"), self.files.get("ms3tmp")]:
+                            if p and os.path.exists(p):
+                                os.remove(p)
+                                logger.log(f"[Cleanup] Removed leftover temp file: {p}")
+                    except Exception as ce:
+                        logger.log(f"[WARNING] Cleanup failed: {ce}")
+
+                    # show error (capture e into lambda)
+                    self.window.after(
+                        0,
+                        lambda err=e: messagebox.showerror(
+                            "Thermo Library Error",
+                            f"Raw file could not be processed.\n\nDetails:\n{err}"
+                        )
+                    )
+                    # 🔑 ensure status bar is reset
+                    self.window.after(0, lambda: self.set_status("Idle"))    #this line is wrong. Set root status to Idle   
+                    # destroy the window
+                    self.window.destroy()    
+            
+            if not self.skip_conversion:
+                try:
+                    success = mspext.convert_raw_to_csv(raw_file, outdir=self.output_dir, debug=True)
                     if success:
                         self.window.after(0, self.on_conversion_complete)
                     else:
@@ -917,7 +1033,8 @@ class MetadataEditorWindow:
                         traceback.print_exc()
                 except Exception as e:
                     logger.log(f"[FATAL] Exception during raw file conversion: {e}")
-                    self.window.after(0, lambda: messagebox.showerror("Thermo Library Error",f"Raw file could not be processed.\n\nDetails:\n{e}"))
+                    self.window.after(0, lambda: messagebox.showerror("Thermo Library or conversion Error",f"Raw file could not be processed.\n\nDetails:\n{e}"))
+                    """
         threading.Thread(target=background_conversion, daemon=True).start()
 
     def import_metadata(self):
@@ -941,6 +1058,138 @@ class MetadataEditorWindow:
     def clear_fields(self):
         for entry in self.entries.values():
             entry.delete(0, tk.END)
+    
+    #20250917
+    def _widget_alive(self, w):
+        try:
+            return (w is not None) and w.winfo_exists()
+        except Exception:
+            return False
+
+    def _safe_set_status(self, text, fg=None):
+        try:
+            if self._widget_alive(getattr(self, "status_label", None)):
+                if fg is None:
+                    self.status_label.config(text=text)
+                else:
+                    self.status_label.config(text=text, fg=fg)
+        except Exception as e:
+            logger.log(f"[UI] status update skipped: {e}")
+
+    def _safe_after(self, ms, func, *args, **kwargs):
+        host = getattr(self, "parent", None) or getattr(self, "window", None)
+        if self._widget_alive(host):
+            host.after(ms, func, *args, **kwargs)
+    #20250917
+    def _is_batch_active(self) -> bool:
+        """
+        True if a conversion thread is running OR more files remain in this batch.
+        """
+        #to allow main status update when batch error
+        if getattr(self, "_batch_halted", False):   # ← NEW
+            return False
+        more_pending = self.current_index < (len(self.raw_file_list) - 1)
+        return bool(self._convert_in_progress or more_pending)
+
+    def _on_user_close(self):
+        """
+        User clicked the window X. If batch is still running, block close and
+        update main status. Otherwise, allow close and set main status Idle.
+        """
+        #early close if the error happens in batch processing
+        if getattr(self, "_error_mode", False):
+            # After a failure, always allow the editor to close
+            self._safe_after(0, self._update_main_status_for_batch_state)
+            try:
+                self.window.destroy()
+            except Exception:
+                pass
+            return
+        
+        if self._is_batch_active():
+            # main window status → batch still running
+            set_main_status("Batch conversion running", fg="blue")
+            # metadata window status + warning
+            self._safe_set_status("Batch is running — cannot close this window now.", fg="orange")
+            messagebox.showwarning(
+                "Batch Running",
+                "Batch conversion is still in progress. Please wait for this file to finish or cancel the batch."
+            )
+            try:
+                self.window.lift()
+                self.window.focus_force()
+            except Exception:
+                pass
+            return  # block close
+        # else: safe to close
+        set_main_status("Idle", fg="blue")
+        try:
+            self.window.destroy()
+        except Exception:
+            pass         
+    def _attempt_close_after_error(self):
+        """
+        Called after showing an error. If batch is NOT active, close the window.
+        If batch is active, keep it open (blocked by policy above) but make the state clear.
+        """
+        #Auto-close after error regardless of batch
+        if getattr(self, "_error_mode", False):
+            # Failure overrides the batch-close lock; return to main window
+            self._safe_after(0, self._update_main_status_for_batch_state)
+            if self._widget_alive(getattr(self, "window", None)):
+                try:
+                    self.window.destroy()
+                except Exception:
+                    pass
+            return
+
+        if self._is_batch_active():
+            set_main_status("Batch conversion running", fg="blue")
+            self._safe_set_status("Conversion failed. Batch is still running — editor locked.", fg="red")
+        else:
+            set_main_status("Idle", fg="blue")
+            if self._widget_alive(getattr(self, "window", None)):
+                try:
+                    self.window.destroy()
+                except Exception:
+                    pass        
+
+    def _update_main_status_for_batch_state(self):
+        """Set main status based on whether batch is still active."""
+        try:
+            more_pending = self.current_index < (len(self.raw_file_list) - 1)
+        except Exception:
+            more_pending = False
+        if getattr(self, "_convert_in_progress", False) or more_pending:
+            set_main_status("Batch conversion running", fg="blue")
+        else:
+            set_main_status("Idle", fg="blue")
+
+    def _enter_error_mode(self, msg="Conversion failed."):
+        self._error_mode = True
+        self._convert_in_progress = False
+        self._batch_halted = True                      # ← NEW
+        self._safe_set_status(f"{msg} You can close this editor.", fg="red")
+        try:
+            self.window.title(f"Error: {os.path.basename(self.current_raw_file)}")
+        except Exception:
+            pass
+        # flip main window NOW
+        self._safe_after(0, self._update_main_status_for_batch_state)
+
+    def _update_main_status_for_batch_state(self):
+        try:
+            more_pending = self.current_index < (len(self.raw_file_list) - 1)
+        except Exception:
+            more_pending = False
+        if getattr(self, "_batch_halted", False):           # ← NEW
+            set_main_status("Idle (error)", fg="red")
+        elif self._convert_in_progress or more_pending:
+            set_main_status("Batch conversion running", fg="blue")
+        else:
+            set_main_status("Idle", fg="blue")
+
+    #20250917 ends
 
     def generate(self):
         if self.output_dir is None:
@@ -994,37 +1243,75 @@ class MetadataEditorWindow:
 
 
         #temp_ms2 = f"ms2tmp_{self.rawfilename}.csv"
-
         raw_stem = os.path.splitext(os.path.basename(raw_path))[0] if raw_path != "not linked" else "no_raw"
-        temp_ms2 = f"ms2tmp_{raw_stem}.csv"
-        temp_ms3 = f"ms3tmp_{raw_stem}.csv"
         final_ms2 = os.path.join(self.output_dir, f"ms2_{savename}.csv")
         final_ms3 = os.path.join(self.output_dir, f"ms3_{savename}.csv")
         success = True
+
         if self.skip_conversion:
-            print(f"[debug]: probably filling missing metadata. No need to do csv rename and check")
-            #pass
+            print("[debug] filling missing metadata only; no csv rename/check")
         else:
             try:
-                if os.path.exists(temp_ms2):
-                    shutil.move(temp_ms2, final_ms2)
-                    logger.log(f"Renamed {temp_ms2} → {final_ms2} and move to {self.output_dir}")
+                Path(final_ms2).parent.mkdir(parents=True, exist_ok=True)
+
+                # Prefer the exact temp paths from background_conversion
+                # prefer paths captured during background_conversion
+                temp_ms2 = self.files.get("ms2tmp")
+                temp_ms3 = self.files.get("ms3tmp")
+                #temp_ms2 = self.files.get("ms2tmp") or os.path.join(self.output_dir, f"ms2tmp_{raw_stem}.csv")
+                #temp_ms3 = self.files.get("ms3tmp") or os.path.join(self.output_dir, f"ms3tmp_{raw_stem}.csv")
+
+                raw_stem = os.path.splitext(os.path.basename(raw_path))[0] if raw_path != "not linked" else "no_raw"
+                if not temp_ms2:
+                    temp_ms2 = os.path.join(self.output_dir, f"ms2tmp_{raw_stem}.csv")
+                if not temp_ms3:
+                    temp_ms3 = os.path.join(self.output_dir, f"ms3tmp_{raw_stem}.csv")
+
+                final_ms2 = os.path.join(self.output_dir, f"ms2_{savename}.csv")
+                final_ms3 = os.path.join(self.output_dir, f"ms3_{savename}.csv")
+
+                success = True
+                try:
+                    promote_temp_to_final(temp_ms2, final_ms2, logger)
+                except Exception as e:
+                    logger.log(f"[WARNING] MS2 finalize failed: {e}")
+                    success = False
+
+                try:
+                    promote_temp_to_final(temp_ms3, final_ms3, logger)
+                except Exception as e:
+                    logger.log(f"[WARNING] MS3 finalize failed: {e}")
+                    success = False
+
+                if success:
+                    self.files["ms2"] = os.path.abspath(final_ms2)
+                    self.files["ms3"] = os.path.abspath(final_ms3)
+                    self.files.pop("ms2tmp", None)
+                    self.files.pop("ms3tmp", None)
+                """
+                if temp_ms2 and os.path.exists(temp_ms2):
+                    os.replace(temp_ms2, final_ms2)  # atomic on same filesystem
+                    logger.log(f"[finalize] Promoted {temp_ms2} → {final_ms2}")
                 else:
                     logger.log(f"[WARNING] Missing temp MS2 file: {temp_ms2}")
                     success = False
 
-                if os.path.exists(temp_ms3):
-                    shutil.move(temp_ms3, final_ms3)
-                    logger.log(f"Renamed {temp_ms3} → {final_ms3} and move to {self.output_dir}")
+                if temp_ms3 and os.path.exists(temp_ms3):
+                    os.replace(temp_ms3, final_ms3)  # atomic on same filesystem
+                    logger.log(f"[finalize] Promoted {temp_ms3} → {final_ms3}")
                 else:
                     logger.log(f"[WARNING] Missing temp MS3 file: {temp_ms3}")
                     success = False
-            except Exception as e:
-                logger.log(f"[ERROR] Failed during file renaming: {e}")
-                success = False
 
+                # Update state with final paths
+                if success:
+                    self.files["ms2"] = final_ms2
+                    self.files["ms3"] = final_ms3
+                    self.files.pop("ms2tmp", None)
+                    self.files.pop("ms3tmp", None)
+                """
             except Exception as e:
-                logger.log(f"[ERROR] Failed during file renaming: {e}")
+                logger.log(f"[FATAL] Finalize failed: {e}")
                 success = False
 
             if success:
@@ -1040,6 +1327,8 @@ class MetadataEditorWindow:
                 self.window.destroy()
                 if self.on_finish:
                     self.on_finish()
+            
+            
         # Trigger callback after metadata is created
         if self.callback:
             self.callback(
@@ -1049,7 +1338,58 @@ class MetadataEditorWindow:
             )
 
         # Auto-close the window
-        self.window.destroy()
+        #self.window.destroy() #remove this to avoid the crash when dealing with batch processing
+
+        """
+        raw_stem = os.path.splitext(os.path.basename(raw_path))[0] if raw_path != "not linked" else "no_raw"
+        temp_ms2 = f"ms2tmp_{raw_stem}.csv"
+        temp_ms3 = f"ms3tmp_{raw_stem}.csv"
+        final_ms2 = os.path.join(self.output_dir, f"ms2_{savename}.csv")
+        final_ms3 = os.path.join(self.output_dir, f"ms3_{savename}.csv")
+        success = True
+        if self.skip_conversion:
+            print(f"[debug]: probably filling missing metadata. No need to do csv rename and check")
+            #pass
+        else:
+            try:
+                Path(final_ms2).parent.mkdir(parents=True, exist_ok=True)
+
+                if os.path.exists(temp_ms2):
+                    os.replace(temp_ms2, final_ms2)  # atomic on same filesystem
+                    logger.log(f"[finalize] Promoted {temp_ms2} → {final_ms2}")
+                else:
+                    logger.log(f"[WARNING] Missing temp MS2 file: {temp_ms2}")
+                    success = False
+
+                if os.path.exists(temp_ms3):
+                    os.replace(temp_ms3, final_ms3)  # atomic on same filesystem
+                    logger.log(f"[finalize] Promoted {temp_ms3} → {final_ms3}")
+                else:
+                    logger.log(f"[WARNING] Missing temp MS3 file: {temp_ms3}")
+                    success = False
+                
+                if os.path.exists(temp_ms2):
+                    shutil.move(temp_ms2, final_ms2)
+                    logger.log(f"Renamed {temp_ms2} → {final_ms2} and move to {self.output_dir}")
+                else:
+                    logger.log(f"[WARNING] Missing temp MS2 file: {temp_ms2}")
+                    success = False
+
+                if os.path.exists(temp_ms3):
+                    shutil.move(temp_ms3, final_ms3)
+                    logger.log(f"Renamed {temp_ms3} → {final_ms3} and move to {self.output_dir}")
+                else:
+                    logger.log(f"[WARNING] Missing temp MS3 file: {temp_ms3}")
+                    success = False
+                
+            except Exception as e:
+                logger.log(f"[ERROR] Failed during file renaming: {e}")
+                success = False
+
+            except Exception as e:
+                logger.log(f"[ERROR] Failed during file renaming: {e}")
+                success = False
+        """
 
 def write_to_gui(message):
     text_widget.insert(tk.END, message + "\n")
@@ -1216,14 +1556,57 @@ def reset_main_status():
 def on_metadata_ready(raw_file, metadata, savename):
     logger.log(f"Confirmed metadata for {raw_file}")
     # Pass to peak extractor
-    mspext.convert_raw_to_csv(raw_file, debug=False)
+    #20250916 comment this section to see if duplicate conversion can be avoided
+    #mspext.convert_raw_to_csv(raw_file, debug=False)
 
 def launch_metadata_for_all(files):
     MetadataEditorWindow(root, files, on_metadata_ready, on_finish=reset_main_status)
 
 
+def build_final_path(metadata: Dict, out_dir: str, kind: str) -> str:
+    """
+    Build final CSV path from metadata and type ('ms2' or 'ms3').
+    Assumes you already have fields like Experiment Title / Sample / Date etc.
+    """
+    # Example: adapt to your naming scheme
+    stem = metadata.get("Generated_Filename_Stem") or metadata.get("Experiment Title") or "untitled"
+    stem = str(stem).strip().replace(" ", "_")
+    return str(Path(out_dir) / f"{kind}_{stem}.csv")
+
+from typing import Dict
+
+def build_final_path(metadata: Dict, out_dir: str, kind: str) -> str:
+    """
+    Build final CSV path from metadata and type ('ms2' or 'ms3').
+    Adjust this to your exact naming rules.
+    """
+    # Prefer your existing 'savename' logic; this is a fallback
+    stem = metadata.get("Generated_Filename_Stem") \
+        or metadata.get("Experiment Title") \
+        or metadata.get("Raw filename") \
+        or "untitled"
+    stem = str(stem).strip().replace(" ", "_")
+    return str(Path(out_dir) / f"{kind}_{stem}.csv")
 
 
+def finalize_converted_files(temp_ms2: str, temp_ms3: str, metadata: Dict, out_dir: str) -> Dict[str, str]:
+    final_ms2 = build_final_path(metadata, out_dir, kind="ms2")
+    final_ms3 = build_final_path(metadata, out_dir, kind="ms3")
+    Path(final_ms2).parent.mkdir(parents=True, exist_ok=True)
+    os.replace(temp_ms2, final_ms2)
+    os.replace(temp_ms3, final_ms3)
+    return {"ms2": final_ms2, "ms3": final_ms3}
+
+"""
+def finalize_converted_files(temp_ms2: str, temp_ms3: str, metadata: Dict, out_dir: str) -> Dict[str, str]:
+    #Promote temp CSVs to final names using atomic rename (no second write).
+    final_ms2 = build_final_path(metadata, out_dir, kind="ms2")
+    final_ms3 = build_final_path(metadata, out_dir, kind="ms3")
+    Path(final_ms2).parent.mkdir(parents=True, exist_ok=True)
+    os.replace(temp_ms2, final_ms2)
+    os.replace(temp_ms3, final_ms3)
+    return {"ms2": final_ms2, "ms3": final_ms3}
+"""
 
 # Function to select raw file for further pre-processing
 def select_file(filetype):
@@ -1313,6 +1696,32 @@ def _load_json_safely(path):
             return json.load(f)
     except Exception:
         return None
+
+
+def _same_drive(a: str, b: str) -> bool:
+    da = os.path.splitdrive(os.path.abspath(a))[0].lower()
+    db = os.path.splitdrive(os.path.abspath(b))[0].lower()
+    return da == db
+
+def promote_temp_to_final(src: str, dst: str, logger):
+    """Promote temp→final.
+    - If same drive/volume: os.replace (atomic).
+    - Else: copy2 then remove src (Windows cross-drive).
+    """
+    dst = os.path.abspath(dst)
+    src = os.path.abspath(src)
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"Temp file missing: {src}")
+
+    if _same_drive(src, dst):
+        os.replace(src, dst)
+        logger.log(f"[finalize] Promoted (atomic) {src} → {dst}")
+    else:
+        shutil.copy2(src, dst)
+        os.remove(src)
+        logger.log(f"[finalize] Promoted (copy+delete) {src} → {dst} (cross-drive)")
 
 def _score_metadata_candidate(meta: dict, sample_name: str, csv_path: str | None) -> int:
     """Content-based score: does this metadata look like it belongs to the selected sample?"""
@@ -4562,6 +4971,84 @@ def open_ml_analysis_window():
             info["cap_applied_to"] = info.get("majority_cap_applied_to") or info.get("train_majority_cap_applied_to")
             info["cap_value"]      = info.get("majority_cap") or info.get("train_majority_cap")
             return X_train, y_train, X_val, y_val, X_test, y_test, info
+    # --- helper: guess method-json-derived folder name for packing ---
+    def _guess_method_basename_for_pack(predict_input_path: str, df: pd.DataFrame) -> str:
+        """
+        Find the correct *.method.json for packaging.
+        Priority:
+        1) explicit column in CSV (method_json / method_path / method)
+        2) unique neighbor *.method.json
+        3) neighbor match by sample_name / experiment_title substring
+        4) ASK USER to pick one (no silent 'newest' fallback)
+        5) CSV stem as last resort
+        """
+        import os, glob
+        from pathlib import Path
+        folder = os.path.dirname(predict_input_path)
+
+        # 1) explicit hint column
+        for col in df.columns:
+            if col.lower() in ("method_json", "method_path", "method", "json_path"):
+                try:
+                    cand = str(df[col].dropna().iloc[0]).strip()
+                    if cand and cand.lower().endswith(".method.json") and os.path.exists(cand):
+                        return Path(cand).stem
+                except Exception:
+                    pass
+
+        # 2) neighbors
+        candidates = sorted(glob.glob(os.path.join(folder, "*.method.json")))
+        if len(candidates) == 1:
+            return Path(candidates[0]).stem
+
+        if len(candidates) > 1:
+            # 3) try match by hints
+            hints = []
+            for hcol in ("sample_name", "experiment_title"):
+                if hcol in df.columns:
+                    try:
+                        hints.append(str(df[hcol].dropna().iloc[0]))
+                    except Exception:
+                        pass
+            for c in candidates:
+                name = os.path.basename(c)
+                if any(h and (h in name) for h in hints):
+                    return Path(c).stem
+
+            # 4) ask user explicitly
+            try:
+                from tkinter import filedialog
+                sel = filedialog.askopenfilename(
+                    title="Select method.json for packaging",
+                    initialdir=folder,
+                    filetypes=[("Method JSON", "*.method.json")]
+                )
+                if sel:
+                    return Path(sel).stem
+            except Exception:
+                pass  # fall through to #5
+
+        # 5) last resort
+        return Path(predict_input_path).stem
+    
+    #new safe method json & raw csv
+    def _pick_file_cli_or_gui(title="Select a file", patterns=(("CSV", "*.csv"), ("All files", "*.*"))):
+        # Try GUI first
+        try:
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(title=title, filetypes=patterns)
+            if path:
+                return path
+        except Exception:
+            pass
+        # Fallback to CLI prompt
+        try:
+            print(f"{title}: enter full path (or leave blank to cancel)")
+            path = input("> ").strip()
+            return path or None
+        except Exception:
+            return None    
+
 
     """
     # ---------- NEW: balancing helper ---------- 20250901
@@ -5518,9 +6005,16 @@ def open_ml_analysis_window():
             # 4) Parameters (use the same thresholds you apply in your pipeline)
             params = ReportParams(tau=0.60, margin=0.05, topk=5, sample_cols=("experiment_title", "sample_name"))
 
-            # 5) Choose output folder (same folder as input unlabeled CSV)
+            #20250915 
+            # 5) Choose output folder (pack under folder named by method-json stem)
             from pathlib import Path
-            out_dir = Path(os.path.dirname(predict_input_path))
+            method_base = _guess_method_basename_for_pack(predict_input_path, df)
+            out_dir = Path(os.path.dirname(predict_input_path)) / method_base
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            ## 5) Choose output folder (same folder as input unlabeled CSV)
+            #from pathlib import Path
+            #out_dir = Path(os.path.dirname(predict_input_path))
 
             # 6) Run summarization + write artifacts
             pred_rows, class_sum, by_sample_sum, run_sum = summarize_predictions(
@@ -5547,8 +6041,16 @@ def open_ml_analysis_window():
 
             # --- END: Prediction summary integration ---
 
-            out_path = os.path.splitext(predict_input_path)[0] + "_predicted.csv"
+            out_path = (out_dir / (Path(predict_input_path).stem + "_predicted.csv")).as_posix()
             df.to_csv(out_path, index=False)
+            messagebox.showinfo(
+                "Prediction Complete",
+                f"Packed into folder:\n{out_dir}\n\nMain table:\n{out_path}"
+            )
+
+            ## --- END: Prediction summary integration ---
+            #out_path = os.path.splitext(predict_input_path)[0] + "_predicted.csv"
+            #df.to_csv(out_path, index=False)
             messagebox.showinfo("Prediction Complete", f"Predictions saved to:\n{out_path}")
         except Exception as e:
             messagebox.showerror("Prediction Failed", str(e))
@@ -5582,6 +6084,70 @@ def open_ml_analysis_window():
         import hashlib
         return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:8]
 
+    #20250915 
+    def create_unlabeled_from_method(method_path: str, default_ppm: int | None = None) -> str:
+        import json, hashlib, pandas as pd, os
+        with open(method_path, "r", encoding="utf-8") as f:
+            m = json.load(f)
+
+        # Resolve inputs
+        parents   = m.get("parents") or {}
+        ionblock  = m.get("ionlist") or {}
+        raw_csv_s = parents.get("converted_csv") or ""
+        ion_path_s= ionblock.get("path") or ""
+        ion_sheet = ionblock.get("sheet") or "ionlist"
+        ppm       = default_ppm or ionblock.get("ppm_tolerance") or 20
+
+        # If converted_csv missing or file not found -> ask user and persist back
+        raw_csv_p = to_native_path(raw_csv_s) if raw_csv_s else None
+        if not raw_csv_p or not raw_csv_p.exists():
+            picked = _pick_file_cli_or_gui("Select the *converted* CSV (ms2_*.csv)")
+            if not picked:
+                raise FileNotFoundError("No converted CSV provided.")
+            raw_csv_p = to_native_path(picked)
+            # write back to method.json in POSIX form
+            parents["converted_csv"] = to_posix_str(raw_csv_p)
+            m["parents"] = parents
+            with open(method_path, "w", encoding="utf-8") as f:
+                json.dump(m, f, indent=2, ensure_ascii=False)
+
+        # Validate ion list path
+        ion_path_p = to_native_path(ion_path_s)
+        if not ion_path_p.exists():
+            picked = _pick_file_cli_or_gui("Select ion list (CSV/XLSX)",
+                                        (("CSV", "*.csv"), ("Excel", "*.xlsx;*.xls"), ("All files", "*.*")))
+            if not picked:
+                raise FileNotFoundError("No ion list provided.")
+            ion_path_p = to_native_path(picked)
+            ionblock["path"] = to_posix_str(ion_path_p)
+            m["ionlist"] = ionblock
+            with open(method_path, "w", encoding="utf-8") as f:
+                json.dump(m, f, indent=2, ensure_ascii=False)
+
+        # Load fragments (your existing smart loader)
+        frags = read_fragment_masses_any(ion_path_p.as_posix(), sheet_name=ion_sheet)
+
+        # Use your existing extractor
+        feature_df = extract_ion_intensities(raw_csv_p.as_posix(), frags, ppm=float(ppm))
+
+        # Best-effort UID (no-op if columns missing)
+        try:
+            def _short_id(s: str) -> str:
+                return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:8]
+            exp_id  = _short_id(m.get("experiment_title", ""))
+            samp_id = _short_id(m.get("sample_name", ""))
+            if "MS2scan_no" in feature_df.columns:
+                s = feature_df["MS2scan_no"].astype(int).astype(str).str.zfill(6)
+                feature_df = feature_df.copy()
+                feature_df["UID"] = s.map(lambda x: f"{exp_id}:{samp_id}:{x}")
+        except Exception:
+            pass
+
+        out_path = raw_csv_p.with_name(raw_csv_p.stem + f"_unlabeled_ppm{ppm}.csv")
+        feature_df.to_csv(out_path, index=False)
+        return out_path.as_posix()
+
+    """
     def create_unlabeled_from_method(method_path: str, default_ppm: int | None = None) -> str:
         with open(method_path, "r", encoding="utf-8") as f:
             m = json.load(f)
@@ -5615,7 +6181,7 @@ def open_ml_analysis_window():
         out_path = os.path.splitext(raw_csv)[0] + f"_unlabeled_ppm{ppm}.csv"
         feat_df.to_csv(out_path, index=False)
         return out_path
-
+    """
     #20250915 end here?    
 
     #creating unlabeled datasets
@@ -6489,6 +7055,15 @@ status_label.pack(pady=5)
 #progress bar?
 progress = ttk.Progressbar(root, orient="horizontal", mode="indeterminate", length=250)
 progress.pack(pady=5)
+
+# NEW: helper to update main window status safely
+def set_main_status(text, fg=None):
+    status_var.set(text)
+    if fg is not None:
+        try:
+            status_label.config(fg=fg)
+        except Exception:
+            pass
 
 
 # --- Add Analysis Tools Frame ---
