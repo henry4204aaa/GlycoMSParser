@@ -131,6 +131,16 @@ else:
 selected_files = {}  # Dictionary to keep track of selected files
 
 
+#probably same as pathcanon?
+def _to_posix(p):
+    return None if not p else Path(p).as_posix()
+
+def _from_posix(p):
+    return None if not p else os.path.normpath(p.replace('/', os.sep))
+
+def _norm_for_display(p):
+    return os.path.normpath(p) if p else p
+
 #20250907 preventing key error in GUI #need real test to see behavior changes
 FILETYPE_TO_KEY = {"csv": "csv", "excel": "excel", "json": "json",
                    "method": "json", "metadata": "json"}  # extend if you add new labels
@@ -1892,6 +1902,98 @@ def open_prepare_dataset_window():
     experiment_method_paths = {}  # Store .exp.json path per experiment
     sample_method_folder = None  # Global path for saving per-sample method.json files
     experiment_status_labels = {}  # GUI labels for status display, indexed by experiment
+
+    #20250917 start fixing json issues
+    # --- BEGIN: exp.json save/load helpers (generic; PL-ready) ---
+    from pathlib import Path
+
+    def _norm(p):
+        if not p: return None
+        return os.path.normpath(os.path.expanduser(str(p)))
+
+    def _rel(p, base_dir):
+        p = _norm(p)
+        if not p: return p
+        try:
+            return os.path.relpath(p, base_dir)
+        except Exception:
+            return p
+
+    def _abs(p, base_dir):
+        if not p: return p
+        return os.path.normpath(p if os.path.isabs(p) else os.path.join(base_dir, p))
+
+    def _current_exp_title():
+        """Best-effort: get the Experiment currently selected in the tree, else the first one."""
+        sel = tree.selection()
+        if sel:
+            node = sel[0]
+            parent = tree.parent(node)
+            exp_node = parent or node
+            txt = tree.item(exp_node, "text")
+        else:
+            roots = tree.get_children()
+            if not roots:
+                return None
+            txt = tree.item(roots[0], "text")
+        return txt.replace("Experiment: ", "").split(" (")[0].strip()
+
+    def export_experiment_json(exp_title, out_path):
+        """Serialize everything we currently know for that experiment (all keys under a sample)."""
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        base = os.path.dirname(out_path)
+
+        payload = {
+            "experiment": exp_title,
+            "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "samples": {}
+        }
+        samples = experiment_projects.get(exp_title, {}).get("samples", {})
+
+        for sname, files in samples.items():
+            # Shallow copy and relativize every string value
+            record = {}
+            for k, v in (files or {}).items():
+                if isinstance(v, str) and v.strip():
+                    record[k] = _to_posix(v)   # <— store POSIX in JSON
+                    #record[k] = _rel(v, base)
+            payload["samples"][sname] = record
+
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+        experiment_method_paths[exp_title] = out_path
+        if exp_title in experiment_status_labels:
+            experiment_status_labels[exp_title].config(text=f"EXP file: {out_path}")
+        logger.log(f"[EXP] Saved → {out_path}")
+        return out_path
+
+    def import_experiment_json(in_path):
+        base = os.path.dirname(in_path)
+        with open(in_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        exp_title = data.get("experiment") or "Unnamed Experiment"
+        experiment_projects.setdefault(exp_title, {"samples": {}})
+        dst = experiment_projects[exp_title]["samples"]
+
+        # Back-compat: accept both a flat per-sample dict or a {'files':{...}} shape
+        for sname, sample_blob in (data.get("samples") or {}).items():
+            if isinstance(sample_blob, dict) and "files" in sample_blob:
+                files = sample_blob.get("files") or {}
+            else:
+                files = sample_blob or {}
+            # absolutize
+            # resolved = {k: _abs(v, base) for k, v in files.items() if isinstance(v, str)}
+            resolved = {k: _abs(_from_posix(v), base) for k, v in files.items() if isinstance(v, str) and v.strip()}
+            dst[sname] = resolved
+
+        experiment_method_paths[exp_title] = in_path
+        logger.log(f"[EXP] Loaded ← {in_path}")
+        refresh_tree()
+        return exp_title
+    # --- END: exp.json save/load helpers ---
+    ###
 
     #20250905 added for negative label
     # --- Negative sampling (Prepare Dataset) ---
@@ -3867,7 +3969,10 @@ def open_prepare_dataset_window():
         })
 
         if parent:
-            messagebox.showinfo("Pseudolabeling complete", f"Saved and linked:\n{outpath}")
+            messagebox.showinfo("Pseudolabeling complete",
+                    "Saved and linked:\n" + _norm_for_display(outpath))
+            logger.log(f"[PL] Saved and linked: {_norm_for_display(outpath)}")
+            #messagebox.showinfo("Pseudolabeling complete", f"Saved and linked:\n{outpath}")
         try:
             refresh_tree()
         except Exception:
@@ -4252,6 +4357,20 @@ def open_prepare_dataset_window():
             sample_method_folder = path
             update_status_display("Unassigned")
 
+    #20250917 to avoid hard-fixing the items in exp json so the PL workflow can be saved as well
+    def load_experiment_method_file():
+        """Repurposed: load an experiment (.exp.json) and rebuild the tree."""
+        path = filedialog.askopenfilename(
+            title="Open Experiment (.exp.json)",
+            filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")]
+        )
+        if not path:
+            return
+        exp_title = import_experiment_json(path)
+        if exp_title in experiment_status_labels:
+            experiment_status_labels[exp_title].config(text=f"EXP file: {path}")
+
+    """
     def load_experiment_method_file():
         path = filedialog.askopenfilename(
             title="Load experiment method file",
@@ -4293,8 +4412,28 @@ def open_prepare_dataset_window():
         refresh_tree()
         update_status_display(exp_name)
         messagebox.showinfo("Loaded", f"Method file loaded for experiment: {exp_name}")
-
-
+    """
+    def save_current_experiment_method():
+        """Repurposed: save the *experiment* (.exp.json), capturing manual + PL keys."""
+        exp = _current_exp_title()
+        if not exp:
+            messagebox.showwarning("No experiment", "Please select or create an Experiment first.")
+            return
+        # use existing path if known; otherwise ask
+        path = experiment_method_paths.get(exp)
+        if not path:
+            safe = exp.replace(" ", "_")
+            path = filedialog.asksaveasfilename(
+                title="Save Experiment (.exp.json)",
+                defaultextension=".exp.json",
+                initialfile=f"{safe}.exp.json",
+                filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")]
+            )
+            if not path:
+                return
+        export_experiment_json(exp, path)
+    #20250917 sarabada
+    """ 
     def save_current_experiment_method():
         sel = tree.selection()
         if not sel:
@@ -4308,7 +4447,7 @@ def open_prepare_dataset_window():
 
         exp_name = tree.item(exp_id, "text").replace("Experiment: ", "").split(" (")[0].strip()
         write_method_file(exp_name, auto=True)
-
+    """
 
     def bind_right_click(widget, callback):
         # Universal right-click binding for macOS, Windows, Linux
