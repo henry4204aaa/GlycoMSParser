@@ -1,5 +1,5 @@
 import os
-version = "0.9967"
+version = "0.997"
 last_update = 20250917
 import msprawextractor as mspext
 import threading
@@ -69,7 +69,8 @@ except Exception:
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
-# v0.997: update requirements.txt (the python version and packages needs to be updated)
+# v0.998: update requirements.txt (the python version and packages needs to be updated)
+# v0.997: add integrity check placeholder, fix the path issue
 # v0.9969: fix pseudolabeling metadata logics
 # v0.9967 try to fix batch conversion issue
 # v0.9966: incorporate random sampling manner also in PL trainable dataset generation 
@@ -147,6 +148,19 @@ FILETYPE_TO_KEY = {"csv": "csv", "excel": "excel", "json": "json",
 def normalize_ftype(ft: str) -> str:
     return FILETYPE_TO_KEY.get(ft.lower().strip(), ft.lower().strip())
 #
+# --- Integrity checker (optional) ---
+try:
+    import mspprojintegritykeeper as mspik
+except Exception:
+    # Soft fallback so GUI still works if the module is missing.
+    from types import SimpleNamespace
+    def _noimpl(*a, **k): return None
+    mspik = SimpleNamespace(
+        writehashtojson=_noimpl,
+        file_hashcheck=_noimpl,
+        relocatemissingfile=_noimpl,
+    )
+
 
 #logger
 class AppLogger:
@@ -1994,6 +2008,27 @@ def open_prepare_dataset_window():
         return exp_title
     # --- END: exp.json save/load helpers ---
     ###
+
+    #20250917 future function: integrity check
+    # Reuse an existing toolbar if present; otherwise create one
+    try:
+        toolbar
+    except NameError:
+        toolbar = ttk.Frame(subwin)
+        toolbar.pack(fill="x", padx=10, pady=(8, 0))
+
+    def _check_integrity_clicked():
+        # For now: just a friendly placeholder dialog
+        tk.messagebox.showinfo(
+            "Project integrity",
+            "This feature is in development.\n\n"
+            "Planned: compute & store file hashes, check missing/changed files, "
+            "and help you relink or bulk change roots."
+        )
+        # (Later you might call into mspik.writehashtojson(...) etc.)
+
+    ttk.Button(toolbar, text="Check integrity", command=_check_integrity_clicked)\
+       .pack(side="left", padx=4)
 
     #20250905 added for negative label
     # --- Negative sampling (Prepare Dataset) ---
