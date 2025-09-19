@@ -144,6 +144,8 @@ NG_flags = {
 #O-glycan will share a portion of N-glycan flags, thinking if I should mix them together or not
 
 
+#GlcA: 233.1020 (+), 231.0874 (-), 297.0286 (+S/-)
+#Sulfate: 
 
 #adapted, mind the deri and reduction status should be obtain from metadata, if no metadata exists, ask user to choose
 def precursormassv3(composition, deri="PerMe",reduced=False, debug=False): #general version

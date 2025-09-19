@@ -1,5 +1,6 @@
 joblib==1.2.0
-numpy==1.23.3
+numpy==1.26.4
 pandas==1.4.4
 pymsfilereader==1.0.1
 scikit_learn==1.2.0
+skops==0.13.0

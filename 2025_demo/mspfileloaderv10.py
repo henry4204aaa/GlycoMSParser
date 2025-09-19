@@ -1,6 +1,6 @@
 import os
-version = "0.997"
-last_update = 20250917
+version = "0.9981"
+last_update = 20250919
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -27,6 +27,78 @@ import importlib, sys, os, traceback
 from pathlib import Path
 from pathcanon import to_posix_str, to_native_path, ensure_dir
 from typing import Dict
+
+
+# ---- GlycoMSP startup diagnostics: put this block at line 1 ----
+import traceback, importlib.util
+
+def _pause_if_no_tty():
+    # If user double-clicked on Windows, stdin often isn't a real TTY.
+    try:
+        if os.name == "nt" and not sys.stdin.isatty():
+            input("\nPress Enter to close…")
+    except Exception:
+        pass
+
+def _check_mod(name, alt=None):
+    """Return (present: bool, version_or_reason: str)."""
+    modname = alt or name
+    spec = importlib.util.find_spec(modname)
+    if not spec:
+        return False, "not found"
+    try:
+        m = __import__(modname)
+        v = getattr(m, "__version__", "")
+        return True, (v or "present")
+    except Exception as e:
+        return False, f"import failed: {e.__class__.__name__}: {e}"
+
+def _quick_diag(note=None):
+    print("=== GlycoMSP quick environment check ===")
+    print(f"Python: {sys.version.split()[0]}  ({sys.executable})")
+    print(f"Platform: {platform.platform()}")
+    if note:
+        print(note)
+
+    wanted = [
+        ("tkinter", None),      # stdlib (bundled on python.org installers)
+        ("numpy",   None),
+        ("pandas",  None),
+        ("joblib",  None),
+        ("sklearn", "sklearn"), # scikit-learn
+    ]
+    for name, mod in wanted:
+        ok, info = _check_mod(name, alt=mod)
+        tag = "OK  " if ok else "MISS"
+        shown = (mod or name)
+        print(f"{tag} {shown:<10} {info}")
+
+    if os.name == "nt":
+        ok, info = _check_mod("pymsfilereader")
+        tag = "OK  " if ok else "MISS"
+        print(f"{tag} pymsfilereader {info}  (needed only for RAW conversion)")
+
+    if sys.version_info >= (3, 13):
+        print("\n[Notice] Running on Python 3.13.",
+              "If wheels for numpy/pandas/scikit-learn are missing, prefer Python 3.11/3.12 for now.")
+
+def _excepthook(exctype, value, tb):
+    print("\n[StartupError] Unhandled exception during launch/import:\n")
+    traceback.print_exception(exctype, value, tb)
+    print()
+    _quick_diag()
+    _pause_if_no_tty()
+    # Swallow default hook to avoid duplicate tracebacks
+sys.excepthook = _excepthook
+
+# Allow a no-import diagnostics mode:
+if "--diag" in sys.argv or "--diag" in sys.argv:
+    _quick_diag(note="(ran with --diag; skipped importing the full GUI)")
+    _pause_if_no_tty()
+    sys.exit(0)
+
+# ---- End diagnostics prelude ----
+
 
 def _load_ion_module():
     try:
@@ -69,7 +141,8 @@ except Exception:
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
-# v0.998: update requirements.txt (the python version and packages needs to be updated)
+# v0.9981: add ML parameters save/load feature. Add error tracker for configuring first time.
+# v0.998: update requirements.txt (the python version and packages needs to be updated). PS. python 3.13 has errors
 # v0.997: add integrity check placeholder, fix the path issue
 # v0.9969: fix pseudolabeling metadata logics
 # v0.9967 try to fix batch conversion issue
@@ -1916,7 +1989,6 @@ def open_prepare_dataset_window():
     experiment_method_paths = {}  # Store .exp.json path per experiment
     sample_method_folder = None  # Global path for saving per-sample method.json files
     experiment_status_labels = {}  # GUI labels for status display, indexed by experiment
-
     #20250917 start fixing json issues
     # --- BEGIN: exp.json save/load helpers (generic; PL-ready) ---
     from pathlib import Path
@@ -2029,6 +2101,8 @@ def open_prepare_dataset_window():
 
     ttk.Button(toolbar, text="Check integrity", command=_check_integrity_clicked)\
        .pack(side="left", padx=4)
+
+
 
     #20250905 added for negative label
     # --- Negative sampling (Prepare Dataset) ---
@@ -2587,6 +2661,47 @@ def open_prepare_dataset_window():
             except Exception:
                 pass
         return None
+
+    #
+        #20250919?
+    # 20250919 move from prepare dataset
+    #20250918
+    # ---- ML params context glue for the panel ----
+    def _current_exp_title():
+        """Best-effort experiment currently selected (you already use this pattern above)."""
+        sel = tree.selection()
+        if sel:
+            node = sel[0]
+            parent = tree.parent(node)
+            exp_node = parent or node
+            txt = tree.item(exp_node, "text")
+        else:
+            roots = tree.get_children()
+            if not roots:
+                return None
+            txt = tree.item(roots[0], "text")
+        return txt.replace("Experiment: ", "").split(" (")[0].strip()
+
+    def _get_ml_context():
+        """
+        Returns the three things the panel needs:
+        - exp_json: path to the current experiment's .exp.json (if any)
+        - method_json: path to the currently selected sample's method .json (if any)
+        - current_params: optional in-memory set (we're not keeping one, so None)
+        """
+        exp_title = _current_exp_title()
+        exp_json_path = experiment_method_paths.get(exp_title)
+
+        files = current_selected_files() or {}
+        # You already have this helper in the same function:
+        method_json_path = _resolve_method_json(files)
+
+        return {
+            "exp_json": exp_json_path,
+            "method_json": method_json_path,
+            "current_params": None,
+        }
+
 
     def try_merge_selected_sample():
         sel = tree.selection()
@@ -4935,7 +5050,7 @@ def open_ml_analysis_window():
     import tkinter as tk
     #20250901 add split
     from sklearn.model_selection import train_test_split
-
+    import copy
 
     #v0.9923~0.9929 utilities
     from ml_ng_utils import (
@@ -4945,6 +5060,272 @@ def open_ml_analysis_window():
         build_features_from_peaks_log10_plus1,  # optional if you need it directly
     )
     from ml_ng_utils_extras import resample_by_strategy, tau_sweep_summary
+    #_ensure_ml_state()
+    #20250919 try to let live param changes apply to save/loadable field
+    _ml_state = {
+        "current": {
+            "model": {
+                "type": "RandomForest",
+                "n_estimators": 400,
+                "max_depth": None,
+                "min_samples_split": 2,
+                "min_samples_leaf": 1,
+                "random_state": 42,
+                "class_weight": "balanced",
+            },
+            "train": {
+                "test_size": 0.25,
+                "val_size": 0.10,
+                "stratify": True,
+                "real_world_test": False,
+                "threshold": {"enabled": False, "tau": 0.65, "margin": 0.05},
+            },
+            "min_samples_per_class": 5,
+            "balance": {"enabled": True, "majority_label": "Non-glycan", "majority_factor": 3},
+        },
+        # These are set by open_ml_params_window so Train/Test can push live updates:
+        "editor_txt": None,
+        "preview_txt": None,
+    }
+
+    def _render_effective_from_state():
+        if _ml_state["preview_txt"] is None:
+            return
+        # If you already have a merge routine, use it; otherwise just echo current:
+        eff = _ml_state["current"]  # or: _merge_ml(BUILTIN_ML, files_layer, _ml_state["current"])
+        _ml_state["preview_txt"].delete("1.0", "end")
+        _ml_state["preview_txt"].insert("1.0", json.dumps(eff, indent=2))
+
+    def _write_editor_from_state():
+        """Refresh the JSON text panes if they exist (no-op otherwise)."""
+        try:
+            import json
+        except Exception:
+            json = None
+
+        ed, pv = _get_editor_preview_widgets()
+
+        editor_blob   = _ml_state.get("editor") or {}
+        effective_blob = _ml_state.get("effective_params") or {}
+
+        s_editor    = json.dumps(editor_blob, indent=2) if json else str(editor_blob)
+        s_effective = json.dumps(effective_blob, indent=2) if json else str(effective_blob)
+
+        if ed:
+            try:
+                ed.configure(state="normal")
+                ed.delete("1.0", "end")
+                ed.insert("1.0", s_editor)
+            except Exception:
+                pass
+
+        if pv:
+            try:
+                pv.configure(state="normal")
+                pv.delete("1.0", "end")
+                pv.insert("1.0", s_effective)
+            except Exception:
+                pass
+
+    """
+    _ml_state = {
+        "editor": {   # what the user edits (left JSON)
+            "model": {
+                "type": "RandomForest",
+                "n_estimators": 400,
+                "max_depth": None,
+                "min_samples_split": 2,
+                "min_samples_leaf": 1,
+                "random_state": 42,
+                "class_weight": "balanced",
+            },
+            "train": {
+                "test_size": 0.25,
+                "val_size": 0.10,
+                "stratify": True,
+                "real_world_test": False,
+                "threshold": {"enabled": False, "tau": 0.65, "margin": 0.05},
+                "min_samples_per_class": 5,
+            },
+            "balance": {"enabled": True, "majority_label": "Non-glycan", "majority_factor": 3}
+        },
+        # optional: layers coming from files/experiment; if none, keep empty list
+        "file_layers": [],
+        # widgets hooks are filled later when windows are created
+        "widgets": {"editor_txt": None, "preview_txt": None}
+    }
+    
+
+    def _write_train_ui_into_state(
+        test_split, val_split, min_samples, use_balance,
+        majority_label, majority_factor, stratify,
+        n_estimators, class_weight_balanced, real_world_test,
+        th_enable, th_tau, th_margin
+    ):
+        ed = _ml_state["editor"]
+
+        # model
+        ed.setdefault("model", {})
+        ed["model"]["type"] = "RandomForest"
+        ed["model"]["n_estimators"] = int(n_estimators)
+        ed["model"]["class_weight"] = "balanced" if class_weight_balanced else None
+
+        # train
+        ed.setdefault("train", {})
+        ed["train"]["test_size"] = float(test_split)
+        ed["train"]["val_size"] = float(val_split)
+        ed["train"]["stratify"] = bool(stratify)
+        ed["train"]["real_world_test"] = bool(real_world_test)
+        ed["train"]["min_samples_per_class"] = int(min_samples)
+        ed["train"]["threshold"] = {
+            "enabled": bool(th_enable),
+            "tau": float(th_tau),
+            "margin": float(th_margin),
+        }
+
+        # balance
+        ed["balance"] = {
+            "enabled": bool(use_balance),
+            "majority_label": majority_label,
+            "majority_factor": int(majority_factor),
+        }
+
+        _refresh_json_textboxes()
+    """
+    def _emit_ml_state_changed_ui_refresh():
+        """Refresh the ML Parameters editor/preview panes if that window is open."""
+        _ensure_ml_state()
+        t1 = _ml_state.get("editor_txt")
+        t2 = _ml_state.get("preview_txt")
+        if not (t1 or t2):
+            return
+
+        try:
+            if t1:
+                t1.configure(state="normal")
+                t1.delete("1.0", "end")
+                t1.insert("1.0", json.dumps(_ml_state["editor"], indent=2))
+                t1.configure(state="normal")
+            if t2:
+                t2.configure(state="normal")
+                t2.delete("1.0", "end")
+                t2.insert("1.0", json.dumps(_ml_state.get("effective", _ml_state["editor"]), indent=2))
+                t2.configure(state="normal")
+        except Exception:
+            pass
+
+    def _write_train_ui_into_state( 
+        test_size: float,
+        val_size: float,
+        min_per_class: int,
+        use_balance: bool,
+        majority_label: str,
+        majority_factor: int,
+        stratify: bool,
+        n_estimators: int,
+        use_class_weight: bool,
+        real_world_test: bool,
+        thr_enable: bool,
+        thr_tau: float,
+        thr_margin: float,
+    ):
+        st = _ensure_ml_state()
+        ed  = st["editor"]
+        tr  = ed.setdefault("train", {})
+        mdl = ed.setdefault("model", {})
+        bal = ed.setdefault("balance", {})
+
+        # train/test
+        tr["test_size"] = float(test_size)
+        tr["val_size"]  = float(val_size)
+        tr["stratify"]  = bool(stratify)
+        tr["real_world_test"] = bool(real_world_test)
+        tr["threshold"] = {"enabled": bool(thr_enable), "tau": float(thr_tau), "margin": float(thr_margin)}
+
+        # per-class minimum
+        ed["min_samples_per_class"] = int(min_per_class)
+
+        # balance
+        bal["enabled"] = bool(use_balance)
+        bal["majority_label"]  = str(majority_label).strip() if majority_label is not None else "Non-glycan"
+        bal["majority_factor"] = int(majority_factor)
+
+        # model (RF)
+        mdl["type"]          = "RandomForest"
+        mdl["n_estimators"]  = int(n_estimators)
+        mdl["class_weight"]  = "balanced" if bool(use_class_weight) else None
+
+        # recompute effective if you keep one
+        st["effective"] = copy.deepcopy(ed)
+    """
+    def _write_train_ui_into_state(
+        test_size, val_size, stratify, min_per_class,
+        use_balance, majority_label, majority_factor,
+        n_estimators, use_class_weight, real_world_test,
+        thr_enable, thr_tau, thr_margin
+    ):
+        st = _ensure_ml_state()
+        ed = st["editor"]
+
+        # Ensure sections exist
+        tr = ed.setdefault("train", {})
+        mdl = ed.setdefault("model", {})
+        bal = ed.setdefault("balance", {})
+
+        # Train/test/val
+        tr["test_size"] = float(test_size)
+        tr["val_size"] = float(val_size)
+        tr["stratify"] = bool(stratify)
+        tr["real_world_test"] = bool(real_world_test)
+        tr["threshold"] = {
+            "enabled": bool(thr_enable),
+            "tau": float(thr_tau),
+            "margin": float(thr_margin),
+        }
+
+        # Global knobs
+        ed["min_samples_per_class"] = int(min_per_class)
+
+        # Balance
+        bal["enabled"] = bool(use_balance)
+        bal["majority_label"] = str(majority_label or "Non-glycan").strip()
+        bal["majority_factor"] = int(majority_factor)
+
+        # Model (current RF only)
+        mdl["type"] = "RandomForest"
+        mdl["n_estimators"] = int(n_estimators)
+        mdl["class_weight"] = "balanced" if use_class_weight else None
+
+        # Effective = editor for now (you can add file/experiment overlays later)
+        st["effective"] = copy.deepcopy(ed)
+
+        _emit_ml_state_changed_ui_refresh()
+    """
+    def _deep_merge(a, b):
+        if isinstance(a, dict) and isinstance(b, dict):
+            out = dict(a)
+            for k, v in b.items():
+                out[k] = _deep_merge(out.get(k), v) if k in out else v
+            return out
+        return b if b is not None else a
+
+    def _effective_params():
+        eff = BUILTIN_ML
+        for layer in _ml_state.get("file_layers", []):
+            eff = _deep_merge(eff, layer)
+        eff = _deep_merge(eff, _ml_state["editor"])
+        return eff
+
+    def _refresh_json_textboxes():
+        ed = json.dumps(_ml_state["editor"], indent=2)
+        eff = json.dumps(_effective_params(), indent=2)
+        t1 = _ml_state["widgets"]["editor_txt"]
+        t2 = _ml_state["widgets"]["preview_txt"]
+        if t1:
+            t1.config(state="normal"); t1.delete("1.0", "end"); t1.insert("1.0", ed); t1.config(state="normal")
+        if t2:
+            t2.config(state="normal"); t2.delete("1.0", "end"); t2.insert("1.0", eff); t2.config(state="normal")
+
 
     #20250909
     def load_model_any(model_path: str):
@@ -5224,6 +5605,516 @@ def open_ml_analysis_window():
             return None    
 
 
+
+
+
+    #20250918 ML method export utilities
+    # =========================
+    # ML PARAM PRESET UTILITIES
+    # =========================
+    #from __future__ import annotations
+    import json, os, hashlib, datetime, platform, sys
+    from typing import Optional, Dict, Any
+
+    # Sensible built-ins if neither exp nor method has overrides
+    BUILTIN_ML: Dict[str, Any] = {
+        "model": {"type": "RandomForest", "n_estimators": 500, "max_depth": None, "class_weight": "balanced"},
+        "split": {"test_size": 0.2, "val_size": 0.0, "random_state": 42, "stratified": True},
+        "filters": {"min_samples_per_class": 15, "drop_rare_in_test": True},
+        "negatives": {"enabled": True, "max_ratio": 3.0},
+        "features": {"exclude_cols": ["MS2scan_no", "protonatedmass"], "use_ion_suggestions": False},
+        "thresholds": {"tau": 0.60, "margin": 0.05},
+    }
+
+    def _safe_read_json(path: str) -> Optional[Dict[str, Any]]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def _safe_write_json(path: str, data: Dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+    def read_ml_defaults_from_exp(exp_json_path: str) -> Optional[Dict[str, Any]]:
+        data = _safe_read_json(exp_json_path)
+        if not data: return None
+        return data.get("ml_defaults")
+
+    def write_ml_defaults_to_exp(exp_json_path: str, params: Dict[str, Any]) -> bool:
+        data = _safe_read_json(exp_json_path) or {}
+        data["ml_defaults"] = params
+        try:
+            _safe_write_json(exp_json_path, data)
+            return True
+        except Exception:
+            return False
+
+    def read_ml_overrides_from_method(method_json_path: str) -> Optional[Dict[str, Any]]:
+        data = _safe_read_json(method_json_path)
+        if not data: return None
+        return data.get("ml_overrides")
+
+    def write_ml_overrides_to_method(method_json_path: str, params: Dict[str, Any]) -> bool:
+        data = _safe_read_json(method_json_path) or {}
+        data["ml_overrides"] = params
+        try:
+            _safe_write_json(method_json_path, data)
+            return True
+        except Exception:
+            return False
+
+    def load_ml_params_from_json(path: str) -> Optional[Dict[str, Any]]:
+        return _safe_read_json(path)
+
+    def save_ml_params_to_json(path: str, params: Dict[str, Any]) -> bool:
+        try:
+            _safe_write_json(path, params)
+            return True
+        except Exception:
+            return False
+
+    def _deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+        """Return new dict = a merged with b (b overrides)."""
+        out = dict(a)
+        for k, v in (b or {}).items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = v
+        return out
+
+    def merge_ml_params(builtins: Dict[str, Any],
+                        exp_defaults: Optional[Dict[str, Any]],
+                        method_overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        return _deep_merge(_deep_merge(builtins, exp_defaults or {}), method_overrides or {})
+
+    # ---- ML state bootstrapper -----------------------------------------------
+    def _ensure_ml_state():
+        """Guarantee _ml_state exists with the keys we expect."""
+        global _ml_state
+        try:
+            _ml_state  # noqa: F401
+        except NameError:
+            _ml_state = {}
+
+        if not isinstance(_ml_state, dict):
+            _ml_state = {}
+
+        # BUILTIN_ML must already exist here
+        if "editor" not in _ml_state:
+            _ml_state["editor"] = copy.deepcopy(BUILTIN_ML)
+        if "effective" not in _ml_state:
+            _ml_state["effective"] = copy.deepcopy(_ml_state["editor"])
+        if "source_files" not in _ml_state:
+            _ml_state["source_files"] = []  # paths you load/merge from
+
+        return _ml_state
+
+    def file_sha256(path: str) -> Optional[str]:
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024*1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    def collect_versions() -> Dict[str, str]:
+        v = {
+            "python": platform.python_version(),
+            "platform": f"{platform.system()} {platform.release()}",
+        }
+        try:
+            import sklearn
+            v["sklearn"] = sklearn.__version__
+        except Exception:
+            pass
+        # add your own GUI/app version constant if you keep one
+        try:
+            from importlib.metadata import version as _v
+            v["joblib"] = _v("joblib")
+            v["numpy"] = _v("numpy")
+            v["pandas"] = _v("pandas")
+        except Exception:
+            pass
+        # If you track GUI version somewhere:
+        try:
+            v["gms_gui"] = version  # define elsewhere if available
+        except Exception:
+            pass
+        return v
+
+    def snapshot_training_run(artifact_dir: str,
+                            effective_params: Dict[str, Any],
+                            column_order: list[str],
+                            classes: list[str],
+                            inputs: Dict[str, Any],
+                            hashes: Dict[str, Optional[str]],
+                            versions: Dict[str, str]) -> str:
+        os.makedirs(artifact_dir, exist_ok=True)
+        payload = {
+            "training_run": {
+                "effective_params": effective_params,
+                "column_order": column_order,
+                "classes": classes,
+                "versions": versions,
+                "seeds": {"random_state": effective_params.get("split", {}).get("random_state", None)},
+                "inputs": inputs,
+                "hashes": hashes,
+                "created_at": datetime.datetime.now().astimezone().isoformat(),
+            }
+        }
+        out = os.path.join(artifact_dir, "training_run.json")
+        _safe_write_json(out, payload)
+        return out
+
+    # ==================================
+    # TK PANEL: ML Parameter Editor Pane
+    # ==================================
+    def build_ml_params_panel(parent,
+                            get_current_context,
+                            on_effective_params_ready):
+        """
+        parent: a tk/ttk container in your Train tab.
+        get_current_context(): callable -> dict with keys:
+            {
+            "exp_json": str|None,
+            "method_json": str|None,
+            "current_params": dict|None   # if you already have a working set in memory
+            }
+        on_effective_params_ready(params_dict): called when user clicks "Validate & Use"
+        """
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
+        from tkinter.scrolledtext import ScrolledText
+
+        ctx = get_current_context() or {}
+        exp_json_path = ctx.get("exp_json")
+        method_json_path = ctx.get("method_json")
+        working_params = ctx.get("current_params") or {}
+
+        frm = ttk.LabelFrame(parent, text="ML Parameters", padding=8)
+        frm.grid_columnconfigure(0, weight=1)
+        frm.grid_columnconfigure(1, weight=1)
+        frm.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+        # Editable JSON text
+        ttk.Label(frm, text="Editable (this panel's params):").grid(row=0, column=0, sticky="w")
+        edit_box = ScrolledText(frm, height=14, wrap="none")
+        edit_box.grid(row=1, column=0, sticky="nsew", padx=(0,4))
+        # Effective (preview after merge)
+        ttk.Label(frm, text="Effective (Builtins ← Exp ← Method):").grid(row=0, column=1, sticky="w")
+        eff_box = ScrolledText(frm, height=14, wrap="none", state="disabled")
+        eff_box.grid(row=1, column=1, sticky="nsew")
+
+        def _set_edit_box_from_dict(d):
+            edit_box.delete("1.0", "end")
+            edit_box.insert("1.0", json.dumps(d or {}, indent=2, ensure_ascii=False))
+
+        def _set_eff_box_from_dict(d):
+            eff_box.configure(state="normal")
+            eff_box.delete("1.0", "end")
+            eff_box.insert("1.0", json.dumps(d or {}, indent=2, ensure_ascii=False))
+            eff_box.configure(state="disabled")
+
+        def _current_edit_dict():
+            try:
+                return json.loads(edit_box.get("1.0", "end").strip() or "{}")
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", f"Could not parse parameters:\n{e}")
+                return None
+
+        def _refresh_effective_preview():
+            exp_def = read_ml_defaults_from_exp(exp_json_path) if exp_json_path else None
+            meth_ov = read_ml_overrides_from_method(method_json_path) if method_json_path else None
+            # The editor holds the *active layer* user is editing. Choose which layer?
+            # By default, we treat editor content as what will be *applied* somewhere later.
+            # For preview, just show how it would look if applied at the method level:
+            try:
+                edited = _current_edit_dict() or {}
+            except Exception:
+                edited = {}
+            effective = merge_ml_params(BUILTIN_ML, exp_def, edited if meth_ov is None else _deep_merge(meth_ov, edited))
+            _set_eff_box_from_dict(effective)
+
+        # Initialize editor with either method overrides, else exp defaults, else builtins
+        initial = read_ml_overrides_from_method(method_json_path) if method_json_path else None
+        if initial is None:
+            initial = read_ml_defaults_from_exp(exp_json_path) if exp_json_path else None
+        if initial is None:
+            initial = working_params or BUILTIN_ML
+        _set_edit_box_from_dict(initial)
+        _refresh_effective_preview()
+
+        # ---- Buttons row
+        btns = ttk.Frame(frm); btns.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6,0))
+        for i in range(6): btns.grid_columnconfigure(i, weight=1)
+
+        def _load_from_file():
+            path = filedialog.askopenfilename(title="Load ML params JSON",
+                                            filetypes=[("JSON", "*.json"), ("All files","*.*")])
+            if not path: return
+            d = load_ml_params_from_json(path)
+            if d is None:
+                messagebox.showerror("Load failed", "Could not read JSON parameters.")
+                return
+            _set_edit_box_from_dict(d); _refresh_effective_preview()
+
+        def _save_to_file():
+            path = filedialog.asksaveasfilename(title="Save ML params JSON",
+                                                defaultextension=".json",
+                                                filetypes=[("JSON", "*.json"), ("All files","*.*")])
+            if not path: return
+            d = _current_edit_dict()
+            if d is None: return
+            ok = save_ml_params_to_json(path, d)
+            if not ok:
+                messagebox.showerror("Save failed", "Could not save JSON parameters.")
+            else:
+                messagebox.showinfo("Saved", f"Saved parameters to:\n{path}")
+
+        def _pull_from_exp():
+            if not exp_json_path:
+                messagebox.showwarning("No experiment file", "No .exp.json is active.")
+                return
+            d = read_ml_defaults_from_exp(exp_json_path)
+            if d is None:
+                messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
+                return
+            _set_edit_box_from_dict(d); _refresh_effective_preview()
+
+        def _pull_from_method():
+            if not method_json_path:
+                messagebox.showwarning("No method file", "No .method.json is active.")
+                return
+            d = read_ml_overrides_from_method(method_json_path)
+            if d is None:
+                messagebox.showinfo("No overrides", "This sample has no ml_overrides yet.")
+                return
+            _set_edit_box_from_dict(d); _refresh_effective_preview()
+
+        def _apply_to_exp():
+            if not exp_json_path:
+                messagebox.showwarning("No experiment file", "No .exp.json is active.")
+                return
+            d = _current_edit_dict()
+            if d is None: return
+            if write_ml_defaults_to_exp(exp_json_path, d):
+                messagebox.showinfo("Applied", f"Updated ml_defaults in:\n{exp_json_path}")
+            else:
+                messagebox.showerror("Failed", "Could not write to experiment JSON.")
+            _refresh_effective_preview()
+
+        def _apply_to_method():
+            if not method_json_path:
+                messagebox.showwarning("No method file", "No .method.json is active.")
+                return
+            d = _current_edit_dict()
+            if d is None: return
+            if write_ml_overrides_to_method(method_json_path, d):
+                messagebox.showinfo("Applied", f"Updated ml_overrides in:\n{method_json_path}")
+            else:
+                messagebox.showerror("Failed", "Could not write to method JSON.")
+            _refresh_effective_preview()
+
+        def _reset_builtins():
+            _set_edit_box_from_dict(BUILTIN_ML); _refresh_effective_preview()
+
+        def _validate_and_use():
+            d = _current_edit_dict()
+            if d is None: return
+            # Merge for runtime (method layer gets editor content if a method exists)
+            exp_def = read_ml_defaults_from_exp(exp_json_path) if exp_json_path else None
+            meth_ov = read_ml_overrides_from_method(method_json_path) if method_json_path else None
+            effective = merge_ml_params(BUILTIN_ML, exp_def, _deep_merge(meth_ov or {}, d))
+            on_effective_params_ready(effective)
+            messagebox.showinfo("Parameters ready", "Effective ML parameters are validated and ready to use.")
+            _set_eff_box_from_dict(effective)
+
+
+
+        ttk.Button(btns, text="Load…", command=_load_from_file).grid(row=0, column=0, sticky="ew", padx=2)
+        ttk.Button(btns, text="Save…", command=_save_to_file).grid(row=0, column=1, sticky="ew", padx=2)
+        ttk.Button(btns, text="Pull from Experiment", command=_pull_from_exp).grid(row=0, column=2, sticky="ew", padx=2)
+        ttk.Button(btns, text="Pull from Sample", command=_pull_from_method).grid(row=0, column=3, sticky="ew", padx=2)
+        ttk.Button(btns, text="Apply to Experiment", command=_apply_to_exp).grid(row=0, column=4, sticky="ew", padx=2)
+        ttk.Button(btns, text="Apply to Sample", command=_apply_to_method).grid(row=0, column=5, sticky="ew", padx=2)
+
+        btns2 = ttk.Frame(frm); btns2.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6,0))
+        btns2.grid_columnconfigure(0, weight=1); btns2.grid_columnconfigure(1, weight=1)
+        ttk.Button(btns2, text="Reset to Built-ins", command=_reset_builtins).grid(row=0, column=0, sticky="ew", padx=2)
+        ttk.Button(btns2, text="Validate & Use", command=_validate_and_use).grid(row=0, column=1, sticky="ew", padx=2)
+
+        # Recompute preview on edits
+        def _on_edit(*_):
+            _refresh_effective_preview()
+        edit_box.bind("<<Modified>>", lambda e: (edit_box.edit_modified(False), _on_edit()))
+
+        return frm  # in case you want to pack/place/grid differently from caller
+
+    predict_input_path = None
+    train_csv_path = None
+    linked_exp_json = None
+    # ----- ML params helpers (scoped to ML window) -----
+    import json, os
+    from tkinter import filedialog, messagebox
+    from tkinter.scrolledtext import ScrolledText
+
+    BUILTIN_ML = {
+        "model": {"type": "RandomForest", "n_estimators": 400, "max_depth": None,
+                  "min_samples_split": 2, "min_samples_leaf": 1, "random_state": 42,
+                  "class_weight": "balanced"},
+    }
+
+    def _read_ml_defaults_from_exp(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f: data = json.load(f)
+            return data.get("ml_defaults")
+        except Exception:
+            return None
+
+    def _write_ml_defaults_to_exp(path, params: dict) -> bool:
+        try:
+            data = {}
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f: data = json.load(f)
+            data["ml_defaults"] = params
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False); f.write("\n")
+            return True
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e)); return False
+
+    def _merge_ml(builtins: dict, exp_defaults: dict|None, editor: dict|None) -> dict:
+        out = copy.deepcopy(builtins)
+        for layer in (exp_defaults or {}, editor or {}):
+            for k,v in layer.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k].update(v)
+                else:
+                    out[k] = v
+        return out
+
+    def build_ml_params_panel(parent, get_current_context, on_effective_params_ready):
+        box = ttk.LabelFrame(parent, text="ML Parameters"); box.grid_columnconfigure(0, weight=1); box.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(box, text="Editor (JSON):").grid(row=0, column=0, sticky="w")
+        ttk.Label(box, text="Effective (Builtins ← Exp ← Editor):").grid(row=0, column=1, sticky="w")
+
+        editor = ScrolledText(box, height=12, wrap="none"); editor.grid(row=1, column=0, sticky="nsew", padx=(0,6))
+        effbox = ScrolledText(box, height=12, wrap="none", state="disabled"); effbox.grid(row=1, column=1, sticky="nsew")
+
+
+
+
+        def _set_eff(d):
+            effbox.configure(state="normal"); effbox.delete("1.0","end")
+            effbox.insert("1.0", json.dumps(d or {}, indent=2, ensure_ascii=False))
+            effbox.configure(state="disabled")
+
+        def _get_edit():
+            try:
+                txt = editor.get("1.0","end").strip() or "{}"
+                return json.loads(txt)
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", f"Editor JSON parse error:\n{e}")
+                return None
+
+        def _refresh():
+            ctx = get_current_context() or {}
+            exp_path = ctx.get("exp_json_path")
+            exp_defs = _read_ml_defaults_from_exp(exp_path) if exp_path else None
+            ed = _get_edit() or {}
+            eff = _merge_ml(BUILTIN_ML, exp_defs, ed)
+            _set_eff(eff)
+
+        # initial load (use exp defaults if available, else builtins)
+        ctx0 = get_current_context() or {}
+        init_defs = _read_ml_defaults_from_exp(ctx0.get("exp_json_path")) if ctx0.get("exp_json_path") else None
+        editor.insert("1.0", json.dumps(init_defs or BUILTIN_ML, indent=2, ensure_ascii=False))
+        _refresh()
+
+        # buttons
+        row = 2
+        btns = ttk.Frame(box); btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6,0))
+        for i in range(5): btns.grid_columnconfigure(i, weight=1)
+
+        def _pull_from_exp():
+            ctx = get_current_context() or {}
+            exp_path = ctx.get("exp_json_path")
+            if not exp_path:
+                messagebox.showwarning("No experiment", "No .exp.json linked."); return
+            defs = _read_ml_defaults_from_exp(exp_path)
+            if defs is None:
+                messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
+                return
+            editor.delete("1.0","end"); editor.insert("1.0", json.dumps(defs, indent=2, ensure_ascii=False))
+            _refresh()
+
+        def _apply_to_exp():
+            ctx = get_current_context() or {}
+            exp_path = ctx.get("exp_json_path")
+            if not exp_path:
+                messagebox.showwarning("No experiment", "No .exp.json linked."); return
+            d = _get_edit()
+            if d is None: return
+            if _write_ml_defaults_to_exp(exp_path, d):
+                messagebox.showinfo("Saved", f"Updated ml_defaults in:\n{exp_path}")
+            _refresh()
+
+        def _load_preset():
+            path = filedialog.askopenfilename(title="Load params JSON", filetypes=[("JSON","*.json"), ("All files","*.*")])
+            if not path: return
+            try:
+                with open(path, "r", encoding="utf-8") as f: d = json.load(f)
+            except Exception as e:
+                messagebox.showerror("Load failed", str(e)); return
+            # accept whole-file payloads (exp files) or plain params
+            d2 = d.get("ml_defaults", d)
+            editor.delete("1.0","end"); editor.insert("1.0", json.dumps(d2, indent=2, ensure_ascii=False))
+            _refresh()
+
+        def _save_preset_as():
+            path = filedialog.asksaveasfilename(title="Save params JSON", defaultextension=".json",
+                                                filetypes=[("JSON","*.json"), ("All files","*.*")])
+            if not path: return
+            d = _get_edit()
+            if d is None: return
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(d, f, indent=2, ensure_ascii=False); f.write("\n")
+                messagebox.showinfo("Saved", f"Saved preset to:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e))
+
+        def _validate_use():
+            ctx = get_current_context() or {}
+            exp_path = ctx.get("exp_json_path")
+            exp_defs = _read_ml_defaults_from_exp(exp_path) if exp_path else None
+            d = _get_edit()
+            if d is None: return
+            eff = _merge_ml(BUILTIN_ML, exp_defs, d)
+            on_effective_params_ready(eff)
+            _set_eff(eff)
+            messagebox.showinfo("Ready", "Effective ML parameters are validated and ready to use for training.")
+
+        ttk.Button(btns, text="Load preset…", command=_load_preset).grid(row=0, column=0, sticky="ew", padx=2)
+        ttk.Button(btns, text="Save preset as…", command=_save_preset_as).grid(row=0, column=1, sticky="ew", padx=2)
+        ttk.Button(btns, text="Pull from experiment", command=_pull_from_exp).grid(row=0, column=2, sticky="ew", padx=2)
+        ttk.Button(btns, text="Apply to experiment", command=_apply_to_exp).grid(row=0, column=3, sticky="ew", padx=2)
+        ttk.Button(btns, text="Validate & Use", command=_validate_use).grid(row=0, column=4, sticky="ew", padx=2)
+
+        # live preview on edit
+        editor.bind("<<Modified>>", lambda e: (editor.edit_modified(False), _refresh()))
+        return box
+    #
+
+
     """
     # ---------- NEW: balancing helper ---------- 20250901
     def balance_and_split(
@@ -5346,6 +6237,28 @@ def open_ml_analysis_window():
     enable_thresh_var = tk.BooleanVar(value=True)   # default ON
     thresh_val_var    = tk.DoubleVar(value=0.65)    # τ in [0,1]
     margin_val_var = tk.DoubleVar(value=0.05)  # δ for majority-support check
+    #read current values
+    def _on_change(*_):
+        _write_train_ui_into_state(
+            test_split_var.get(),
+            val_split_var.get(),
+            min_samples_var.get(),
+            use_balance_var.get(),
+            majority_label_var.get(),
+            majority_factor_var.get(),
+            use_stratify_var.get(),
+            n_estimators_var.get(),
+            class_weight_var.get(),
+            real_world_test_var.get(),
+            enable_thresh_var.get(),
+            thresh_val_var.get(),
+            margin_val_var.get(),
+        )
+    for v in (test_split_var, val_split_var, min_samples_var, use_balance_var,
+          majority_label_var, majority_factor_var, use_stratify_var,
+          n_estimators_var, class_weight_var, real_world_test_var,
+          enable_thresh_var, thresh_val_var, margin_val_var):
+        v.trace_add("write", _on_change)
 
     # ---------------------------------------------------------
 
@@ -5382,12 +6295,879 @@ def open_ml_analysis_window():
         origin_info.insert("end", f"Path: {path}")
         origin_info.configure(state="disabled")
 
+    #move back to avoid ref before assignment
+    # ===== Modal: ML Parameters Editor (Step 4) =====
+    def _update_ml_summary():
+        try:
+            m = effective_ml_params.get("model", {})
+            ml_summary_var.set(
+                f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
+                f'max_depth={m.get("max_depth", None)}, '
+                f'min_split={m.get("min_samples_split", 2)}, '
+                f'min_leaf={m.get("min_samples_leaf", 1)}, '
+                f'class_weight={m.get("class_weight", "balanced")}'
+            )
+        except Exception:
+            ml_summary_var.set("Params: (using built-ins)")
+
+    # ---- ML state (analysis window scope) ----
+    BUILTIN_ML = {
+        "model": {"type": "RandomForest", "n_estimators": 400, "max_depth": None,
+                "min_samples_split": 2, "min_samples_leaf": 1, "random_state": 42,
+                "class_weight": "balanced"},
+        "train": {"test_size": 0.25, "val_size": 0.10, "stratify": True,
+                "real_world_test": False,
+                "threshold": {"enabled": False, "tau": 0.5, "margin": 0.02}}
+    }
+
+    effective_ml_params = {}  # what Train uses
+    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
+
+    def _widget_alive(w):
+        try:
+            return (w is not None) and int(w.winfo_exists()) == 1
+        except Exception:
+            return False
+
+    def _get_editor_preview_widgets():
+        ed = _ml_state.get("editor_txt")
+        pv = _ml_state.get("preview_txt")
+        if not _widget_alive(ed):
+            ed = None
+        if not _widget_alive(pv):
+            pv = None
+        return ed, pv
+
+    def _update_ml_summary():
+        m = (effective_ml_params or {}).get("model", {})
+        ml_summary_var.set(
+            f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
+            f'max_depth={m.get("max_depth", None)}, '
+            f'min_split={m.get("min_samples_split", 2)}, '
+            f'min_leaf={m.get("min_samples_leaf", 1)}, '
+            f'class_weight={m.get("class_weight", "balanced")}'
+        )
+    def _read_ml_from_json(path):
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f) or {}
+            ml = d.get("ml") or {}
+            return ml.get("parameters") or ml
+        except Exception:
+            return None
+
+    def _merge_ml(*layers):
+        out = {}
+        for layer in layers:
+            if not layer: continue
+            for k, v in layer.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = {**out[k], **v}
+                else:
+                    out[k] = v
+        return out  
+    # inside open_ml_analysis_window(), before you define open_ml_params_window()
+    def _get_ml_context():
+        # If you later want to thread in better defaults from Prepare Dataset,
+        # fill these two fields there and keep this signature.
+        return {"method_json": None, "exp_json": None}
+
+    # --- Shared state for ML (lives inside ML window scope) ---
+    effective_ml_params = {}                     # final dict trainer will consume
+    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
+
+    # train/test + RF tk variables (shared between settings dialog and the rest)
+    test_split_var       = tk.DoubleVar(value=0.25)
+    val_split_var        = tk.DoubleVar(value=0.10)
+    min_samples_var      = tk.IntVar(value=5)
+    use_balance_var      = tk.BooleanVar(value=True)
+    majority_label_var   = tk.StringVar(value="Non-glycan")
+    majority_factor_var  = tk.IntVar(value=3)
+    use_stratify_var     = tk.BooleanVar(value=True)
+    real_world_test_var  = tk.BooleanVar(value=False)
+    class_weight_var     = tk.BooleanVar(value=True)  # => "balanced" if True else None
+    n_estimators_var     = tk.IntVar(value=400)
+
+    # thresholding
+    enable_thresh_var    = tk.BooleanVar(value=False)
+    thresh_val_var       = tk.DoubleVar(value=0.65)
+    margin_val_var       = tk.DoubleVar(value=0.05)
+
+    # default model + train (used when nothing else provided)
+    BUILTIN_ML = {
+        "model": {
+            "type": "RandomForest",
+            "n_estimators": 400,
+            "max_depth": None,
+            "min_samples_split": 2,
+            "min_samples_leaf": 1,
+            "random_state": 42,
+            "class_weight": "balanced",
+        },
+        "train": {
+            "test_size": 0.25,
+            "val_size": 0.10,
+            "stratify": True,
+            "real_world_test": False,
+            "threshold": {"enabled": False, "tau": 0.50, "margin": 0.02},
+        },
+    }
+
+    def snapshot_train_vars() -> dict:
+        """Live values from the Train/Test dialog & quick RF options."""
+        return {
+            "model": {
+                "type": "RandomForest",
+                "n_estimators": int(n_estimators_var.get()),
+                "max_depth": None,
+                "min_samples_split": 2,
+                "min_samples_leaf": 1,
+                "random_state": 42,
+                "class_weight": ("balanced" if class_weight_var.get() else None),
+            },
+            "train": {
+                "test_size": float(test_split_var.get()),
+                "val_size": float(val_split_var.get()),
+                "stratify": bool(use_stratify_var.get()),
+                "real_world_test": bool(real_world_test_var.get()),
+                "threshold": {
+                    "enabled": bool(enable_thresh_var.get()),
+                    "tau": float(thresh_val_var.get()),
+                    "margin": float(margin_val_var.get()),
+                },
+                # Optional: you can store these for provenance
+                "balance": {
+                    "enabled": bool(use_balance_var.get()),
+                    "majority_label": majority_label_var.get(),
+                    "majority_factor": int(majority_factor_var.get()),
+                },
+            },
+        }
+
+    def _merge_ml(*layers):
+        out = {}
+        for layer in layers:
+            if not layer: 
+                continue
+            for k, v in layer.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = {**out[k], **v}
+                else:
+                    out[k] = v
+        return out
+
+    def _update_ml_summary():
+        m = (effective_ml_params or BUILTIN_ML).get("model", {})
+        ml_summary_var.set(
+            f'Params: RF n_estimators={m.get("n_estimators")}, '
+            f'class_weight={m.get("class_weight")}, '
+            f'test={ (effective_ml_params or BUILTIN_ML).get("train",{}).get("test_size") }, '
+            f'val={ (effective_ml_params or BUILTIN_ML).get("train",{}).get("val_size") }'
+        )
+
+
+    def open_ml_params_window():
+        win = tk.Toplevel(root)
+        win.title("ML Parameters")
+        win.geometry("820x520")
+        win.transient(root)
+        win.grab_set()
+
+        # --- left editor ---
+        left = ttk.LabelFrame(win, text="Editor (JSON)")
+        left.pack(side="left", fill="both", expand=True, padx=(10,5), pady=10)
+        editor_txt = tk.Text(left, wrap="none")
+        editor_txt.pack(fill="both", expand=True, padx=8, pady=8)
+
+        seed = _ensure_ml_state().get("editor") or BUILTIN_ML
+        editor_txt.insert("1.0", json.dumps(seed, indent=2))
+
+        # seed the editor with current effective OR builtins
+        #seed = effective_ml_params if effective_ml_params else BUILTIN_ML
+        #editor_txt.insert("1.0", json.dumps(seed, indent=2))
+
+        # --- right preview (effective after merge) ---
+        right = ttk.LabelFrame(win, text="Effective (Builtins ← Files ← Editor)")
+        right.pack(side="left", fill="both", expand=True, padx=(5,10), pady=10)
+        preview_txt = tk.Text(right, wrap="none", state="disabled")
+        preview_txt.pack(fill="both", expand=True, padx=8, pady=8)
+        debug_var = tk.StringVar(value="")
+        ttk.Label(right, textvariable=debug_var).pack(anchor="w", padx=8, pady=(0,6))
+
+        #_ml_state["widgets"]["editor_txt"] = editor_txt   # left textbox
+        #_ml_state["widgets"]["preview_txt"] = preview_txt # right textbox
+        #_refresh_json_textboxes()
+
+        # after building the two Text widgets:
+        #_ml_state["editor_txt"] = editor_txt    # <--- your left text widget
+        #_ml_state["preview_txt"] = preview_txt  # <--- your right text widget
+
+        st = _ensure_ml_state()
+        st["editor_txt"] = editor_txt
+        st["preview_txt"] = preview_txt
+        _emit_ml_state_changed_ui_refresh()
+
+        def _on_params_close():
+            # Drop dead widget refs so future updates become no-ops
+            _ml_state["editor_txt"]  = None
+            _ml_state["preview_txt"] = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_params_close)
+
+        #_write_editor_from_state()
+        # seed these panes from the current state when the window opens
+
+        # --- local helpers that use the widgets above ---
+        def _get_editor_json_or_empty():
+            try:
+                return json.loads(editor_txt.get("1.0", "end").strip() or "{}")
+            except Exception:
+                return {}
+
+        def _read_ml_from_json(path):
+            if not path or not os.path.exists(path): 
+                return None
+            try:
+                d = json.load(open(path, "r", encoding="utf-8")) or {}
+                ml = d.get("ml") or {}
+                return ml.get("parameters") or ml
+            except Exception:
+                return None
+
+        def _get_ml_context():
+            # If you already wrote a context getter elsewhere, you can call it here.
+            return {"exp_json": None, "method_json": None}
+
+        def _refresh_effective():
+            # ← the key: include snapshot_train_vars() in the merge
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            editor    = _get_editor_json_or_empty()
+            eff = _merge_ml(BUILTIN_ML,exp_defs,meth_defs,editor,snapshot_train_vars())               # editor first…snapshot_train_vars() # …then UI snapshot overrides
+            #eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, snapshot_train_vars(), editor)
+            #test, remove if works
+            try:
+                ts = float(test_split_var.get())
+                assert abs((eff.get("train",{}).get("test_size", -1)) - ts) < 1e-9, "merge precedence wrong"
+            except Exception:
+                pass
+            #
+            preview_txt.config(state="normal")
+            preview_txt.delete("1.0", "end")
+            preview_txt.insert("1.0", json.dumps(eff, indent=2))
+            preview_txt.config(state="disabled")
+            try:
+                debug_var.set(
+                    f"live: test={test_split_var.get():.2f}, "
+                    f"val={val_split_var.get():.2f}, trees={n_estimators_var.get()}"
+                )
+            except Exception:
+                pass
+
+        def _load_from_method():
+            # prefer current method from context; otherwise ask
+            path = _get_ml_context().get("method_json") or filedialog.askopenfilename(
+                title="Choose method JSON", filetypes=[("JSON","*.json")]
+            )
+            if not path: return
+            defs = _read_ml_from_json(path)
+            if not defs:
+                messagebox.showwarning("ML Parameters", "No ML block found in that JSON.")
+                return
+            editor_txt.delete("1.0", "end")
+            editor_txt.insert("1.0", json.dumps(defs, indent=2))
+            _refresh_effective()
+
+        def _validate_and_use():
+            nonlocal effective_ml_params
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            editor    = _get_editor_json_or_empty()
+            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, snapshot_train_vars(), editor)
+            effective_ml_params = eff
+            _ensure_ml_state()["editor"] = editor        # persist what’s in the left pane
+            _ensure_ml_state()["effective_params"] = eff # optional: keep a copy
+            _update_ml_summary()
+            win.destroy()
+        """
+        def _validate_and_use():
+            nonlocal effective_ml_params
+            try:
+                ed = json.loads(editor_txt.get("1.0", "end"))
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", str(e))
+                return
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            effective_ml_params = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
+            _update_ml_summary()
+            _refresh_preview()
+            messagebox.showinfo("Ready", "Effective ML parameters set for training.")
+        """
+        def _save_effective_to_method():
+            # pick current method or let user create one
+            path = _get_ml_context().get("method_json") or filedialog.asksaveasfilename(
+                title="Save or choose method JSON", defaultextension=".json",
+                filetypes=[("JSON","*.json")]
+            )
+            if not path: return
+
+            # ensure effective is up-to-date with what’s in the editor
+            try:
+                ed = json.loads(editor_txt.get("1.0", "end"))
+            except Exception:
+                ed = {}
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            editor = _get_editor_json_or_empty()
+            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, editor, snapshot_train_vars())
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+            # write back to method JSON
+            data = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        txt = f.read().strip()
+                        data = json.loads(txt) if txt else {}
+                except Exception:
+                    data = {}
+            data.setdefault("ml", {})
+            data["ml"]["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            #data["ml"]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            data["ml"]["parameters"] = eff
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # reflect as current effective
+            nonlocal effective_ml_params
+            effective_ml_params = eff
+            _update_ml_summary()
+            _refresh_effective()
+            messagebox.showinfo("Saved", f"ML parameters written to:\n{os.path.basename(path)}")
+
+        def _on_params_close():
+            st = _ensure_ml_state()
+            st["editor_txt"]  = None
+            st["preview_txt"] = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_params_close)
+        # bind Close button to _on_close
+        # live preview on typing
+        def _on_key(_evt=None): _refresh_effective()
+        editor_txt.bind("<KeyRelease>", _on_key)
+        # --- footer buttons ---
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=10, pady=(0,10))
+
+        
+        ttk.Button(btns, text="Load from method…",
+                command=_load_from_method).pack(side="left", padx=4)
+
+        ttk.Button(btns, text="Validate & Use",
+                command=_validate_and_use).pack(side="left", padx=4)
+
+        ttk.Button(btns, text="Save to method…",
+                command=_save_effective_to_method).pack(side="left", padx=12)
+
+        ttk.Button(btns, text="Close",
+                command=_on_params_close).pack(side="right", padx=4)
+        # live preview while typing in the left editor
+        editor_txt.bind("<KeyRelease>", lambda _=None: _refresh_effective())
+
+        # seed the right pane immediately on window open
+        _refresh_effective()
+        """
+        # footer buttons (all local to the modal)
+        btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=(0,10))
+        ttk.Button(btns, text="Load from method…", command=_load_from_method).pack(side="left", padx=4)
+        ttk.Button(btns, text="Validate & Use",    command=_validate_and_use).pack(side="left", padx=4)
+        # live preview
+        editor_txt.bind("<KeyRelease>", lambda _=None: _refresh_effective())
+        _refresh_effective()
+        ttk.Button(btns, text="Save to method…",   command=_save_effective_to_method).pack(side="left", padx=12)
+        ttk.Button(btns, text="Close",             command=win.destroy).pack(side="right", padx=4)
+
+        _refresh_effective()
+        """
+        # 20250919 new version of ML exp json
+        # ----- defaults you already use -----
+        """
+        BUILTIN_ML = {
+            "model": {"type": "RandomForest", "n_estimators": 400, "max_depth": None,
+                    "min_samples_split": 2, "min_samples_leaf": 1, "random_state": 42,
+                    "class_weight": "balanced"},
+            "train": {"test_size": 0.25, "val_size": 0.10, "stratify": True,
+                    "real_world_test": False,
+                    "threshold": {"enabled": False, "tau": 0.5, "margin": 0.02}}
+        }
+
+        effective_ml_params = {}
+        ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
+
+        def _update_ml_summary():
+            m = (effective_ml_params or {}).get("model", {})
+            ml_summary_var.set(
+                f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
+                f'max_depth={m.get("max_depth", None)}, '
+                f'min_split={m.get("min_samples_split", 2)}, '
+                f'min_leaf={m.get("min_samples_leaf", 1)}, '
+                f'class_weight={m.get("class_weight", "balanced")}'
+            )
+
+        def _read_ml_from_json(path):
+            if not path or not os.path.exists(path):
+                return None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f) or {}
+                ml = d.get("ml") or {}
+                return ml.get("parameters") or ml  # accept legacy
+            except Exception:
+                return None
+
+        def _merge_ml(*layers):
+            out = {}
+            for layer in layers:
+                if not layer: 
+                    continue
+                for k, v in layer.items():
+                    if isinstance(v, dict) and isinstance(out.get(k), dict):
+                        out[k] = {**out[k], **v}
+                    else:
+                        out[k] = v
+            return out
+        """
+        def _ensure_effective_from_editor_if_empty():
+            """If user forgot Validate, synthesize effective from current editor + jsons."""
+            nonlocal effective_ml_params
+            if effective_ml_params:
+                return
+            ctx = _get_ml_context()  # you already have this getter
+            exp_defs   = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs  = _read_ml_from_json(ctx.get("method_json"))
+            editor_now = _get_editor_json_or_empty()  # defined inside the ML modal; fallback to {}
+            effective_ml_params = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, editor_now)
+            _update_ml_summary()    
+
+        # --- editor widgets you already have ---
+        # editor_txt = tk.Text(...); preview_txt = tk.Text(...)
+
+        def _get_editor_json_or_empty():
+            try:
+                return json.loads(editor_txt.get("1.0", "end").strip() or "{}")
+            except Exception:
+                return {}
+
+        def _refresh_effective_preview():
+            _refresh_effective()  # keep one code path
+            """
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            ed        = _get_editor_json_or_empty()
+            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
+            preview_txt.config(state="normal")
+            preview_txt.delete("1.0", "end")
+            preview_txt.insert("1.0", json.dumps(eff, indent=2))
+            preview_txt.config(state="disabled")
+            """
+
+        def _load_from_method():
+            # prefer currently-linked method; else let user pick
+            p = _get_ml_context().get("method_json") or filedialog.askopenfilename(
+                title="Choose method JSON", filetypes=[("JSON","*.json")])
+            if not p:
+                return
+            defs = _read_ml_from_json(p)
+            if not defs:
+                messagebox.showwarning("ML Parameters", "No ML block found in that JSON.")
+                return
+            editor_txt.delete("1.0", "end")
+            editor_txt.insert("1.0", json.dumps(defs, indent=2))
+            _refresh_effective_preview()
+
+        def _validate_and_use():
+            nonlocal effective_ml_params
+            try:
+                ed = json.loads(editor_txt.get("1.0", "end"))
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", str(e))
+                return
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            effective_ml_params = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
+            _update_ml_summary()
+            _refresh_effective_preview()
+            messagebox.showinfo("Ready", "Effective ML parameters set for training.")
+
+        def _save_effective_to_method():
+            ctx = _get_ml_context()
+            path = ctx.get("method_json")
+            if not path:
+                path = filedialog.asksaveasfilename(
+                    title="Save or choose method JSON",
+                    defaultextension=".json",
+                    filetypes=[("JSON","*.json")])
+            if not path:
+                return
+            # ensure we have something to save
+            _ensure_effective_from_editor_if_empty()
+            data = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        txt = f.read().strip()
+                        data = json.loads(txt) if txt else {}
+                except Exception:
+                    data = {}
+            data.setdefault("ml", {})
+            data["ml"]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            data["ml"]["parameters"] = effective_ml_params
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            messagebox.showinfo("Saved", f"ML parameters written to:\n{os.path.basename(path)}")
+
+
+
+
+    """      
+    def open_ml_params_window():
+        win = tk.Toplevel(root)
+        win.title("ML Parameters")
+        win.geometry("820x520")
+        win.transient(root)
+        win.grab_set()
+
+        # --- left editor ---
+        left = ttk.LabelFrame(win, text="Editor (JSON)")
+        left.pack(side="left", fill="both", expand=True, padx=(10,5), pady=10)
+        editor_txt = tk.Text(left, wrap="none")
+        editor_txt.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # seed the editor with current effective OR builtins
+        seed = effective_ml_params if effective_ml_params else BUILTIN_ML
+        editor_txt.insert("1.0", json.dumps(seed, indent=2))
+
+        # --- right preview (effective after merge) ---
+        right = ttk.LabelFrame(win, text="Effective (Builtins ← Files ← Editor)")
+        right.pack(side="left", fill="both", expand=True, padx=(5,10), pady=10)
+        preview_txt = tk.Text(right, wrap="none", state="disabled")
+        preview_txt.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # --- local helpers that use the widgets above ---
+        def _get_editor_json_or_empty():
+            try:
+                return json.loads(editor_txt.get("1.0", "end").strip() or "{}")
+            except Exception:
+                return {}
+
+        def _refresh_preview():
+            ctx = _get_ml_context()  # you already have this getter in the ML window
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            ed        = _get_editor_json_or_empty()
+            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
+            preview_txt.config(state="normal")
+            preview_txt.delete("1.0", "end")
+            preview_txt.insert("1.0", json.dumps(eff, indent=2))
+            preview_txt.config(state="disabled")
+
+        def _load_from_method():
+            # prefer current method from context; otherwise ask
+            path = _get_ml_context().get("method_json") or filedialog.askopenfilename(
+                title="Choose method JSON", filetypes=[("JSON","*.json")]
+            )
+            if not path: return
+            defs = _read_ml_from_json(path)
+            if not defs:
+                messagebox.showwarning("ML Parameters", "No ML block found in that JSON.")
+                return
+            editor_txt.delete("1.0", "end")
+            editor_txt.insert("1.0", json.dumps(defs, indent=2))
+            _refresh_preview()
+
+        def _validate_and_use():
+            nonlocal effective_ml_params
+            try:
+                ed = json.loads(editor_txt.get("1.0", "end"))
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", str(e))
+                return
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            effective_ml_params = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
+            _update_ml_summary()
+            _refresh_preview()
+            messagebox.showinfo("Ready", "Effective ML parameters set for training.")
+
+        def _save_effective_to_method():
+            # pick current method or let user create one
+            path = _get_ml_context().get("method_json") or filedialog.asksaveasfilename(
+                title="Save or choose method JSON", defaultextension=".json",
+                filetypes=[("JSON","*.json")]
+            )
+            if not path: return
+
+            # ensure effective is up-to-date with what’s in the editor
+            try:
+                ed = json.loads(editor_txt.get("1.0", "end"))
+            except Exception:
+                ed = {}
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
+
+            # write back to method JSON
+            data = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        txt = f.read().strip()
+                        data = json.loads(txt) if txt else {}
+                except Exception:
+                    data = {}
+            data.setdefault("ml", {})
+            data["ml"]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            data["ml"]["parameters"] = eff
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # reflect as current effective
+            nonlocal effective_ml_params
+            effective_ml_params = eff
+            _update_ml_summary()
+            _refresh_preview()
+            messagebox.showinfo("Saved", f"ML parameters written to:\n{os.path.basename(path)}")
+
+        # live preview on typing
+        def _on_key(_evt=None): _refresh_preview()
+        editor_txt.bind("<KeyRelease>", _on_key)
+
+        # footer buttons (all local to the modal)
+        btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=(0,10))
+        ttk.Button(btns, text="Load from method…", command=_load_from_method).pack(side="left", padx=4)
+        ttk.Button(btns, text="Validate & Use",    command=_validate_and_use).pack(side="left", padx=4)
+        ttk.Button(btns, text="Save to method…",   command=_save_effective_to_method).pack(side="left", padx=12)
+        ttk.Button(btns, text="Close",             command=win.destroy).pack(side="right", padx=4)
+
+        _refresh_preview()
+    """
+    """
+    def open_ml_params_window():
+        import json, os
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
+        from tkinter.scrolledtext import ScrolledText
+
+        # small helpers
+        def _read_ml_defaults_from_exp(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f: data = json.load(f)
+                return data.get("ml_defaults")
+            except Exception:
+                return None
+
+        def _write_ml_defaults_to_exp(path, params: dict) -> bool:
+            try:
+                data = {}
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f: data = json.load(f)
+                data["ml_defaults"] = params
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False); f.write("\n")
+                return True
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e)); return False
+
+        def _merge_ml(builtins: dict, exp_defaults: dict|None, editor: dict|None) -> dict:
+            import copy
+            out = copy.deepcopy(builtins)
+            for layer in (exp_defaults or {}, editor or {}):
+                for k, v in layer.items():
+                    if isinstance(v, dict) and isinstance(out.get(k), dict):
+                        out[k].update(v)
+                    else:
+                        out[k] = v
+            return out
+
+        BUILTIN_ML = {
+            "model": {
+                "type": "RandomForest",
+                "n_estimators": 400,
+                "max_depth": None,
+                "min_samples_split": 2,
+                "min_samples_leaf": 1,
+                "random_state": 42,
+                "class_weight": "balanced",
+            }
+        }
+
+        win = tk.Toplevel(root)        # or the ML window object
+        win.title("ML Parameters")
+        win.grab_set()
+        win.geometry("860x520")
+
+        # layout root (use grid only inside this modal)
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+
+        # header row
+        hdr = ttk.Frame(win); hdr.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,6))
+        hdr.grid_columnconfigure(1, weight=1)
+        ttk.Label(hdr, text="Experiment file:").grid(row=0, column=0, sticky="w")
+        ttk.Label(hdr, text=(linked_exp_json or "— (none linked yet)")).grid(row=0, column=1, sticky="w")
+
+        # editor area
+        body = ttk.Frame(win); body.grid(row=1, column=0, sticky="nsew", padx=10)
+        body.grid_columnconfigure(0, weight=1); body.grid_columnconfigure(1, weight=1)
+        ttk.Label(body, text="Editor (JSON):").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="Effective (Builtins ← Exp ← Editor):").grid(row=0, column=1, sticky="w")
+        editor = ScrolledText(body, height=18, wrap="none"); editor.grid(row=1, column=0, sticky="nsew", padx=(0,6))
+        preview = ScrolledText(body, height=18, wrap="none", state="disabled"); preview.grid(row=1, column=1, sticky="nsew")
+
+        def _set_preview(d: dict):
+            preview.configure(state="normal"); preview.delete("1.0","end")
+            import json as _json
+            preview.insert("1.0", _json.dumps(d or {}, indent=2, ensure_ascii=False))
+            preview.configure(state="disabled")
+
+        def _get_edit_dict():
+            import json as _json
+            try:
+                txt = editor.get("1.0","end").strip() or "{}"
+                return _json.loads(txt)
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", f"{e}")
+                return None
+
+        def _refresh_preview():
+            defs = _read_ml_defaults_from_exp(linked_exp_json) if linked_exp_json else None
+            ed = _get_edit_dict() or {}
+            eff = _merge_ml(BUILTIN_ML, defs, ed)
+            _set_preview(eff)
+
+        # init editor from exp.json if available, else builtins, else current effective
+        init = None
+        if linked_exp_json:
+            init = _read_ml_defaults_from_exp(linked_exp_json)
+        if init is None:
+            init = effective_ml_params or BUILTIN_ML
+        editor.insert("1.0", json.dumps(init, indent=2, ensure_ascii=False))
+        _refresh_preview()
+
+        # buttons row
+        btns = ttk.Frame(win); btns.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+        for i in range(6): btns.grid_columnconfigure(i, weight=1)
+
+        def _load_preset():
+            path = filedialog.askopenfilename(title="Load params JSON",
+                                              filetypes=[("JSON","*.json"), ("All files","*.*")])
+            if not path: return
+            import json as _json
+            try:
+                with open(path, "r", encoding="utf-8") as f: d = _json.load(f)
+            except Exception as e:
+                messagebox.showerror("Load failed", str(e)); return
+            editor.delete("1.0","end")
+            # If file is an exp.json, prefer its ml_defaults; else use whole dict
+            editor.insert("1.0", _json.dumps(d.get("ml_defaults", d), indent=2, ensure_ascii=False))
+            _refresh_preview()
+
+        def _save_preset_as():
+            path = filedialog.asksaveasfilename(title="Save params JSON", defaultextension=".json",
+                                                filetypes=[("JSON","*.json"), ("All files","*.*")])
+            if not path: return
+            d = _get_edit_dict()
+            if d is None: return
+            import json as _json
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    _json.dump(d, f, indent=2, ensure_ascii=False); f.write("\n")
+                messagebox.showinfo("Saved", f"Saved preset to:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e))
+
+        def _pull_from_exp():
+            if not linked_exp_json:
+                messagebox.showwarning("No experiment", "No .exp.json linked."); return
+            defs = _read_ml_defaults_from_exp(linked_exp_json)
+            if defs is None:
+                messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
+                return
+            editor.delete("1.0","end")
+            editor.insert("1.0", json.dumps(defs, indent=2, ensure_ascii=False))
+            _refresh_preview()
+
+        def _apply_to_exp():
+            if not linked_exp_json:
+                messagebox.showwarning("No experiment", "No .exp.json linked."); return
+            d = _get_edit_dict()
+            if d is None: return
+            if _write_ml_defaults_to_exp(linked_exp_json, d):
+                messagebox.showinfo("Saved", f"Updated ml_defaults in:\n{linked_exp_json}")
+            _refresh_preview()
+
+        def _validate_and_use():
+            defs = _read_ml_defaults_from_exp(linked_exp_json) if linked_exp_json else None
+            d = _get_edit_dict()
+            if d is None: return
+            eff = _merge_ml(BUILTIN_ML, defs, d)
+            # hand back to Train tab
+            nonlocal effective_ml_params
+            effective_ml_params = eff
+            # update summary label in the Train tab
+            _update_ml_summary()
+            messagebox.showinfo("Ready", "Effective ML parameters are set for training.")
+            win.destroy()
+
+        ttk.Button(btns, text="Load preset…", command=_load_preset).grid(row=0, column=0, sticky="ew", padx=2)
+        ttk.Button(btns, text="Save preset as…", command=_save_preset_as).grid(row=0, column=1, sticky="ew", padx=2)
+        ttk.Button(btns, text="Pull from experiment", command=_pull_from_exp).grid(row=0, column=2, sticky="ew", padx=2)
+        ttk.Button(btns, text="Apply to experiment", command=_apply_to_exp).grid(row=0, column=3, sticky="ew", padx=2)
+        ttk.Button(btns, text="Validate & Use", command=_validate_and_use).grid(row=0, column=4, sticky="ew", padx=2)
+
+        # live preview on edit
+        editor.bind("<<Modified>>", lambda e: (editor.edit_modified(False), _refresh_preview()))
+        """
+    """
+    """
+        # ===== Step 4 (existing controls) =====
+    # ... your Step 4 labels/entries ...
+
+    # summary (read-only) shows what will be used if set
+    #ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
+    #def _update_ml_summary():
+    #    try:
+    #        m = effective_ml_params.get("model", {})
+    ###        ml_summary_var.set(
+    #            f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
+    #            f'max_depth={m.get("max_depth", None)}, '
+    #            f'min_split={m.get("min_samples_split", 2)}, '
+    #            f'min_leaf={m.get("min_samples_leaf", 1)}, '
+    #            f'class_weight={m.get("class_weight", "balanced")}'
+    #        )
+    #    except Exception:
+    #        ml_summary_var.set("Params: (using built-ins)")    
+
+
     # ---------- UPDATED: parameters window ----------
     def open_train_settings():
         settings = tk.Toplevel()
         settings.title("Train/Test Parameters")
         settings.geometry("360x360")
-
+        _ensure_ml_state()
         # splits
         tk.Label(settings, text="Test split").pack(pady=(10,0))
         tk.Scale(settings, from_=0.05, to=0.5, resolution=0.05, orient="horizontal",
@@ -5404,6 +7184,112 @@ def open_ml_analysis_window():
 
         split_pct_lbl = tk.Label(settings, text="", font=("TkDefaultFont", 9, "bold"))
         split_pct_lbl.pack(pady=(2,6))
+
+        def _commit_and_close():
+            # Generate a fresh effective preview by merging BUILTIN + live train vars
+            # (Editor JSON / files will still be merged inside the ML-params window)
+            nonlocal effective_ml_params
+            eff_local = _merge_ml(BUILTIN_ML, snapshot_train_vars())
+            # Don’t overwrite global effective here; we only show a summary hint.
+            # The real commit is done by ML Parameters → “Validate & Use”.
+            _update_ml_summary()
+            settings.destroy()
+
+        def _pull_state_into_vars():
+            s = _ml_state["current"]
+            t = s.get("train", {})
+            b = s.get("balance", {})
+            m = s.get("model", {})
+
+            # sliders/spinboxes/checks/entries you already have:
+            test_split_var.set(float(t.get("test_size", 0.25)))
+            val_split_var.set(float(t.get("val_size", 0.10)))
+            use_stratify_var.set(1 if t.get("stratify", True) else 0)
+            real_world_test_var.set(1 if t.get("real_world_test", False) else 0)
+
+            thr = t.get("threshold", {})
+            enable_thresh_var.set(1 if thr.get("enabled", False) else 0)
+            thresh_val_var.set(float(thr.get("tau", 0.65)))
+            margin_val_var.set(float(thr.get("margin", 0.05)))
+
+            min_samples_var.set(int(s.get("min_samples_per_class", 5)))
+
+            use_balance_var.set(1 if b.get("enabled", True) else 0)
+            majority_label_var.set(b.get("majority_label", "Non-glycan"))
+            majority_factor_var.set(int(b.get("majority_factor", 3)))
+
+            n_estimators_var.set(int(m.get("n_estimators", 400)))
+            class_weight_var.set(1 if (m.get("class_weight") == "balanced") else 0)
+
+        def _push_vars_into_state(*_):
+            _write_train_ui_into_state(
+                test_size       = float(test_split_var.get()),
+                val_size        = float(val_split_var.get()),
+                min_per_class   = int(min_samples_var.get()),
+                use_balance     = bool(use_balance_var.get()),
+                majority_label  = str(majority_label_var.get()),
+                majority_factor = int(majority_factor_var.get()),
+                stratify        = bool(use_stratify_var.get()),
+                n_estimators    = int(n_estimators_var.get()),
+                use_class_weight= bool(class_weight_var.get()),
+                real_world_test = bool(real_world_test_var.get()),
+                thr_enable      = bool(enable_thresh_var.get()),
+                thr_tau         = float(thresh_val_var.get()),
+                thr_margin      = float(margin_val_var.get()),
+            )
+            _emit_ml_state_changed_ui_refresh()  # safe no-op if editor window isn’t open
+        """
+        def _push_vars_into_state(*_):
+            # read all Tk variables and overwrite _ml_state["current"]
+            s = copy.deepcopy(_ml_state["current"])
+            t = s.setdefault("train", {})
+            b = s.setdefault("balance", {})
+            m = s.setdefault("model", {})
+
+            t["test_size"] = float(test_split_var.get())
+            t["val_size"] = float(val_split_var.get())
+            t["stratify"] = bool(use_stratify_var.get())
+            t["real_world_test"] = bool(real_world_test_var.get())
+            t["threshold"] = {
+                "enabled": bool(enable_thresh_var.get()),
+                "tau": float(thresh_val_var.get()),
+                "margin": float(margin_val_var.get()),
+            }
+
+            s["min_samples_per_class"] = int(min_samples_var.get())
+
+            b["enabled"] = bool(use_balance_var.get())
+            b["majority_label"] = majority_label_var.get()
+            b["majority_factor"] = int(majority_factor_var.get())
+
+            m["n_estimators"] = int(n_estimators_var.get())
+            m["class_weight"] = "balanced" if bool(class_weight_var.get()) else None
+
+            _ml_state["current"] = s
+            
+            _write_editor_from_state()  # updates the two text panes immediately
+        """
+        # 1) seed the controls when the dialog opens
+        _pull_state_into_vars()
+
+        # 2) wire all variables for live updates
+        for var in (
+            test_split_var, val_split_var, use_stratify_var, real_world_test_var,
+            enable_thresh_var, thresh_val_var, margin_val_var,
+            min_samples_var, use_balance_var, majority_label_var, majority_factor_var,
+            n_estimators_var, class_weight_var,
+        ):
+            var.trace_add("write", _push_vars_into_state)
+
+        # 3) also bind Scales so dragging updates continuously
+        def _scale_cb(_val):
+            _push_vars_into_state()
+
+        for sc in (test_split_var, val_split_var):  # use your actual Scale objects
+            try:
+                sc.configure(command=_scale_cb)
+            except Exception:
+                pass
 
         def _update_split_labels(*_):
             ts = float(test_split_var.get())
@@ -5474,7 +7360,61 @@ def open_ml_analysis_window():
         tk.Spinbox(row_margin, from_=0.00, to=0.20, increment=0.01,
                 textvariable=margin_val_var, width=6).pack(side="left", padx=6)
 
-        tk.Button(settings, text="Close", command=settings.destroy).pack(pady=12)
+        # ... all your Step 4 widgets ...
+        tk.Button(settings, text="Edit ML Parameters…",
+                command=open_ml_params_window).pack(pady=(8, 0))
+        
+        tk.Button(settings, text="Apply to ML Param[if not reflect]", command=_push_vars_into_state).pack(pady=(8,0))
+
+        # (a) define tk variables: test_split_var, val_split_var, ... margin_val_var
+        # (b) define _on_change(...) that writes the current widget values into _ml_state["editor"]
+        # (c) build all the widgets that bind to those variables
+        # ---- PASTE THE SEED BLOCK RIGHT HERE ----
+        # (d) Close button, settings.mainloop/deiconify/return
+        # ---- seed UI from current editor state ----
+        ed = _ml_state.get("editor", {})
+        tv = ed.get("train", {}) or {}
+        bv = ed.get("balance", {}) or {}
+        mv = ed.get("model", {}) or {}
+
+        test_split_var.set(tv.get("test_size", 0.25))
+        val_split_var.set(tv.get("val_size", 0.10))
+        min_samples_var.set(tv.get("min_samples_per_class", 5))
+
+        use_balance_var.set(bv.get("enabled", True))
+        majority_label_var.set(bv.get("majority_label", "Non-glycan"))
+        majority_factor_var.set(bv.get("majority_factor", 3))
+
+        use_stratify_var.set(tv.get("stratify", True))
+
+        n_estimators_var.set(mv.get("n_estimators", 400))
+        class_weight_var.set((mv.get("class_weight") or "balanced") == "balanced")
+
+        real_world_test_var.set(tv.get("real_world_test", False))
+
+        th = tv.get("threshold", {}) or {}
+        enable_thresh_var.set(th.get("enabled", False))
+        thresh_val_var.set(th.get("tau", 0.65))
+        margin_val_var.set(th.get("margin", 0.05))
+
+        # push once so editors / preview reflect these values
+        _on_change()
+
+
+        tk.Button(settings, text="Close", command=settings.destroy).pack(pady=8)
+
+    #extra train settings save/load
+    #row4 = train_tab.grid_size()[1]
+    #step4_container = ttk.Frame(train_tab)
+    ##step4_container.grid(row=row4, column=0, columnspan=3,
+    #                    sticky="ew", padx=10, pady=(6, 0))
+
+    #step4_bar = tk.Frame(step4_container); step4_bar.pack(fill="x")
+    #tk.Button(step4_bar, text="Train/Test Parameters…",
+    #        command=open_train_settings).pack(side="left")
+    #tk.Button(step4_bar, text="Edit ML Parameters…",
+    #        command=open_ml_params_window).pack(side="left", padx=6)
+    #tk.Label(step4_bar, textvariable=ml_summary_var).pack(side="left", padx=12)
     # -----------------------------------------------
 
     def train_model():
@@ -5489,6 +7429,20 @@ def open_ml_analysis_window():
             messagebox.showerror("Missing Dependencies",
                                  "Please install scikit-learn and joblib.")
             return
+
+        if not effective_ml_params:
+            ctx = _get_ml_context()
+            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
+            meth_defs = _read_ml_from_json(ctx.get("method_json"))
+            effective = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, {})
+        else:
+            effective = effective_ml_params
+        cfg = effective_ml_params or _merge_ml(BUILTIN_ML, snapshot_train_vars())
+        rf = cfg.get("model", {})
+        tr = cfg.get("train", {})
+
+        #rf = effective.get("model", {})
+        #train_cfg = effective.get("train", {})
 
         if not train_csv_path:
             messagebox.showwarning("No File", "Please select a training CSV first.")
@@ -5555,14 +7509,45 @@ def open_ml_analysis_window():
         y_val_enc   = le.transform(y_val)
         y_test_enc  = le.transform(y_test)
 
-        # model
+
+        # model (consume panel params if available; otherwise fallback to current UI/defaults)
+        rf = effective_ml_params.get("model", {}) if effective_ml_params else {}
         model = RandomForestClassifier(
-            n_estimators=int(n_estimators_var.get()),
-            class_weight=("balanced" if class_weight_var.get() else None),
-            max_features="sqrt",
-            random_state=42,
-            n_jobs=-1
+            n_estimators      = int(rf.get("n_estimators", 400)),
+            max_depth         = rf.get("max_depth", None),
+            min_samples_split = int(rf.get("min_samples_split", 2)),
+            min_samples_leaf  = int(rf.get("min_samples_leaf", 1)),
+            random_state      = int(rf.get("random_state", 42)),
+            class_weight      = rf.get("class_weight", ("balanced" if bool(class_weight_var.get()) else None)),
+            n_jobs            = -1,
         )
+        # rf_cfg = {}
+        #try:
+        #    if effective_ml_params:
+        #        if effective_ml_params.get("model", {}).get("type", "RandomForest") == "RandomForest":
+        #            rf_cfg = effective_ml_params.get("model", {})
+        #except Exception:
+        #    rf_cfg = {}
+
+        #model = RandomForestClassifier(
+        #    n_estimators = int(rf_cfg.get("n_estimators", 400)),
+        #    max_depth    = rf_cfg.get("max_depth", None),
+        #    min_samples_split = int(rf_cfg.get("min_samples_split", 2)),
+        #    min_samples_leaf  = int(rf_cfg.get("min_samples_leaf", 1)),
+        #    random_state = int(rf_cfg.get("random_state", 42)),
+        #    class_weight = rf_cfg.get("class_weight", ("balanced" if bool(class_weight_var.get()) else None)),
+        #    n_jobs = -1
+        #)
+
+        # model
+        #model = RandomForestClassifier(
+        #    n_estimators=int(n_estimators_var.get()),
+        #    class_weight=("balanced" if class_weight_var.get() else None),
+        #    max_features="sqrt",
+        #    random_state=42,
+        #    n_jobs=-1
+        #)
+
         #model = RandomForestClassifier(n_estimators=100, random_state=42)
         model.fit(X_train, y_train_enc)
         from sklearn.metrics import classification_report, confusion_matrix
@@ -6441,6 +8426,92 @@ def open_ml_analysis_window():
         #  (B) json (method.json) → use external ion list from the method (PL route)
         changed = False
         samples = J.get("samples", {}) if isinstance(J, dict) else {}
+
+        #20250917 ver
+        # inside create_unlabeled_dataset(), in the loop over samples:
+        for sample_id, sample_info in samples.items():
+            try:
+                raw_csv = sample_info.get("csv")
+                annotation_excel = sample_info.get("excel")
+                method_json = sample_info.get("json") or sample_info.get("method_json")
+                out_path = None
+
+                if annotation_excel and raw_csv:
+                    # (A) legacy manual: Excel ion sheet
+                    ion_list = read_fragment_masses_any(annotation_excel, sheet_name="ionlist")
+                    feature_df = extract_ion_intensities(raw_csv, ion_list, ppm=float(ppm_value))
+                    out_path = Path(raw_csv).with_name(Path(raw_csv).stem + f"_unlabeled_ppm{ppm_value}.csv")
+
+                elif method_json and os.path.exists(method_json):
+                    # (B) PL route: method.json
+                    out_path = create_unlabeled_from_method(method_json, default_ppm=ppm_value)
+
+                elif sample_info.get("ionlist_path") and raw_csv:
+                    # (C) NEW: converted CSV + external CSV ion list (no Excel/method)
+                    ion_path = to_native_path(sample_info["ionlist_path"])
+                    if not ion_path.exists():
+                        # ask once if missing, then persist back
+                        picked = _pick_file_cli_or_gui("Select ion list (CSV/XLSX)",
+                                                    (("CSV","*.csv"),("Excel","*.xlsx;*.xls"),("All","*.*")))
+                        if not picked:
+                            raise FileNotFoundError("ionlist_path not found and no replacement provided.")
+                        ion_path = to_native_path(picked)
+                        sample_info["ionlist_path"] = to_posix_str(ion_path)
+
+                    raw_csv_p = to_native_path(raw_csv)
+                    if not raw_csv_p.exists():
+                        picked = _pick_file_cli_or_gui("Select the *converted* CSV (ms2_*.csv)")
+                        if not picked:
+                            raise FileNotFoundError("csv not found and no replacement provided.")
+                        raw_csv_p = to_native_path(picked)
+                        sample_info["csv"] = to_posix_str(raw_csv_p)
+
+                    # load fragments (CSV ion list has a 'mass' column)
+                    frags = read_fragment_masses_any(ion_path.as_posix(), sheet_name="ionlist")
+                    feature_df = extract_ion_intensities(raw_csv_p.as_posix(), frags, ppm=float(ppm_value))
+
+                    # Optional: embed method pointer column if present
+                    if method_json:
+                        feature_df.insert(0, "method_json", Path(method_json).resolve().as_posix())
+
+                    out_path = raw_csv_p.with_name(raw_csv_p.stem + f"_unlabeled_ppm{ppm_value}.csv")
+
+                    # Optional (recommended): write a tiny method.json for reproducibility/packing
+                    if not method_json:
+                        mpath = raw_csv_p.with_suffix("").with_name(f"{sample_id}.fromexp.method.json")
+                        mini = {
+                            "version": "1.0",
+                            "dataset_type": "pseudolabel",
+                            "experiment_title": J.get("experiment", ""),
+                            "sample_name": sample_id,
+                            "parents": {
+                                "converted_csv": to_posix_str(raw_csv_p),
+                                "pseudolabels_tsv": "(unknown)",
+                                "trainable_csv": "(unknown)"
+                            },
+                            "ionlist": {
+                                "source": "external",
+                                "path": to_posix_str(ion_path),
+                                "sheet": "",
+                                "sha1": "",
+                                "ppm_tolerance": int(ppm_value)
+                            }
+                        }
+                        with open(mpath, "w", encoding="utf-8") as f:
+                            json.dump(mini, f, indent=2, ensure_ascii=False)
+                        sample_info["method_json"] = mpath.as_posix()
+
+                    feature_df.to_csv(out_path, index=False)
+
+                if out_path:
+                    sample_info["unlabeled_dataset"] = out_path.as_posix()
+                    changed = True
+                else:
+                    print(f"[SKIP] sample '{sample_id}' had no excel/method/ionlist_path combo")
+
+            except Exception as e:
+                print(f"[ERROR] Failed on sample '{sample_id}': {e}")
+        """
         for sample_id, sample_info in samples.items():
             try:
                 raw_csv = sample_info.get("csv")
@@ -6467,7 +8538,7 @@ def open_ml_analysis_window():
 
             except Exception as e:
                 print(f"[ERROR] Failed on sample '{sample_id}':", e)
-
+        """
         if changed:
             # Persist ppm to the experiment JSON for traceability
             J["prediction_parameters"] = {"ppm": int(ppm_value)}
@@ -6577,18 +8648,133 @@ def open_ml_analysis_window():
     svm_button.grid(row=4, column=1, sticky="w")
     knn_button.grid(row=5, column=1, sticky="w")
 
+
+
+
+
+
+   # ---- ML PARAM PANEL (paste under Step 3, before Step 4) ----
+    effective_ml_params = {}  # nonlocal capture so train_model() can see it if desired
+
+    def _get_current_context():
+        # We prefer the .exp.json that was auto-detected when the user picked the CSV
+        exp_json_path = linked_exp_json  # may be None until a CSV has been picked
+
+        # Derive a friendly experiment title if we have the exp json
+        exp_title = None
+        try:
+            if exp_json_path and os.path.exists(exp_json_path):
+                with open(exp_json_path, "r", encoding="utf-8") as _f:
+                    _exp = json.load(_f)
+                exp_title = _exp.get("experiment")
+        except Exception:
+            pass
+
+        # We don’t strictly need a method_json here; keep None (panel can still load from any file)
+        method_json_path = None
+
+        return {
+            "experiment_title": exp_title,
+            "exp_json_path": exp_json_path,
+            "method_json_path": method_json_path,
+        }
+
+    def _on_effective_params_ready(merged):
+        # Capture for use by train_model() or anywhere else in this window
+        nonlocal effective_ml_params
+        effective_ml_params = merged
+        print("[ML PARAMS] effective parameters now in memory:", effective_ml_params)
+
+    # Build the panel into the Train tab (it creates its own labeled frame)
+    build_ml_params_panel(
+        parent=train_tab,
+        get_current_context=_get_current_context,
+        on_effective_params_ready=_on_effective_params_ready,
+    )
+
+    # place this right AFTER the classifier radio buttons, BEFORE "Step 4" label
+    #ml_frame = build_ml_params_panel(train_tab, _get_current_context, _on_effective_params_ready)
+    #ml_frame.grid_configure(row=6, column=0, columnspan=3, sticky="nsew", padx=10, pady=(6, 10))
+
+    # ---- Step 4: bar with 2 buttons + summary (Train tab) ----
+    # (place this where your Step 4 label/button currently lives)
+    # --- Step 4 bar (goes in open_ml_analysis_window, on the Train tab) ---
+    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
+
+    """
+    # choose the next free grid row on train_tab
+    row4 = train_tab.grid_size()[1]   # number of rows currently used
+
+    
+    # 3) ONLY AFTER train_tab exists and has content, add the Step-4 bar
+    def _add_step4_bar():
+        # next free grid row on train_tab
+        next_row = train_tab.grid_size()[1]
+
+        step4_container = ttk.Frame(train_tab)
+        step4_container.grid(row=next_row, column=0, columnspan=3,
+                            sticky="ew", padx=10, pady=(6, 0))
+
+        # inside the container we can pack
+        bar = tk.Frame(step4_container)
+        bar.pack(fill="x")
+
+        tk.Button(bar, text="Train/Test Parameters…",
+                command=open_train_settings).pack(side="left")
+
+        tk.Button(bar, text="Edit ML Parameters…",
+                command=open_ml_params_window).pack(side="left", padx=6)
+
+        tk.Label(bar, textvariable=ml_summary_var).pack(side="left", padx=12)
+
+    # call it right here, after your Step 1/2/3 widgets:
+    _add_step4_bar()
+    """
+    # a container that is gridded into train_tab
+    #step4_container = ttk.Frame(train_tab)
+    #step4_container.grid(row=row4, column=0, columnspan=3,
+    #                    sticky="ew", padx=10, pady=(6, 0))
+
+    # now INSIDE the container you can use pack freely
+    #step4_bar = tk.Frame(step4_container)
+    #step4_bar.pack(fill="x")
+
+    ##tk.Button(step4_bar, text="Train/Test Parameters…", command=open_train_settings)\
+    #.pack(side="left")
+
+    #tk.Button(step4_bar, text="Edit ML Parameters…", command=open_ml_params_window)\
+    #.pack(side="left", padx=6)
+
+
+
+    #tk.Label(step4_bar, textvariable=ml_summary_var)\
+    #.pack(side="left", padx=12)
+
+
+
+
+    # button to launch the modal
+    #ttk.Button(train_tab, text="Edit ML Parameters…", command=open_ml_params_window)\
+    #    .grid(row=STEP4_ROW, column=0, sticky="w", padx=10, pady=(4,0))  # set STEP4_ROW to match your layout
+
+    #ttk.Label(train_tab, textvariable=ml_summary_var)\
+    #    .grid(row=STEP4_ROW, column=1, columnspan=2, sticky="w")
+
+    # then bump your existing "Step 4: Train/Test Parameters" and below down to start at row=7 or 8
+    
     tk.Label(train_tab, text="Step 4: Train/Test Parameters").grid(row=6, column=0, sticky="w", padx=10, pady=5)
+    ttk.Label(train_tab, textvariable=ml_summary_var).grid(row=7, column=0, sticky="w", padx=10, pady=(0,6))
     tk.Button(train_tab, text="Set Parameters / Train the Model", command=open_train_settings).grid(row=6, column=1, padx=5, pady=5)
 
     train_button = tk.Button(train_tab, text="Train Model", command=train_model, bg="#CCE5FF")
-    train_button.grid(row=7, column=0, columnspan=2, pady=10)
+    train_button.grid(row=8, column=0, columnspan=2, pady=10)
 
-    tk.Label(train_tab, text="Trainable File Info (Origin Tracking)").grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
+    tk.Label(train_tab, text="Trainable File Info (Origin Tracking)").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
     origin_info = tk.Text(train_tab, height=4, width=70, state="disabled", wrap="word")
-    origin_info.grid(row=9, column=0, columnspan=2, padx=10, pady=5)
+    origin_info.grid(row=10, column=0, columnspan=2, padx=10, pady=5)
     # -- Training tab and prediction tab UI (end reminder buttons) --
-    tk.Label(train_tab, text="(🔜) Combine Datasets for Training").grid(row=10, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
-    tk.Button(train_tab, text="[Placeholder] Combine Datasets").grid(row=11, column=0, columnspan=2, padx=10, pady=5)
+    tk.Label(train_tab, text="(🔜) Combine Datasets for Training").grid(row=11, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
+    tk.Button(train_tab, text="[Placeholder] Combine Datasets").grid(row=11, column=1, columnspan=2, padx=10, pady=5)
     
     # --- Tab 2: Predict ---
     predict_tab = ttk.Frame(notebook)
@@ -6716,6 +8902,15 @@ def open_ml_analysis_window():
     tk.Label(build_tab, text="5) Output (auto-named):").grid(row=4, column=0, sticky="w", padx=10, pady=6)
     tk.Label(build_tab, textvariable=out_path_var, anchor="w", justify="left").grid(row=4, column=1, columnspan=2, sticky="w", padx=6, pady=6)
     """
+
+    # ---- ML Parameters panel (optional but handy to keep with Prepare Dataset) ----
+    ml_box = ttk.LabelFrame(subwin, text="ML Parameters")
+    ml_box.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+
+    # This function was included in the helpers you pasted earlier:
+    # build_ml_params_panel(parent, get_current_context, on_effective_params_ready)
+    #build_ml_params_panel(ml_box, _get_ml_context, _on_params_ready)
+
     # Helpers
     def _read_any_table(p):
         # try TSV first, then CSV with common settings
