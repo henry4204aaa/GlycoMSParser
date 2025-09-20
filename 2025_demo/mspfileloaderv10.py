@@ -3896,6 +3896,42 @@ def open_prepare_dataset_window():
         matched = matched.rename(columns={"comp_str": "composition"})
         import math
 
+        # 20250920 Try to add ion mining to PL
+        # --- helper: build pre_df (positives from PL + optional sampled negatives) ---
+        def _pre_df_for_ion_suggest_from_pl(matched, csv_path, ion_df):
+            import pandas as pd
+            # positives: take peaks from 'matched' (already carries peaklist/peakintensity in PL path)
+            need = ["MS2scan_no","peaklist","peakintensity"]
+            # error prevention, but why GPT add this? Safer but I didn't ask for it
+                # normalize the scan column name if it differs
+            if "MS2scan_no" not in matched.columns:
+                if "MS2Scan_no" in matched.columns:
+                    matched = matched.rename(columns={"MS2Scan_no": "MS2scan_no"})
+                elif "scan" in matched.columns:
+                    matched = matched.rename(columns={"scan": "MS2scan_no"})
+                else:
+                    raise KeyError("No MS2scan_no / MS2Scan_no / scan column in pseudolabeled matches.")
+                
+            pos = matched[need].dropna().copy()
+            pos["Structure"] = "Glycan"   # anything != "Non-glycan" counts as glycan for miner
+            # negatives: reuse existing gates
+            if add_negatives_var.get():
+                try:
+                    ppm = float(ppm_tol_var.get() or 10.0)
+                except Exception:
+                    ppm = 10.0
+                neg = mspval.sample_real_negatives(
+                    raw_tsv_path=csv_path,
+                    annotated_scans=pos["MS2scan_no"],
+                    ion_df=ion_df,
+                    ppm_tol=ppm,
+                    min_hits=int(min_hits_var.get()),
+                    max_neg_ratio=float(neg_ratio_var.get()),
+                )
+                if len(neg):
+                    pos = pd.concat([pos, neg], ignore_index=True)
+            return pos
+
         def _tuple_to_FHNSGKDN(t):
             # t: (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc)
             h, n, s, g, kdn, f = [int(x) for x in t]
@@ -3924,6 +3960,10 @@ def open_prepare_dataset_window():
             messagebox.showinfo("Pseudolabeling", "No precursor matches within tolerance.")
             return
 
+
+   
+
+
         # 4) Bring peaklist into matched (needed for ion scoring)
 
         #temp change to including ion score full format so we commented this part
@@ -3943,24 +3983,44 @@ def open_prepare_dataset_window():
         else:
             # no peaks → ion scoring will be skipped
             pass
-        """
-        peaks_cols = [c for c in ("peaklist","peakintensity") if c in df.columns]
-        if len(peaks_cols) == 2:
-            if scan_col == "MS2scan_no":
-                # same key name on both sides → use 'on=' to avoid suffixes
-                matched = matched.merge(
-                    df[[scan_col] + peaks_cols],
-                    on="MS2scan_no", how="left"
-                )
+
+        # --- 4.5) Ion suggestions from PL (requires peaklist/peakintensity now present) ---
+        if ion_suggest_enable_var.get() and "peaklist" in matched.columns and "peakintensity" in matched.columns:
+            # ensure ion mining module is available
+            global export_ion_suggestions_csv, SuggestParams, _ionmod
+            if export_ion_suggestions_csv is None:
+                _ionmod = _load_ion_module()
+                if _ionmod:
+                    export_ion_suggestions_csv = _ionmod.export_ion_suggestions_csv
+                    SuggestParams = _ionmod.SuggestParams
+
+            if export_ion_suggestions_csv is not None:
+                try:
+                    ion_df_for_suggest = _read_ion_df(files.get("ionlist_path"))
+                    pre_df = _pre_df_for_ion_suggest_from_pl(matched, files["csv"], ion_df_for_suggest)
+
+                    outdir = os.path.dirname(csv_path)
+                    suggest_csv = os.path.join(outdir, f"{sample_name}_ion_suggestions.csv")
+                    params = SuggestParams(
+                        ppm=float(ion_suggest_ppm_var.get()),
+                        da_floor=float(ion_suggest_dafloor_var.get()),
+                        min_cluster_count=3,
+                        min_support_glycan=int(ion_suggest_minsupp_var.get()),
+                        top_k=int(ion_suggest_topk_var.get())
+                    )
+                    export_ion_suggestions_csv(
+                        pre_df, ion_df_for_suggest, out_csv=suggest_csv, params=params,
+                        label_col="Structure", majority_label="Non-glycan"
+                    )
+                    print(f"[PL→Trainable] Ion suggestions saved: {suggest_csv}")
+                    last_suggest_csv_var.set(suggest_csv)
+                    messagebox.showinfo("Ion suggestions",
+                                        f"Suggested ions written to:\n{os.path.basename(suggest_csv)}")
+                except Exception as e:
+                    messagebox.showwarning("Ion suggestions", f"Suggestion failed:\n{e}")
             else:
-                matched = matched.merge(
-                    df[[scan_col] + peaks_cols],
-                    left_on="MS2scan_no", right_on=scan_col, how="left"
-                ).drop(columns=[scan_col], errors="ignore")
-        """
-        #if len(peaks_cols) == 2:
-        #    matched = matched.merge(df[[scan_col] + peaks_cols], left_on="MS2scan_no", right_on=scan_col, how="left") \
-        #                    .drop(columns=[scan_col])  
+                messagebox.showwarning("Ion suggestions",
+                                    "Ion module failed to import. Check console for the exact error.")
 
 
         # 5) Ion scoring (optional)
@@ -4015,49 +4075,6 @@ def open_prepare_dataset_window():
                 except Exception:
                     traceback.print_exc()
                     ion_scoring_status = "failed"
-
-        """
-        # 5) Ion scoring (optional; compact columns appended)
-        ion_scoring_status, n_with_scores = "skipped", 0
-        ion_df = _read_ion_df(ion_path) if ion_path else None
-
-        #temp debug
-        print("[ion] path:", ion_path,
-        "ion_df_rows:", 0 if (ion_df is None) else len(ion_df),
-        "has_peaks:", bool("peaklist" in matched.columns and "peakintensity" in matched.columns))
-        if ion_df is not None and not ion_df.empty and all(c in matched.columns for c in ("peaklist","peakintensity")):
-            try:
-                rename_map = {
-                    "ion_score": "ion score",
-                    "ion_hit_count": "ion hit count",
-                    "ion_hits_mz": "ion hits m/z",
-                    "ion_hits_intensity": "ion hits intensity",
-                    "ion_hits_logI": "ion hits logI",
-                    "ion_hits_relI": "ion hits relI",
-                    "pseudo_compositions": "pseudo compositions",
-                }
-                for src, dst in rename_map.items():
-                    if src in matched.columns and dst not in matched.columns:
-                        matched.rename(columns={src: dst}, inplace=True)
-                #temp change to a later version
-                
-                matched = marker.attach_ion_score_on_matched(
-                    matched_df=matched,
-                    ion_df=ion_df,
-                    ppm_value=ion_ppm,
-                    scan_col="MS2scan_no",
-                    ion_mass_col="mass",
-                    score_col="ion score",
-                    hitcount_col="ion hit count",
-                    hitlist_col="ion hits m/z",
-                )
-                ion_scoring_status = "ok"
-                n_with_scores = int((matched["ion hit count"] > 0).sum())
-                
-            except Exception:
-                traceback.print_exc()
-                ion_scoring_status = "failed"
-            """
 
         # 6) Merge back onto the original converted file (one row per composition match)
         #enrich_cols = ["MS2scan_no","composition","theoretical_mass","ppm_error","observed_mass"]
@@ -5008,7 +5025,7 @@ def open_prepare_dataset_window():
     ttk.Button(button_frame, text="Assign Pseudo-Labels by Glycan Composition", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
     #GPT said without () it only passes the function, and work only if clicked
     tk.Button(button_frame, text="Pseudolabel → Trainable",
-          command=try_pl_to_trainable).grid(row=2, column=3, padx=5)
+          command=try_pl_to_trainable).grid(row=2, column=5, padx=5)
     #ttk.Button(button_frame, text="Build trainable CSV from pseudolabeled TSV",
     #       command=lambda: open_pl_to_trainable_modal(root, sample_name, files, logger)).pack(pady=6)
 
