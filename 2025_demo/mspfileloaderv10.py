@@ -451,7 +451,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
         }
         OG_KEYS = {
-            "debug","dev","force_exit",
+            "debug","dev","force_exit","alphagal_like","allowldnc","allowleby",
             "allow5ac","allow5gc","allowkdn","allowfuc","allowpsa",
             "arm_count","internal_minrep","internal_maxrep","topology",
             "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
@@ -562,10 +562,10 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         core_frame = ttk.LabelFrame(self, text="O-glycan core types (select 1–4)")
         core_frame.pack(fill="x", padx=12, pady=(0, 6))
 
-        self.og_core_vars = {i: tk.BooleanVar(value=False) for i in (1, 2, 3, 4)}
+        self.og_core_vars = {i: tk.BooleanVar(value=False) for i in (0, 1, 2, 3, 4)}
 
         row = 0
-        for i, label in [(1, "Core 1"), (2, "Core 2"), (3, "Core 3"), (4, "Core 4")]:
+        for i, label in [(0, "Tn Antigen"), (1, "Core 1"), (2, "Core 2"), (3, "Core 3"), (4, "Core 4")]:
             ttk.Checkbutton(core_frame, text=label, variable=self.og_core_vars[i]).grid(
                 row=row // 2, column=row % 2, sticky="w", padx=8, pady=3
             )
@@ -4714,55 +4714,6 @@ def open_prepare_dataset_window():
 
         print("[launch] using meta (final):", meta_path)
 
-
-
-        def on_submit(payload):
-            # 1) Start from NG_flags defaults, overlay UI edits
-            flags = dict(compv4.NG_flags)
-            flags.update(payload.get("flags", {}))
-
-            # 2) Determine glycan type from metadata (prefer window metadata; fallback to file)
-            glycan_type = (payload["metadata"].get("Glycan Type") or "").strip().upper()
-            charge_mode = payload["metadata"].get("Mass Analyzer charge mode")  # if needed downstream
-            # Example normalization at the GUI edge (optional but nice):
-            deriv_raw = (payload["metadata"].get("Derivatization Type") or "").strip().lower()
-            reduced = False
-            if "reduced" in deriv_raw:   # e.g., "Reduced Permethylation"
-                reduced = True
-            flags["derivatization_type"] = payload["metadata"].get("Derivatization Type", "PerMe")
-            flags["reduced"] = reduced
-            #deriv_type  = payload["metadata"].get("Derivatization Type")        # if needed downstream
-            if payload["metadata"].get("_overrides_applied"):
-                logger.log("[WARN] Using metadata overrides from UI; consider updating the metadata JSON.")
-            # 3) Choose output path
-            outdir = filedialog.askdirectory(title="Select output folder for in-silico CSV")
-            if not outdir:
-                return
-            outname = f"{sample_name}_insilico_{datetime.now().strftime('%Y%m%d')}.csv"
-            outpath = os.path.join(outdir, outname)
-
-            try:
-                # 4) Launch NG or OG generator (no hybrid component dicts yet)
-                if glycan_type == "N":
-                    compv4.NGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
-                elif glycan_type == "O":
-                    # OGbranch: we can extend with coretype/keep_topology later
-                    compv4.OGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
-                else:
-                    messagebox.showwarning("Glycan Type Missing",
-                                        "Metadata lacks a valid 'Glycan Type' (expected 'N' or 'O').")
-                    return
-
-                files["insilico_csv"] = outpath
-                messagebox.showinfo("In-silico CSV generated", f"Saved and linked:\n{outpath}")
-                refresh_tree()
-                # (Optional) attach outpath to the sample record here so the next step can find it
-                # files["insilico_csv"] = outpath
-                refresh_tree()
-
-            except Exception as e:
-                traceback.print_exc()
-                messagebox.showerror("Generation failed", str(e))
 
         def on_generate(payload):
             

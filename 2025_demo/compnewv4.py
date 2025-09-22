@@ -1,5 +1,5 @@
-version = "1.03"
-last_update = 20250910
+version = "1.04"
+last_update = 20250922
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -34,6 +34,7 @@ last_update = 20250910
 #version changelog:
 #v1.1 (future): finished version for publication
 #v1.05 (future): support negative mode calculation
+#v1.04: fix O-glycan core only composition missing issue
 #v1.03: fix composition limit not applying bug
 #v1.01: fix derivatization flags not passing issue
 #v1.0: 20250819 fix mass calc error
@@ -146,6 +147,43 @@ NG_flags = {
 
 #GlcA: 233.1020 (+), 231.0874 (-), 297.0286 (+S/-)
 #Sulfate: 
+
+
+def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
+                    hexA=0, so3=0, po3h=0, debug=False):
+    # composition = (H, N, Ac, Gc, KDN, Fuc)
+    a, b, c, d, e, f = composition
+    if deri == "PerMe":
+        # base PerMe masses (your current constants)
+        M =  (f * 174.08921
+              + a * 204.09977
+              + b * 245.12632
+              + c * 361.17367
+              + d * 391.18423
+              + e * 335.1700
+              + 46.04186)   # reducing end (freeend)
+        if reduced:
+            M += 16.0313
+
+        # extra residues / functional groups
+        M += hexA * 218.09502    # PerMe-HexA (placeholder; refine later)
+        M += so3 * 79.956815     # sulfate group mass
+        M += po3h * 79.966331    # phosphate (HPO3) group mass
+
+        # mode-specific proton term (for a single-charge baseline)
+        if mode == '+':
+            M += 1.0073
+        else:
+            M -= 1.0073
+
+        if debug:
+            print(f"precursormassv3 PerMe, mode={mode}, reduced={reduced}")
+    else:
+        M = 0
+        if debug:
+            print("precursormassv3 throwing 0 as exceptions")
+    return M
+
 
 #adapted, mind the deri and reduction status should be obtain from metadata, if no metadata exists, ask user to choose
 def precursormassv3(composition, deri="PerMe",reduced=False, debug=False): #general version
@@ -940,6 +978,7 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
         armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
         OG_finalresults.append(OGcombine(armscomb,core, debug=debug))
+        OG_finalresults.append({core})
 
     if -1 in coretype:
         if debug:
@@ -958,6 +997,7 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
         armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
         OG_finalresults.append(OGcombine(armscomb,core, debug=debug))  
+        OG_finalresults.append({core})
 
     if 3 in coretype:
         ###GlcNAc-(beta1 3)GalNAc-(alpha 1)S/T
@@ -971,7 +1011,9 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
         armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
         if not test1:
-            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))          
+            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))
+            OG_finalresults.append({core})
+
     if 2 in coretype:
         ### GlcNAC\(beta1-6) Gal-(beta1 3)GalNAc-(alpha 1)S/T
         if debug:
@@ -984,7 +1026,9 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
         armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
         if not test1:
-            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))                    
+            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))  
+            OG_finalresults.append({core})
+
     if 4 in coretype:
         ### GlcNAC\(beta1-6) GlcNAc-(beta1 3)GalNAc-(alpha 1)S/T
         if debug:
@@ -997,7 +1041,8 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
         armscomb = armadditionOG(arm3, arm6, debug=debug, OGflags=OGflags) 
         if not test1:
-            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))        
+            OG_finalresults.append(OGcombine(armscomb,core, debug=debug))    
+            OG_finalresults.append({core})    
 
     for i in coretype:
         if i > 4:

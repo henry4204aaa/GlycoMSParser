@@ -1,5 +1,5 @@
 version = 0.93
-last_update = 20250905
+last_update = 20250922
 #v0.93 add negative label (non-glycans) back to manual annotation workflow
 #v0.9 workable file and awaiting to be merged to main workflow. Validation prototype built and tested.
 #v0.8 workable file (w/o validation)
@@ -79,6 +79,123 @@ etc_masses = {
 }
 #reduced 15(non-reducing end) + 15(CH3) + 14(CH2) + 18(H2O)
 #nonreduced 15(non-reducing end) + 15 (CH3) + 31 (CH2OH?)
+
+
+# 20250921 GPT supported addition [attention, may be not what I want]
+# --- add/extend mass tables near existing dicts ---
+monosaccharide_masses.update({
+    # GlcA as HexA under PerMe; tune if you refine later
+    'HexA': 218.09502,   # placeholder PerMe-HexA; adjust when you finalize
+})
+# Functional groups that add to the neutral framework (covalent)
+functional_group_masses = {
+    'SO3': 79.956815,    # sulfate (SO3)
+    'PO3H': 79.966331,   # HPO3 ; adjust if you prefer PO3 or H2PO3
+}
+
+# negative-mode friendly adducts (in addition to H/Na/NH3)
+adducts_masses.update({
+    'Cl': 34.968853,     # [M+Cl]− common in ESI−
+    'Ac': 59.013851,     # acetate [M+CH3COO]− if present
+})
+
+H_MASS = 1.007825
+
+def _parse_functional_groups(row):
+    """
+    Optional: parse functional groups count if you store them (e.g., 'SO3', 'PO3H').
+    For now, read from columns 'SO3' and 'PO3H' if present; else 0.
+    """
+    so3 = int(row['SO3']) if 'SO3' in row and pd.notna(row['SO3']) else 0
+    pgr = int(row['PO3H']) if 'PO3H' in row and pd.notna(row['PO3H']) else 0
+    return so3, pgr
+
+def calc_neutral_mass(row, deri_mode_or_name='PerMe'):
+    """
+    Sum monosaccharides + reducing end (etc) + functional groups to get NEUTRAL mass.
+    Replaces the old 'calc_protonated_mass' baseline.
+    """
+    annotation = row['Structure']
+    total_mass = 0.0
+    composition = {}
+
+    # parse composition like F1H5N2S1...
+    matches = pattern.findall(annotation)
+    for comp, count in matches:
+        composition[comp] = int(count)
+
+    # core monosaccharides (PerMe masses by default)
+    for comp, mass in monosaccharide_masses.items():
+        count = composition.get(comp, 0)
+        total_mass += count * mass
+
+    # functional groups, if any
+    so3, pgr = _parse_functional_groups(row)
+    total_mass += so3 * functional_group_masses['SO3']
+    total_mass += pgr * functional_group_masses['PO3H']
+
+    # reducing end / derivatization term (existing logic kept)
+    etc = row.get('derivatization', None)  # may be 'PerMe(Reduced)' or 'PerMe(Freeend)' etc
+    if isinstance(etc, float):
+        total_mass += etc
+    else:
+        total_mass += etc_masses.get(etc, 0.0)
+
+    return round(total_mass, 4)
+
+def calc_precursor_mz_from_neutral(row, mode='+'):
+    """
+    Convert neutral mass -> theoretical precursor m/z using charge/adduct/mass_shift.
+    mode: '+' or '-'
+    """
+    charge = int(row['charge'])
+    mass_shift = float(row.get('mass shift', 0))
+    adduction = str(row.get('adduct', '')).strip()
+
+    # parse adduct string like "Na", "2H", "Cl", "H2", etc.
+    adduct_mass = 0.0
+    matches = patternex.findall(adduction)
+    for elem, count in matches:
+        n = int(count) if count else 1
+        adduct_mass += n * elemental_masses.get(elem, adducts_masses.get(elem, 0.0))
+
+    neutral = float(row['theo neutral mass'])
+
+    # number of protons implicitly added/removed (default 1 if adduct string doesn’t include H explicitly)
+    # keep behavior close to your current: +mode assumes +H, −mode assumes −H
+    nH = 1 if ('H' not in adduction and 'h' not in adduction) else 0
+
+    if mode == '+':
+        precursor = neutral + adduct_mass + nH * H_MASS + mass_shift
+        denom = max(1, abs(charge))
+    else:  # negative mode
+        precursor = neutral + adduct_mass - nH * H_MASS + mass_shift
+        denom = max(1, abs(charge))
+
+    return round(precursor / denom, 4)
+
+def adding_masses_mode_aware(df, derivatization_tag, mode='+'):
+    """
+    Replacement for adding_protonated_and_observed_mass():
+    - writes 'theo neutral mass'
+    - writes 'theo protonated mass' (if +) or 'theo deprotonated mass' (if −) for debug
+    - writes 'obs' as precursor m/z
+    """
+    # put derivatization string into a column if not present (keeps your etc path)
+    if 'derivatization' not in df.columns:
+        df = df.copy()
+        df['derivatization'] = derivatization_tag
+
+    df['theo neutral mass'] = df.apply(lambda r: calc_neutral_mass(r, derivatization_tag), axis=1)
+
+    if mode == '+':
+        df['theo protonated mass'] = df['theo neutral mass'] + H_MASS  # debug/compat
+    else:
+        df['theo deprotonated mass'] = df['theo neutral mass'] - H_MASS  # debug
+
+    df['obs'] = df.apply(lambda r: calc_precursor_mz_from_neutral(r, mode), axis=1)
+    return df
+
 
 
 
@@ -434,7 +551,16 @@ def directassign_files(annotation_file, raw_csv, derivatizationtags, debug = Fal
 
     #converting annotation file
     #add 2 mass information to dataframe
-    df = adding_protonated_and_observed_mass(df,derivatizationtags)
+    #df = adding_protonated_and_observed_mass(df,derivatizationtags)
+
+    #20250921 GPT supported
+    mode = '+'
+    if isinstance(derivatizationtags, str) and '-' in derivatizationtags:
+        mode = '-'
+    elif isinstance(derivatizationtags, dict):
+        mode = '-' if str(derivatizationtags.get('Mass Analyzer charge mode','+')).strip() == '-' else '+'
+
+    df = adding_masses_mode_aware(df, derivatizationtags, mode=mode)
 
     merged_df = extractannotation(df, df2, debug = True)
     pre_df = slice_combined_df(merged_df)

@@ -1,9 +1,10 @@
 ######version info#####
 
-version= "0.51"
-last_update = 20250407
+version= "0.52"
+last_update = 20250921
 #import msprawextractor   -> msprawextractor.version 
 import versioninfo
+#v0.52 check and prepare for negative mode support
 #v0.51 failsafe in case the Thermo Library or foundation is missing
 #v0.5 trying to solve duplicated metadata and log issue
 #v0.4 move version control out to prevent circular import for making metadata
@@ -197,7 +198,9 @@ def save_to_arff():#(arffname, data, headers, attributes, debug=False):
 
 #calculates and returns protonated mass for precursor in each spetrum
 def calcproton(isolatedmass, charge):
-    if abs(charge) == 1 :
+    if charge == 1 :   #change abs(charge) to charge to negative can be calculated too, 
+        #A tiny nuance to keep in mind as we go forward: Thermo’s API typically returns the magnitude of charge (often positive) 
+        # even for negative-mode data, depending on method/instrument
         return isolatedmass
     elif charge >= 2:
         conv = (isolatedmass * charge - (charge - 1) * 1.00784)
