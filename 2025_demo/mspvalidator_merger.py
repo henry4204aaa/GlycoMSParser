@@ -53,7 +53,9 @@ monosaccharide_masses = {
 'S': 361.17367,
 'G': 391.18423,
 'KDN': 320.1465,
-'K': 320.1465
+'K': 320.1465,
+#20250922 data from glycoworkbench
+ 'GluA': 218.0790
 }
 adducts_masses = {
 'H': 1.007825,
@@ -80,16 +82,15 @@ etc_masses = {
 #reduced 15(non-reducing end) + 15(CH3) + 14(CH2) + 18(H2O)
 #nonreduced 15(non-reducing end) + 15 (CH3) + 31 (CH2OH?)
 
-
 # 20250921 GPT supported addition [attention, may be not what I want]
 # --- add/extend mass tables near existing dicts ---
-monosaccharide_masses.update({
-    # GlcA as HexA under PerMe; tune if you refine later
-    'HexA': 218.09502,   # placeholder PerMe-HexA; adjust when you finalize
-})
+#monosaccharide_masses.update({
+#    # GlcA as HexA under PerMe; tune if you refine later
+#    'HexA': 218.09502,   # placeholder PerMe-HexA; adjust when you finalize
+#})
 # Functional groups that add to the neutral framework (covalent)
 functional_group_masses = {
-    'SO3': 79.956815,    # sulfate (SO3)
+    'SO3': 79.956815,    # sulfate (SO3) validated
     'PO3H': 79.966331,   # HPO3 ; adjust if you prefer PO3 or H2PO3
 }
 

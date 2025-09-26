@@ -1,6 +1,6 @@
 import os
-version = "0.9981"
-last_update = 20250919
+version = "0.9983"
+last_update = 20250925
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -141,6 +141,7 @@ except Exception:
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
+# v0.9983: add Pseudolabeling method (generate in silico glycan list) support on negative mode and GlcA (HexA) - testing 
 # v0.9981: add ML parameters save/load feature. Add error tracker for configuring first time.
 # v0.998: update requirements.txt (the python version and packages needs to be updated). PS. python 3.13 has errors
 # v0.997: add integrity check placeholder, fix the path issue
@@ -421,6 +422,15 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             "allowfuc": ("bool", None),
             "allowpsa": ("int", (0, 3)),
             "allowldnf": ("bool", None),
+            #20250925 extra
+            # >>> NEW: HexA / sulfate / phosphate <<<
+            "allowHexA": ("bool", None),
+            "HexA_range": ("range", (0, 4)),   # 0–4 is a safe UI cap; adjust if you like
+            "SO3": ("bool", None),
+            "SO3_range": ("range", (0, 2)),
+            "PO3H": ("bool", None),
+            "PO3H_range": ("range", (0, 2)),
+
             # iteration logic
             "arm_count": ("int", (0, 8)),
             "internal_minrep": ("int", (0, 6)),
@@ -434,18 +444,22 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             "hybrid": ("bool", None),
             # optional composition check
             "compcheck": ("bool", None),
-            "Hex_range": ("range", (0, 20)),
+            "Hex_range": ("range", (0, 24)),
             "HexNAc_range": ("range", (0, 20)),
             "Neu5Ac_range": ("range", (0, 10)),
             "Neu5Gc_range": ("range", (0, 10)),
             "KDN_range": ("range", (0, 10)),
             "Fucose_range": ("range", (0, 10)),
+
         }
 
         # Which keys to show per glycan type
         NG_KEYS = {
             "debug","dev","force_exit",
             "alphagal_like","allowldnc","allowleby","allow5ac","allow5gc","allowkdn","allowfuc","allowpsa","allowldnf",
+            # NEW:
+            "allowHexA","HexA_range","SO3","SO3_range","PO3H","PO3H_range",
+            #
             "arm_count","internal_minrep","internal_maxrep","topology",
             "corefuc","bicorefuc","highman","perman","hybrid",
             "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
@@ -453,6 +467,9 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         OG_KEYS = {
             "debug","dev","force_exit","alphagal_like","allowldnc","allowleby",
             "allow5ac","allow5gc","allowkdn","allowfuc","allowpsa",
+            # NEW:
+            "allowHexA","HexA_range","SO3","SO3_range","PO3H","PO3H_range",
+            #
             "arm_count","internal_minrep","internal_maxrep","topology",
             "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
         }
@@ -4727,6 +4744,26 @@ def open_prepare_dataset_window():
             deriv_raw = (payload["metadata"].get("Derivatization Type") or "").strip().lower()
             flags["derivatization_type"] = payload["metadata"].get("Derivatization Type", "PerMe")
             flags["reduced"] = ("reduced" in deriv_raw)
+            # 20250925 neg mode support + hexA
+            # NEW: Ionization mode (+ / −) from metadata into flags for compnewv4
+            mode_meta = (payload["metadata"].get("Mass Analyzer charge mode") or "+").strip()
+            flags["mode"] = "-" if mode_meta in ("-", "−") else "+"
+            # NEW: Decide concrete counts for SO3 / PO3H from toggles + ranges
+            # Policy: if toggle is ON, use the upper bound of the range; else 0.
+            def _pick_count(toggle_key, range_key):
+                if flags.get(toggle_key):
+                    r = flags.get(range_key)
+                    if isinstance(r, (list, tuple)) and len(r) == 2:
+                        return int(r[1])
+                return 0
+
+            so3_count  = _pick_count("SO3",  "SO3_range")
+            po3h_count = _pick_count("PO3H", "PO3H_range")
+
+            # Stash chosen counts in flags so NG/OGlaunch (compnewv4) can read them
+            flags["SO3_count"]  = so3_count
+            flags["PO3H_count"] = po3h_count
+
 
             outdir = filedialog.askdirectory(title="Select output folder for in-silico CSV")
             if not outdir:
@@ -4736,8 +4773,14 @@ def open_prepare_dataset_window():
 
             try:
                 if glycan_type == "N":
+                    # compnewv4.NGlaunch should:
+                    #  - read flags["mode"]
+                    #  - pass so3=flags["SO3_count"], po3h=flags["PO3H_count"]
+                    #  - honor HexA / HexA_range inside the generator
+                    # although we didn't make any changes here, automatically passed from other functions?
                     compv4.NGlaunch(user_flags=flags, filename=outpath, debug=flags.get("debug", False))
                 elif glycan_type == "O":
+                    # haven't add neg mode and hexA support in OG
                     cores = payload.get("coretype") or [1,2,3,4]
                     compv4.OGlaunch(user_flags=flags, coretype=cores,filename=outpath, debug=flags.get("debug", False))
                 else:
@@ -4763,6 +4806,8 @@ def open_prepare_dataset_window():
                         "converted_csv": files.get("csv"),
                     },
                     "output": {"insilico_csv": outpath},
+                    # Helpful to see what was actually used:
+                    "chosen_counts": {"SO3": so3_count, "PO3H": po3h_count},
                 })
                 messagebox.showinfo("In-silico CSV generated", f"Saved and linked:\n{outpath}")
                 refresh_tree()

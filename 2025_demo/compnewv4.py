@@ -1,5 +1,5 @@
-version = "1.04"
-last_update = 20250922
+version = "1.051"
+last_update = 20250926
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -32,8 +32,14 @@ last_update = 20250922
 #v1.1 for finished O-glycan integration with mspcomposition.py -> code will move there
 
 #version changelog:
+#v1.2 (future): add O-man and fix hybrid NG generation logic
 #v1.1 (future): finished version for publication
-#v1.05 (future): support negative mode calculation
+#v1.06 (future): add OG sulphation (no phosphate right...? right?)
+#v1.053: fix NG with adding 2 PO3H/SO3
+#v1.052: fix NG with adding 1 PO3H/SO3
+#v1.051: NG negative mode with HexA is implemented. NOTE that we haven't implement the SO3/PO3H rules so the charge and final mass is WRONG <-HEAD 20250926
+#v1.05 (buggy): support negative mode calculation, NOTE THAT the multiple sulphate gives proper LC-MS/MS precursor mass while 2 phosphate generates the MALDI mass
+# (only M6P and I didn't get M6P precursor mass -- can try to find in my zebrafish publicated dataset, but not for now.)
 #v1.04: fix O-glycan core only composition missing issue
 #v1.03: fix composition limit not applying bug
 #v1.01: fix derivatization flags not passing issue
@@ -63,6 +69,22 @@ _DERIV_ALIASES.update({
     "perme(reduced)": "PerMe_reduced",
     "perme(freeend)": "PerMe",
 })
+
+
+# 20250924 add mode sensitive feature
+def _normalize_mode(flags):
+    """
+    Returns '+' or '-' from various flag shapes.
+    Accepts 'mode', or metadata-like 'Mass Analyzer charge mode'.
+    """
+    raw = (flags or {}).get("mode") or (flags or {}).get("Mass Analyzer charge mode") or "+"
+    s = str(raw).strip()
+    if s in ["+", "−", "-"]:
+        return "-" if s in ["−", "-"] else "+"
+    # be forgiving
+    return "+" if s.lower().startswith(("pos", "plus", "p")) else "-"
+
+
 
 def _normalize_derivatization(flags):
     """Return (deri, reduced) normalized from various flag shapes."""
@@ -141,13 +163,27 @@ NG_flags = {
         #hybrid NG arguments for calculating composition it's PLACEHOLDER 
          "termi_comp":      None,
          "internal_comp":   None,
+        # 20250924 newly added flags # mind we also need to add changes in v10, or maybe considering adding as v11 
+        "HexA": 0,
+        "HexA_range": [0,2],   # e.g., [0,2]
+        "mode": "+",          # '+' or '-'
+        "SO3": 0,             # default sulfate count applied to all
+        "PO3H": 0,            # default phosphate (monoester) count applied to all
+        # optional fan-out (disabled unless provided)
+        "SO3_range": [0,2],  
+        "PO3H_range": [0,2],   
          }
 #O-glycan will share a portion of N-glycan flags, thinking if I should mix them together or not
 
 
+#20250925 GPT-suggested safe Hex6 appending method
+def _mk_term_obj(sum_tuple, hexA=0):
+    # Standard container used by permutation code
+    return {"sum": tuple(sum_tuple), "hexA": int(hexA)}
+
 #GlcA: 233.1020 (+), 231.0874 (-), 297.0286 (+S/-)
 #Sulfate: 
-
+#20250925 NOTE the current HexA are all GlcA especially for HNK-1 epitope (3S-) which compete the Sialic acid position (Glucuronylation)
 
 def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
                     hexA=0, so3=0, po3h=0, debug=False):
@@ -166,10 +202,23 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
             M += 16.0313
 
         # extra residues / functional groups
-        M += hexA * 218.09502    # PerMe-HexA (placeholder; refine later)
+        M += hexA * 218.07904 #218.09502    # PerMe-HexA (placeholder; refine later)
         M += so3 * 79.956815     # sulfate group mass
-        M += po3h * 79.966331    # phosphate (HPO3) group mass
-
+        #M += po3h * 78.9725 #* 79.966331    # phosphate (HPO3) group mass  #PO3 = 78.9725, exactly H2PO3 -> PO32- -> O-PO3 (CH3 loss)
+        #native M6P:	C6H13O9P / 260.14 g/mol  -> has 5 position to add methyl OH->OCH3 (+CH2)x5  260.14 + 70.0785 = 330.2185 (P=31.0496)
+        #fix M6P mass (20250923): P = 30.9738 Total  C79H144O44N2P1)  260.0708 + 70.0785 = 330.1493
+        #M += po4h2 * 0 #96.9867 #(H3PO4=97.994, [H2PO4]-1   )
+        if so3 == 1:
+            M += 2 * 1.0073 # to neutralize [SO3]2- 
+        if po3h == 1: #directly use M6P per - 4 site (exclude 6P and 1 for B ion )
+            M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 
+            #fix for HCC's calculation ps. C=12.0011 vs 12.000 get 0.0066diff #)316.2028) - 15.023 - 1.0073
+        if so3 == 2:
+            M += 2 * 1.0073 - 14.0157 # to neutralize [SO3]2- and keep -2 charge with one extra CH2- loss by sulphate addition
+            M = M/2 
+        if po3h == 2: #directly use M6P per - 4 site (exclude 6P and 1 for B ion )
+            M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 - 14.0157
+            #MIND THIS IS MALDI MASS
         # mode-specific proton term (for a single-charge baseline)
         if mode == '+':
             M += 1.0073
@@ -177,11 +226,11 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
             M -= 1.0073
 
         if debug:
-            print(f"precursormassv3 PerMe, mode={mode}, reduced={reduced}")
+            print(f"precursormassv4 PerMe, mode={mode}, reduced={reduced}")
     else:
         M = 0
         if debug:
-            print("precursormassv3 throwing 0 as exceptions")
+            print("precursormassv4 still not support native glycan mass calculation--")
     return M
 
 
@@ -221,34 +270,105 @@ def save_glycan_pseudocomp_to_csv(
     include_header=True,
     derivatization="PerMe",
     reduced=None,               # None means "use old default"
+    mode="+",
+    so3=0,
+    po3h=0,
+    use_v4=True,
+    debug = False                                # compute mass with precursormassv4 by default
 ):
     #extra fix of deri flags and reduction 
     if reduced is None:
         reduced = True  # previous code acted as if reduced=True
+    #20250924 new header #20250925 add GlcA (HexA)
+    headers = ["Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Fuc",
+               "HexA","Mode", "SO3", "PO3H", "Mass"]   
     #20250815 fix header, should be in the order of HNSiaFMass, not Fuc in the first place
-    headers = ["Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Fuc", "Mass"]
+    #headers = ["Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Fuc", "Mass"]
+
+    #prevent null filename error
     if filename is None:
         filename = input("[dev k1] Please provide a name for this pseudocomp")
-
     filenamecsv = filename.strip() + ".csv"
 
-    #fix the N-glycan extra wrapped issue
+    #GPT suggested fix, but didn't meet any errors so just kept and don't use unless we get errors
+    """
+    # flatten sets/lists-of-lists
+    flat_compositions = []
+    for item in comps:
+        if isinstance(item, (list, set, tuple)) and item and isinstance(next(iter(item)), (list, tuple)):
+            flat_compositions.extend(item)
+        else:
+            flat_compositions.append(item)
+    
+    """
+
+    #fix the N-glycan extra wrapped issue (flatten sets/lists-of-lists)
     flat_compositions = []
     for item in comps:
         if isinstance(item, (list, set)):
             flat_compositions.extend(item)
         else:
             flat_compositions.append(item)
+    #20250925 hexA version
+    with open(filenamecsv, "w") as f:
+        if include_header:
+            f.write(",".join(headers) + "\n")
 
+        for item in sorted(flat_compositions):
+            # normalize to (comp_tuple, hexA)
+            if isinstance(item, dict) and "sum" in item:
+                comp = tuple(item["sum"])
+                hexA_val = int(item.get("hexA", 0))
+            elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+                comp = tuple(item[0])
+                hexA_val = int(item[1])
+            else:
+                comp = tuple(item)
+                hexA_val = 0
+
+            assert len(comp) == 6, f"Composition length error: {comp}"
+
+            if use_v4:
+                mass = precursormassv4(comp, deri=derivatization, reduced=reduced,
+                                       mode=mode, hexA=hexA_val, so3=so3, po3h=po3h, debug=False)
+            else:
+                mass = precursormassv3(comp, deri=derivatization, reduced=reduced, debug=debug)
+
+            row = [str(comp[0]), str(comp[1]), str(comp[2]), str(comp[3]), str(comp[4]), str(comp[5]),
+                   str(hexA_val), mode, str(so3), str(po3h), f"{mass:.4f}"]
+            f.write(",".join(row) + "\n")
+    """
     with open(filenamecsv, "w") as f:
         if include_header:
             f.write(",".join(headers) + "\n")
         for comp in sorted(flat_compositions):
             assert len(comp) == 6, f"Composition length error: {comp}"
-            mass = precursormassv3(comp, deri=derivatization, reduced=reduced)
-            f.write(",".join(map(str, comp)) + f",{mass:.3f}\n")
+            if use_v4:
+                mass = precursormassv4(comp, deri=derivatization, reduced=reduced,
+                                       mode=mode, so3=so3, po3h=po3h, debug=False)
+            else:
+                # legacy: v3 always +H, no groups
+                mass = precursormassv3(comp, deri=derivatization, reduced=reduced, debug=debug)
+            row = list(map(str, comp)) + [mode, str(so3), str(po3h), f"{mass:.4f}"]
+            f.write(",".join(row) + "\n")
+            #old version: w/o if-else and use the follows:
+            #mass = precursormassv3(comp, deri=derivatization, reduced=reduced)
+            #f.write(",".join(map(str, comp)) + f",{mass:.3f}\n")
             #f.write(",".join(map(str, comp)) + "\n")
+    """
 
+#Tiny helpers, currently we're not using it
+def _expand_group_counts(base_comps, so3_range=None, po3h_range=None):
+    """
+    Given an iterable of 6-tuples, produce [(comp, so3, po3h), ...]
+    If ranges are None, keep a single (so3=0, po3h=0) pass.
+    """
+    from itertools import product
+    S = range(so3_range[0], so3_range[1] + 1) if so3_range else [0]
+    P = range(po3h_range[0], po3h_range[1] + 1) if po3h_range else [0]
+    for comp in base_comps:
+        for s, p in product(S, P):
+            yield (comp, s, p)
 
 #20250604 tank tank tank ... __ __ __
 from itertools import product, combinations_with_replacement
@@ -256,8 +376,9 @@ from itertools import product, combinations_with_replacement
 # flags: alphagal_like, allowldnc, allowleby (2Fuc), allow5ac default as True, allow5gc, allowkdn, allowfuc(has Fut, default as True)
 #run for terminal
 ### To dev (me or someone in future) or AI: flags should become options available to configure in GUI ### 
-def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5ac=True, allow5gc=False, allowkdn=False, allowfuc = True, allowpsa= 0, debug=False, force_exit=False):
-    print("[debug] terminal logic 20250604")
+# 20250925 add HexA (GlcA), default is false
+def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5ac=True, allow5gc=False, allowkdn=False, allowfuc = True, allowpsa= 0, debug=False, force_exit=False, allowHexA = False):
+    print("[debug] terminal logic 20250604 -> 0925")
     #Prep main sugars (Hex and HexNAc based frame)
     hn_pairs = []
     for hex in range(2):
@@ -283,24 +404,35 @@ def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5a
         fuc_max = 1
     fuc_range = [0] if not allowfuc else list(range(fuc_max + 1))
     composition = []
-
+    extra_comp = []
     #Prep sialic acids
     #20250711 add poly-sialic acid setting, max = 3, add debug mode and force-exit flag
     neu5ac_no = [0,1] if allow5ac else [0]
     neu5gc_no = [0,1] if allow5gc else [0]
     kdn_no = [0,1] if allowkdn else [0]
+    hexa_no = [0, 1] if allowHexA else [0] #GlcA for HNK-1
     sia_triples = []
+    hexa_addition = []
+    compositionv2= []
     if allowpsa == 0:
         #deal with sialic acids
-        for neu5ac, neu5gc, kdn in product(neu5ac_no, neu5gc_no, kdn_no):
-            if neu5ac + neu5gc + kdn <=1:
+        for neu5ac, neu5gc, kdn, hexa in product(neu5ac_no, neu5gc_no, kdn_no, hexa_no):
+            if neu5ac + neu5gc + kdn + hexa <=1:
                 sia_triples.append((neu5ac, neu5gc, kdn))
+            if hexa != 0:
+                hexa_addition.append((neu5ac, neu5gc, kdn, hexa)) #actually we only need hexa I think? others are always zero
+                print(f"[dev check if sia triples useless]: the hexa!=0 comp {hexa_addition} ")
         #overall rule check 
         for hex, hexnac in hn_pairs:
             for neu5ac, neu5gc, kdn in sia_triples:
                 for fuc in fuc_range:
                     if (neu5ac + neu5gc + kdn + fuc <= 2) and (hex + hexnac + neu5ac + neu5gc + kdn + fuc <= 5) and ((neu5ac + neu5gc + kdn + fuc) <= (hex + hexnac)):
                         composition.append((hex, hexnac, neu5ac, neu5gc, kdn, fuc))
+            if allowHexA == True:
+                for hex, hexnac in hn_pairs:
+                    #composition.append((hex+1, hexnac, neu5ac, neu5gc, kdn, fuc))
+                    extra_comp.append((hex, hexnac, neu5ac, neu5gc, kdn, fuc, hexa))
+
     #psa exceptions?
     elif isinstance(allowpsa, int):
         #debug lines
@@ -331,8 +463,66 @@ def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5a
                     elif fuc == 2:
                         print("Working")
 
+
+    # --- build terminal outputs with optional HexA variants ---
+    # GPT said my workout won't work? okay use GPT's version
+    """
+    out = []
+    if allowHexA:
+        print(f"[debug][terminal_NG] allowHexA active")
+        # always keep the base terminals (hexA=0)
+        for t in composition:
+            out.append(_mk_term_obj(t, 0))
+            # minimal rule: only create a HexA variant if we have at least one Hex
+            if t[0] >= 1:
+                out.append(_mk_term_obj(t, 1))
+    else:
+        out = composition  # legacy behavior (plain tuples)
+
+    print(f"[debug][terminal_NG] Generated {len(composition)} base terminals")
+    for t in composition[:10]:
+        print("   ", t)
+
+    if allowHexA:
+        print(f"[dev] adding HexA support Total combinations: {len(out)}")
+        return out
+    else:
+        return composition
+    """
+    out = []
+    if allowHexA:
+        print(f"[debug][terminal_NG] allowHexA active; HexA_range=not defined")#{flags.get('HexA_range')}")
+        #use my old method first, here unwind the 7-elements tuple back to 6 + 1 HexA
+        out = composition
+        for comps in extra_comp:
+            tmpcomps = (comps[0:6])
+            print(f"tmpcomps: {tmpcomps}")
+            hexaplace = comps[6]
+            print(f"hexA: {hexaplace}")
+            #norcomp.append(tmpcomps)
+            out.append(_mk_term_obj(sum_tuple=tmpcomps, hexA=hexaplace))
+
+        #for t in composition:
+        #    out.append(_mk_term_obj(t, hexA=0))
+        #    # minimal rule: only make a HexA variant if there is at least one Hex present
+        #    if t[0] >= 1:
+        #        out.append(_mk_term_obj(t, hexA=1))
+    #else:
+        # keep legacy (pure tuples) if HexA not requested
+    #    out = composition
+    print(f"[debug][terminal_NG] Generated {len(composition)} base terminals")
+    for t in composition[:10]:
+        print("   ", t)
+
+    #if allowHexA:
+        #print(f"[debug][terminal_NG] allowHexA active; HexA_range={flags.get('HexA_range')}")
+
     print(f"[debug]Total combinations: {len(composition)} and results are {composition}")
-    return composition
+    if allowHexA is True:
+        print(f"[dev] adding HexA support Total combinations: {len(out)} and results are {out[:10] if len(out)>10 else out}")
+        return out
+    else:
+        return composition
 
 
 
@@ -366,7 +556,50 @@ def generate_arm_combinations(terminal_list, internal_list, arm_count=2, interna
     for arm_index in range(arm_count):
         arm_combos = []
         #do the addition of internal combinations onto terminal. get t^i(n) outputs if I'm correct
+
+        #20250925 HexA backward compatible version?
+
+
         for t in terminal_list:
+
+            # accept tuple or dict
+            if isinstance(t, dict):
+                t_sum = tuple(t.get("sum", (0, 0, 0, 0, 0, 0)))
+                t_hexA = int(t.get("hexA", 0))
+            else:
+                t_sum = tuple(t)
+                t_hexA = 0
+            for n in range(internal_repeat_range[0], internal_repeat_range[1] + 1):
+                if n == 0:
+                    # terminal-only arm
+                    combo_sum = t_sum
+                    arm_combos.append({
+                        "arm_id": f"arm{arm_index+1}",
+                        "terminal": t,
+                        "internal_group": (),
+                        "sum": combo_sum,
+                        "hexA": t_hexA,
+                    })
+                else:
+                    for internal_group in combinations_with_replacement(internal_list, n):
+                        i_sum = tuple(sum(x) for x in zip(*internal_group))
+                        combo_sum = tuple(a + b for a, b in zip(t_sum, i_sum))
+                        arm_combos.append({
+                            "arm_id": f"arm{arm_index+1}",
+                            "terminal": t,
+                            "internal_group": internal_group,
+                            "sum": combo_sum,
+                            "hexA": t_hexA,
+                        })
+
+        print(f"[debug][generate_arm_combinations] Arm {arm_index+1} combos: {len(arm_combos)}")
+        for c in arm_combos[:10]:
+            print("   sum=", c["sum"], "hexA=", c.get("hexA",0))
+
+        arms.append(arm_combos)
+
+    return arms      
+"""     
             # For each repeat count
             for n in range(internal_repeat_range[0], internal_repeat_range[1] + 1):
                 # All possible n-combinations (with replacement)
@@ -389,7 +622,7 @@ def generate_arm_combinations(terminal_list, internal_list, arm_count=2, interna
         arms.append(arm_combos)
 
     return arms
-
+"""
 
 
 def get_unique_total_compositions(arms,topology=False):
@@ -406,13 +639,20 @@ def get_unique_total_compositions(arms,topology=False):
 
     for combo in product(*arms):  # one dict per arm
         arm_sums = [entry['sum'] for entry in combo]
+        #20250925 new
+        arm_hexAs  = [int(entry.get('hexA', 0)) for entry in combo]
 
         # Topology-aware: ordered tuple of arm-level compositions
-        with_topology.add(tuple(arm_sums))
+        if topology:
+            with_topology.add(tuple(arm_sums))
+        else:
+            # Topology-free: sum element-wise across all arms
+            total = tuple(sum(x) for x in zip(*arm_sums))
+            total_hexA = sum(arm_hexAs)
+            if total_hexA <= total[0]:
+                without_topology.add((total, total_hexA))
+            without_topology.add(total)
 
-        # Topology-free: sum element-wise across all arms
-        total = tuple(sum(x) for x in zip(*arm_sums))
-        without_topology.add(total)
     if topology:
         return with_topology,len(with_topology)
     else:
@@ -478,6 +718,7 @@ def combine_with_core(arms, corebase, extraNG, keep_topology=False):
 
     #notice: haven't test one WITH TOPOLOGYAL info, can do it someday, we're suppressing it until we submit or even publish the article
     """
+    """
     final_compositions = set()
 
     for combo in product(*arms):  # one entry per arm
@@ -498,11 +739,102 @@ def combine_with_core(arms, corebase, extraNG, keep_topology=False):
     final_compositions.update(extraNG)
 
     return final_compositions
-
-
-
-def compcheck(final_set, a, b, c, d, e, f, debug=False):
     """
+    # 20250925 newly added version
+    final_compositions = set()
+    if isinstance(corebase, tuple):
+        corebase = [corebase]
+
+    for combo in product(*arms):
+        arm_sums  = [entry['sum'] for entry in combo]
+        arm_hexAs = [int(entry.get('hexA', 0)) for entry in combo]
+
+        arm_total = tuple(sum(x) for x in zip(*arm_sums))
+        hexA_total = sum(arm_hexAs)
+
+        for core in corebase:
+            full = tuple(a + b for a, b in zip(arm_total, core))
+            # enforce HexA ≤ Hex after adding core
+            if hexA_total <= full[0]:
+                if keep_topology:
+                    final_compositions.add((core, *arm_sums))  # legacy topology form
+                else:
+                    final_compositions.add((full, hexA_total))
+
+    # Append extraNG (legacy tuples) — they have no HexA
+    for t in extraNG:
+        final_compositions.add((t, 0))
+    print(f"[debug][combine_with_core] Produced {len(final_compositions)} compositions")
+    for c in list(final_compositions)[:10]:
+        print("   ", c)
+    return final_compositions
+
+def compcheck(final_set,
+              Hex_range, HexNAc_range, Neu5Ac_range, Neu5Gc_range, KDN_range, Fucose_range,
+              HexA_range=None,
+              debug=False):
+    """
+    final_set items can be:
+      - plain 6-tuples (legacy), or
+      - (6-tuple, hexA) pairs, or
+      - dicts with {'sum': 6-tuple, 'hexA': int}
+
+    If HexA_range is provided like [min,max], enforce:
+      0 ≤ hexA ≤ Hex and min ≤ hexA ≤ max.
+    """
+    def _norm(item):
+        # returns (comp6tuple, hexA_int)
+        if isinstance(item, dict) and "sum" in item:
+            comp = tuple(item["sum"])
+            hexA = int(item.get("hexA", 0))
+        elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+            comp = tuple(item[0]); hexA = int(item[1])
+        else:
+            comp = tuple(item);    hexA = 0
+        return comp, hexA
+
+    loH, hiH       = Hex_range
+    loN, hiN       = HexNAc_range
+    loAc, hiAc     = Neu5Ac_range
+    loGc, hiGc     = Neu5Gc_range
+    loK,  hiK      = KDN_range
+    loF,  hiF      = Fucose_range
+    loA,  hiA      = (None, None) if HexA_range is None else HexA_range
+
+    passed = set()
+    failed = set()
+
+    for item in final_set:
+        comp, hexA = _norm(item)
+        H, N, Ac, Gc, KDN, F = comp
+
+        ok = (loH  <= H   <= hiH   and
+              loN  <= N   <= hiN   and
+              loAc <= Ac  <= hiAc  and
+              loGc <= Gc  <= hiGc  and
+              loK  <= KDN <= hiK   and
+              loF  <= F   <= hiF)
+
+        # HexA constraints
+        if ok:
+            # always enforce HexA ≤ Hex
+            if hexA > H or hexA < 0:
+                ok = False
+            # user-provided global cap
+            if ok and loA is not None:
+                if not (loA <= hexA <= hiA):
+                    ok = False
+
+        (passed if ok else failed).add((comp, hexA))
+    print(f"[debug][compcheck] Checking {len(final_set)} items; HexA_range={HexA_range}")
+    if debug:
+        return passed, failed
+    return passed
+
+
+"""
+def compcheck(final_set, a, b, c, d, e, f, debug=False):
+    
     Filters combinations by per-position value ranges.
 
     Args:
@@ -512,7 +844,7 @@ def compcheck(final_set, a, b, c, d, e, f, debug=False):
 
     Returns:
         List of passed combinations, or (passed, failed) if debug is True
-    """
+    
     passed_set = []
     failed_set = []
 
@@ -531,7 +863,7 @@ def compcheck(final_set, a, b, c, d, e, f, debug=False):
     #if debug:
     #    print(f"[debug] Count of passed composition {len(passed_set)}, and failed composition {len(failed_set)}")
     return (passed_set, failed_set) if debug else passed_set
-
+"""
 #flag dealer
 def select_flags(flag_dict, keys):
     return {k: flag_dict[k] for k in keys if k in flag_dict}
@@ -578,7 +910,7 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
     terminal_comb = terminal_NG(**select_flags(flags, 
                                                [   "alphagal_like", "allowldnc", "allowleby",
                                                    "allow5ac", "allow5gc", "allowkdn", "allowfuc",
-                                                   "allowpsa", "debug", "force_exit"
+                                                   "allowpsa", "debug", "force_exit","allowHexA",  
                                                    ]))
     internal_comb = internal_NG(**select_flags(flags, ["allowldnc", "allowldnf", "allowfuc"]))
     #combine both to tree-like NG ternima (non-reducing end)
@@ -600,6 +932,12 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
     #noticed previous glitch? we're using branches rather than the unique compositions
     #defined as set so the unique composition function is NOT required? GPT and Claude what's your thoughts?
     final_set = combine_with_core(branches, core_etc[0], core_etc[1], flags["topology"])
+
+    #add catcher for mode, and negative charge groups
+    mode = _normalize_mode(flags)
+    so3 = flags.get("SO3", 0)
+    po3h = flags.get("PO3H", 0)
+
     if flags["debug"]:
         print(f"[debug]: the unique composition count is {len(final_set)} and first 10 composition is \n")
         debug_preview(final_set, limit=10, sort_if_set=False, random_sample=True, label="Final composition")  
@@ -609,7 +947,9 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
             print(f'Ranges H, N, Ac, Gc, KDN, Fuc = '
             f'{tuple(flags["Hex_range"])}, {tuple(flags["HexNAc_range"])}, '
             f'{tuple(flags["Neu5Ac_range"])}, {tuple(flags["Neu5Gc_range"])}, '
-            f'{tuple(flags["KDN_range"])}, {tuple(flags["Fucose_range"])}')
+            f'{tuple(flags["KDN_range"])}, {tuple(flags["Fucose_range"])}, '
+            f'{tuple(flags["HexA_range"])} '
+            )
              
         #checked_final = compcheck(final_set, flags["Hex_range"], flags["HexNAc_range"],
         #                          flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
@@ -619,22 +959,59 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
         res = compcheck(final_set,
                         flags["Hex_range"], flags["HexNAc_range"],
                         flags["Neu5Ac_range"], flags["Neu5Gc_range"],
-                        flags["KDN_range"],  flags["Fucose_range"],
+                        flags["KDN_range"],  flags["Fucose_range"],flags["HexA_range"],
                         debug=flags["debug"])
         passed = res[0] #if flags["debug"] else res
         if flags["debug"]:
             print(f"[debug] passed={len(passed)}  failed={len(res[1])}")
+        #save_glycan_pseudocomp_to_csv(passed, filename=filename,
+        #                            include_header=True, derivatization=deri, reduced=reduced)
+
+        # (A) no range fan-out – simple, uniform groups for all rows
         save_glycan_pseudocomp_to_csv(passed, filename=filename,
-                                    include_header=True, derivatization=deri, reduced=reduced)
+                                    include_header=True,
+                                    derivatization=deri, reduced=reduced,
+                                    mode=mode, so3=so3, po3h=po3h, use_v4=True)
 
         #return checked_final, True
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
         #save_glycan_pseudocomp_to_csv(final_set, filename=filename, include_header=True)
-        save_glycan_pseudocomp_to_csv(final_set,filename=filename,include_header=True,derivatization=deri,reduced=reduced)
+        #save_glycan_pseudocomp_to_csv(final_set,filename=filename,include_header=True,derivatization=deri,reduced=reduced)
+        # (A) no range fan-out – simple, uniform groups for all rows
+        save_glycan_pseudocomp_to_csv(final_set, filename=filename,
+                                  include_header=True,
+                                  derivatization=deri, reduced=reduced,
+                                  mode=mode, so3=so3, po3h=po3h, use_v4=True)
         #return final_set, False
-    
+
+"""
+Another way to solve, GPT said it's: If you’d like range fan-out, use this instead:
+    so3_rng  = flags.get("SO3_range")
+    po3h_rng = flags.get("PO3H_range")
+    if so3_rng or po3h_rng:
+        expanded = list(_expand_group_counts(passed, so3_rng, po3h_rng))
+        # write one big CSV; mass computed per-row counts
+        if expanded:
+            if filename is None:
+                outname = "NG_pseudocomp"
+            else:
+                outname = filename
+            with open(outname.strip()+".csv", "w") as f:
+                f.write(",".join(["Hex","HexNAc","NeuAc","NeuGc","KDN","Fuc","Mode","SO3","PO3H","Mass"])+"\n")
+                for comp, s, p in expanded:
+                    m = precursormassv4(comp, deri=deri, reduced=reduced, mode=mode, so3=s, po3h=p, debug=False)
+                    f.write(",".join(map(str, (*comp, mode, s, p, f"{m:.4f}"))) + "\n")
+    else:
+        save_glycan_pseudocomp_to_csv(passed, filename=filename,
+                                      include_header=True,
+                                      derivatization=deri, reduced=reduced,
+                                      mode=mode, so3=so3, po3h=po3h, use_v4=True)
+
+"""
+
+
 '''
 NGlaunch()
 
@@ -1085,6 +1462,13 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
     #noticed previous glitch? we're using branches rather than the unique compositions
     #defined as set so the unique composition function is NOT required? GPT and Claude what's your thoughts?
     #final_set = combine_with_core(branches, core_etc[0], core_etc[1], flags["topology"])
+
+    #add catcher for mode, and negative charge groups
+    mode = _normalize_mode(flags)
+    so3 = flags.get("SO3", 0)
+    po3h = flags.get("PO3H", 0)
+
+
     if flags["debug"]:
         if OG_comps and OG_comps is not None:
             print(f"[debug]: the unique composition count is {len(OG_comps)} \n")#{len(OG_comps[0])} \n")
@@ -1103,25 +1487,77 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
         res = compcheck(OG_comps,
                         flags["Hex_range"], flags["HexNAc_range"],
                         flags["Neu5Ac_range"], flags["Neu5Gc_range"],
-                        flags["KDN_range"],  flags["Fucose_range"],
+                        flags["KDN_range"],  flags["Fucose_range"],flags["HexA_range"],
                         debug=flags["debug"])
         passed = res[0] #if flags["debug"] else res
+        #save_glycan_pseudocomp_to_csv(passed, filename=filename,
+        #                            include_header=True, derivatization=deri, reduced=reduced)        
         save_glycan_pseudocomp_to_csv(passed, filename=filename,
-                                    include_header=True, derivatization=deri, reduced=reduced)        
+                                include_header=True,
+                                derivatization=deri, reduced=reduced,
+                                mode=mode, so3=so3, po3h=po3h, use_v4=True)
         #return checked_final, True
     else:
         if flags["debug"]:
             print("[debug] Skipping composition check (optional)")
-            save_glycan_pseudocomp_to_csv(OG_comps, filename=filename, include_header=True)
+            #save_glycan_pseudocomp_to_csv(OG_comps, filename=filename, include_header=True)
+            save_glycan_pseudocomp_to_csv(OG_comps, filename=filename,
+                                  include_header=True,
+                                  derivatization=deri, reduced=reduced,
+                                  mode=mode, so3=so3, po3h=po3h, use_v4=True)
         #return OG_comps, False
     
 
 #OGlaunch(user_flags={"compcheck": False,"internal_maxrep": 1}, coretype=[0,1,2,3,4], debug=True, filename="testifbreakOG_delaftertest")
 
+
+# ---- quick self-test (negative-mode mass sanity) ----
+def _selftest_neg_mode_compnewv4():
+    """
+    Smoke test for precursormassv3() with + vs − mode.
+    Composition tuple order here is (H, N, NeuAc, NeuGc, KDN, Fuc).
+    We also add one sulfate (SO3=1) to see the expected +~79.96 Da effect.
+    """
+    try:
+        print("[compnewv4] running negative-mode self-test...")
+
+        # Example composition: F1H3N2S1  -> tuple (H=3, N=2, NeuAc=1, NeuGc=0, KDN=0, Fuc=1)
+        comp = (4, 3, 0, 0, 0, 1)
+        mpcomp = (6, 2, 0, 0, 0, 0)
+        m_plus  = precursormassv4(comp, deri="PerMe", reduced=False, mode='+', hexA=0, so3=1, po3h=0, debug=False)
+        m_minus = precursormassv4(comp, deri="PerMe", reduced=False, mode='-', hexA=0, so3=1, po3h=0, debug=False)
+        mp1_plus  = precursormassv4(mpcomp, deri="PerMe", reduced=False, mode='-', hexA=0, so3=0, po3h=1, debug=False)
+        mp_plus  = precursormassv4(mpcomp, deri="PerMe", reduced=False, mode='-', hexA=0, so3=0, po3h=2, debug=False)
+        #print(f"  [+] precursor (SO3=1): {m_plus:.4f}")
+        print(f"  [−] precursor (SO3=1): {m_minus:.4f}")
+        print(f"  [-] precursor (PO3H=1): {mp1_plus:.4f}")
+        print(f"  [-] precursor (PO3H=2 in MALDI - not the same in LC-ESI-MS): {mp_plus:.4f}")
+        #print(f"  [-] precursor (PO4H2=1): {mp_plus:.4f}")
+        #test multiple charge
+        print("test multi-sulphate")
+        mdpcomp = (2, 2, 0, 0, 0, 0)
+        mspminus = precursormassv4(mdpcomp, deri="PerMe", reduced=False, mode='-', hexA=0, so3=1, po3h=0, debug=False)
+        mdpminus = precursormassv4(mdpcomp, deri="PerMe", reduced=False, mode='-', hexA=0, so3=2, po3h=0, debug=False)
+        print(f"  [−] OG precursor (SO3=1): {mspminus:.4f}")
+        print(f"  [−] OG precursor (SO3=2): {mdpminus:.4f}")
+        # Because +mode adds ~+H and −mode removes ~H, the gap should be ~2.0146 Da.
+        delta = m_plus - m_minus
+        print(f"  Δ(+ vs −) ≈ {delta:.4f}  (expect ≈ 2.0146)")
+        assert abs(delta - 2.0146) < 0.02, "Δ between + and − should be ~2.0146 Da"
+
+        print("[compnewv4] OK ✅\n")
+    except Exception as e:
+        print("[compnewv4] self-test FAILED ❌:", e)
+
+
+
+# DEV/TEST ONLY
 if __name__ == "__main__":
-    # DEV/TEST ONLY
-    
+    # Run only when executed directly: python compnewv4.py
+    _selftest_neg_mode_compnewv4()
+
     # OGlaunch(...) tests, etc.
+    """
     NGlaunch(user_flags={
             #monitoring flags
             "debug": True, 
@@ -1161,6 +1597,7 @@ if __name__ == "__main__":
             "termi_comp":      None,
             "internal_comp":   None,
             }, filename="U937NG_fix")
+            """
 """
 """
 
