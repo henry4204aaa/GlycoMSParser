@@ -1,4 +1,4 @@
-version = "1.051"
+version = "1.052"
 last_update = 20250926
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
@@ -181,6 +181,45 @@ def _mk_term_obj(sum_tuple, hexA=0):
     # Standard container used by permutation code
     return {"sum": tuple(sum_tuple), "hexA": int(hexA)}
 
+#20250926 SO3/PO3H mass calc helper
+def decide_functional_groups(comp6, hexA, flags):
+    """
+    Return (so3, po3h) for this composition.
+    Encode your exclusivity/priority rules here.
+    Example scaffolding (replace with your real logic):
+    """
+    H, N, Ac, Gc, KDN, F = comp6
+    # default
+    so3 = 0; po3h = 0
+
+    # exclusivity example: prefer PO3H on certain N-glycans
+    prefer_p = bool(flags.get("PO3H"))  # toggle from GUI
+    prefer_s = bool(flags.get("SO3"))
+    #rules
+    exclude_flag= False
+    #check phosphate first
+    if prefer_p and N == 2 and (9>= H and H>=5) and Ac == 0 and Gc == 0 and KDN == 0 and F<=1:
+        po3h = min(1, flags.get("PO3H_range", [0,1])[1])
+        exclude_flag = True
+    elif not exclude_flag and prefer_s and N>=3 and H>= 4:
+        so3 = min(1, flags.get("SO3_range", [0,1])[1])
+    return so3, po3h
+    
+    """
+    # Example placeholder rules — replace:
+    if prefer_p and N >= 2 and Ac == 0:
+        po3h = min(1, flags.get("PO3H_range", [0,1])[1])
+    elif prefer_s and Ac >= 1:
+        so3 = min(1, flags.get("SO3_range", [0,1])[1])
+
+    # hard mutual exclusivity
+    if po3h and so3:
+        # keep the preferred one:
+        so3 = 0 if prefer_p else so3
+        po3h = 0 if prefer_s else po3h
+    return so3, po3h
+    """
+
 #GlcA: 233.1020 (+), 231.0874 (-), 297.0286 (+S/-)
 #Sulfate: 
 #20250925 NOTE the current HexA are all GlcA especially for HNK-1 epitope (3S-) which compete the Sialic acid position (Glucuronylation)
@@ -209,15 +248,16 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
         #fix M6P mass (20250923): P = 30.9738 Total  C79H144O44N2P1)  260.0708 + 70.0785 = 330.1493
         #M += po4h2 * 0 #96.9867 #(H3PO4=97.994, [H2PO4]-1   )
         if so3 == 1:
-            M += 2 * 1.0073 # to neutralize [SO3]2- 
+            M += 2 * 1.0073 - 16.0313 + 0.0011 #for what? I'm doing hard adjustment #15.9949 # to neutralize [SO3]2- 
         if po3h == 1: #directly use M6P per - 4 site (exclude 6P and 1 for B ion )
-            M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 
+            M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 - 16.0313#15.9949
             #fix for HCC's calculation ps. C=12.0011 vs 12.000 get 0.0066diff #)316.2028) - 15.023 - 1.0073
+        #not fixed for now (in 1 SO3/PO3H I subtract 1 more oxygen since I think that's the linkage place? not sure...)
         if so3 == 2:
-            M += 2 * 1.0073 - 14.0157 # to neutralize [SO3]2- and keep -2 charge with one extra CH2- loss by sulphate addition
+            M += 2 * 1.0073 - 14.0157 - 2 * (16.0313 + 0.0011) # to neutralize [SO3]2- and keep -2 charge with one extra CH2- loss by sulphate addition
             M = M/2 
         if po3h == 2: #directly use M6P per - 4 site (exclude 6P and 1 for B ion )
-            M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 - 14.0157
+            M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 - 14.0157 - 16.0313 #-16 was newly added
             #MIND THIS IS MALDI MASS
         # mode-specific proton term (for a single-charge baseline)
         if mode == '+':
@@ -261,6 +301,7 @@ def error_watcher(errmsg):
     else:
         print("[watcher v0.1] No error detected, return original output")
         return errmsg
+
 
 
 #20250808 add comp export
@@ -314,7 +355,25 @@ def save_glycan_pseudocomp_to_csv(
         if include_header:
             f.write(",".join(headers) + "\n")
 
-        for item in sorted(flat_compositions):
+        def _row_sort_key(item, so3_default=0, po3h_default=0):
+            # Return a sortable key: (Hex,HexNAc,NeuAc,NeuGc,KDN,Fuc,HexA,SO3,PO3H)
+            if isinstance(item, dict):
+                comp = tuple(item.get("sum", (0,0,0,0,0,0)))
+                hexA = int(item.get("hexA", 0))
+                s    = int(item.get("SO3",  so3_default))
+                p    = int(item.get("PO3H", po3h_default))
+                return (*comp, hexA, s, p)
+            elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], tuple):
+                comp = tuple(item[0]); hexA = int(item[1])
+                return (*comp, hexA, 0, 0)
+            else:
+                comp = tuple(item)
+                return (*comp, 0, 0, 0)
+
+        for item in sorted(flat_compositions, key=lambda it: _row_sort_key(it, so3, po3h)):
+
+        #for item in sorted(flat_compositions):
+            #lazy fix to avoid error after adding HexA support: for item in flat_compositions
             # normalize to (comp_tuple, hexA)
             if isinstance(item, dict) and "sum" in item:
                 comp = tuple(item["sum"])
@@ -327,15 +386,26 @@ def save_glycan_pseudocomp_to_csv(
                 hexA_val = 0
 
             assert len(comp) == 6, f"Composition length error: {comp}"
+            # normalize comp / hexA as you already do...
+            #row_so3  = int(item.get("SO3", so3))   if isinstance(item, dict) else so3
+            #row_po3h = int(item.get("PO3H", po3h)) if isinstance(item, dict) else po3h
+            if isinstance(item, dict):
+                print("[writer] incoming keys:", list(item.keys()),
+                    "SO3=", item.get("SO3"), "PO3H=", item.get("PO3H"))
+
+            row_so3  = int(item.get("SO3",  so3))  if isinstance(item, dict) else so3
+            row_po3h = int(item.get("PO3H", po3h)) if isinstance(item, dict) else po3h
+
+            print("[writer] using SO3,PO3H =", row_so3, row_po3h, "for", comp, "HexA", hexA_val)
 
             if use_v4:
                 mass = precursormassv4(comp, deri=derivatization, reduced=reduced,
-                                       mode=mode, hexA=hexA_val, so3=so3, po3h=po3h, debug=False)
+                                       mode=mode, hexA=hexA_val, so3=row_so3, po3h=row_po3h, debug=False)
             else:
                 mass = precursormassv3(comp, deri=derivatization, reduced=reduced, debug=debug)
 
             row = [str(comp[0]), str(comp[1]), str(comp[2]), str(comp[3]), str(comp[4]), str(comp[5]),
-                   str(hexA_val), mode, str(so3), str(po3h), f"{mass:.4f}"]
+                   str(hexA_val), mode, str(row_so3), str(row_po3h), f"{mass:.4f}"]
             f.write(",".join(row) + "\n")
     """
     with open(filenamecsv, "w") as f:
@@ -967,11 +1037,23 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
         #save_glycan_pseudocomp_to_csv(passed, filename=filename,
         #                            include_header=True, derivatization=deri, reduced=reduced)
 
+        #add extra parameters for mode, so3, po3h
+        rows = []
+        for comp, hexA in passed:
+            so3_val, po3h_val = decide_functional_groups(comp, hexA, flags)
+            rows.append({"sum": comp, "hexA": hexA, "SO3": so3_val, "PO3H": po3h_val})
+            #for debug
+        print("[FG] totals  SO3:", sum(1 for r in rows if r.get("SO3",0)),
+            " PO3H:",        sum(1 for r in rows if r.get("PO3H",0)))
+        # optional: show a few that fired
+        print("[FG] examples SO3=1:", [r["sum"] for r in rows if r.get("SO3")==1][:5])
+        print("[FG] examples PO3H=1:", [r["sum"] for r in rows if r.get("PO3H")==1][:5])
+            # then call:
         # (A) no range fan-out – simple, uniform groups for all rows
-        save_glycan_pseudocomp_to_csv(passed, filename=filename,
+        save_glycan_pseudocomp_to_csv(rows, filename=filename, #passed -> rows
                                     include_header=True,
                                     derivatization=deri, reduced=reduced,
-                                    mode=mode, so3=so3, po3h=po3h, use_v4=True)
+                                    mode=mode, so3=0, po3h=0, use_v4=True) #so3=so3 originally, but GPT suggested 0 since we already have per-row values
 
         #return checked_final, True
     else:
@@ -983,7 +1065,7 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
         save_glycan_pseudocomp_to_csv(final_set, filename=filename,
                                   include_header=True,
                                   derivatization=deri, reduced=reduced,
-                                  mode=mode, so3=so3, po3h=po3h, use_v4=True)
+                                  mode=mode, so3=0, po3h=0, use_v4=True)
         #return final_set, False
 
 """

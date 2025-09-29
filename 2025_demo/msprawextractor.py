@@ -1,9 +1,10 @@
 ######version info#####
 
-version= "0.52"
-last_update = 20250921
+version= "0.53"
+last_update = 20250927
 #import msprawextractor   -> msprawextractor.version 
 import versioninfo
+#v0.53 fix tmp file not found issue when directly click the v10 python file (cwd not specified -> fall to default)
 #v0.52 check and prepare for negative mode support
 #v0.51 failsafe in case the Thermo Library or foundation is missing
 #v0.5 trying to solve duplicated metadata and log issue
@@ -391,10 +392,19 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
         #20250916 try to fix duplicate tmp files issue
     # New: extractor only writes TEMP files; GUI will finalize/rename later.
         rawstem = pathlib.Path(rawfileinput).stem
-        ms2tmp = f"ms2tmp_{rawstem}.csv"
-        ms3tmp = f"ms3tmp_{rawstem}.csv"
-        save_to_csv(ms2tmp.replace(".csv",""), ms2data, debug=debug)
-        save_to_csv(ms3tmp.replace(".csv",""), ms3data, debug=debug)
+        #v0.53
+        ms2tmp_path = os.path.join(outdir, f"ms2tmp_{rawstem}.csv")
+        ms3tmp_path = os.path.join(outdir, f"ms3tmp_{rawstem}.csv")
+        # save_to_csv still takes a *stem*; pass the stem without .csv but with full dir
+        save_to_csv(ms2tmp_path[:-4], ms2data, debug=debug)
+        save_to_csv(ms3tmp_path[:-4], ms3data, debug=debug)
+        return {"ms2tmp": ms2tmp_path, "ms3tmp": ms3tmp_path}
+        #v0.52
+        #ms2tmp = f"ms2tmp_{rawstem}.csv"
+        #ms3tmp = f"ms3tmp_{rawstem}.csv"
+        #save_to_csv(ms2tmp.replace(".csv",""), ms2data, debug=debug)
+        #save_to_csv(ms3tmp.replace(".csv",""), ms3data, debug=debug)
+
         # tmp_ms2 = Path(outdir) / f"ms2tmp_{rawstem}.csv"
         #tmp_ms3 = Path(outdir) / f"ms3tmp_{rawstem}.csv"
 
@@ -411,7 +421,7 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
 
         # Return the TEMP paths for the GUI to finalize.
         # Return filename of the temp files
-        return os.path.abspath(ms2tmp), os.path.abspath(ms3tmp)
+        #return os.path.abspath(ms2tmp), os.path.abspath(ms3tmp)
         #export to csv by default
         #ms2done = save_to_csv(ms2output, ms2data, debug=debug)
         #print(f"MS2 export {ms2done} has finished")

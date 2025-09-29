@@ -1,17 +1,21 @@
-from __future__ import annotations
+#from __future__ import annotations
 #Python3.9 compatibility fix (not working haha)
-
-
-
 #part of it was copied from GPT5 answer based on the discussion
-
-
+version = "1.08"
+last_update = 20250929
 import numpy as np
 import csv
 import mspvalidator_merger as validator
 import pandas as pd
 import re
 import json
+
+
+
+#changelog
+#v1.1 support negative mode, HexA and Sulphate, Phosphate labeling
+#v1.0 works in positive mode labeling
+
 
 
 #to get rid of warning
@@ -65,6 +69,66 @@ def normalize_insilico(
     # a clean sorted view (keep the unsorted original around if you want)
     sorted_out = out.sort_values(mass_col).reset_index(drop=True)
     return sorted_out
+
+#20250929 negative support
+# ===== Canonical label builders (HexA / SO3 / PO3H aware) =====
+
+def _fmt_part(prefix: str, n: int) -> str:
+    """Return 'prefixN' only if n>0."""
+    try:
+        n = int(n)
+    except Exception:
+        n = 0
+    return f"{prefix}{n}" if n > 0 else ""
+
+def canonical_label_tuple(comp6, *, hexA=0, so3=0, po3h=0, style="short") -> str:
+    """
+    Build canonical label from a 6-tuple (H,N,Ac,Gc,KDN,F) plus modifiers.
+
+    style="short": uses 'A' (HexA), 's' (SO3), 'p' (PO3H)
+    style="long" : uses 'A' (HexA), 'Sul' (SO3), 'Phos' (PO3H)
+
+    Base order agreed: F, H, N, S(NeuAc), G(NeuGc), KDN, then A/s/p (or A/Sul/Phos).
+    """
+    H, N, Ac, Gc, KDN, F = map(int, comp6)
+
+    parts = []
+    parts.append(_fmt_part("F", F))
+    parts.append(_fmt_part("H", H))
+    parts.append(_fmt_part("N", N))
+    parts.append(_fmt_part("S", Ac))   # NeuAc
+    parts.append(_fmt_part("G", Gc))   # NeuGc
+    parts.append(_fmt_part("KDN", KDN))
+
+    if style == "short":
+        parts.append(_fmt_part("A", hexA))   # HexA
+        parts.append(_fmt_part("s", so3))    # sulfate (SO3)
+        parts.append(_fmt_part("p", po3h))   # phosphate monoester (PO3H)
+    else:
+        parts.append(_fmt_part("A", hexA))
+        parts.append(_fmt_part("Sul", so3))
+        parts.append(_fmt_part("Phos", po3h))
+
+    return "".join(p for p in parts if p)
+
+def canonical_label_from_row(row, style="short") -> str:
+    """
+    Build canonical label from a pandas row/dict that may include:
+      Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc, HexA, SO3, PO3H
+    Missing columns are treated as 0.
+    """
+    H   = int(row.get("Hex", 0))
+    N   = int(row.get("HexNAc", 0))
+    Ac  = int(row.get("NeuAc", 0))
+    Gc  = int(row.get("NeuGc", 0))
+    K   = int(row.get("KDN", 0))
+    F   = int(row.get("Fuc", 0))
+    A   = int(row.get("HexA", 0))
+    s   = int(row.get("SO3", 0))
+    p   = int(row.get("PO3H", 0))
+    return canonical_label_tuple((H, N, Ac, Gc, K, F), hexA=A, so3=s, po3h=p, style=style)
+
+
 
 #legacy, or 2023 version of in silico
 def legacy_two_col_to_new(path, comp_cols=("Hex","HexNAc","NeuAc","NeuGc","KDN","Fuc")):
