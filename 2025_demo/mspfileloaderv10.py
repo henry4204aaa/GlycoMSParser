@@ -1,5 +1,5 @@
 import os
-version = "0.9987"
+version = "0.999"
 last_update = 20250929
 import msprawextractor as mspext
 import threading
@@ -141,6 +141,7 @@ except Exception:
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
+# v0.999: fixed PL unlabel dataset functionality
 # v0.9987: hide the old version of converting PL datasets to trainable data in ML analysis tab (intermediate function. can be removed safely)
 # v0.9985-86: fix the negative mode pseudolabeling issue (the in silico glycan list was fine, now fixing PL workflow itself)
 # v0.9984: fix the issue when user cwd (output directory for file conversion) falls to default when directly open the program by clicking v10.py
@@ -2171,6 +2172,142 @@ def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value):
     out["ion hits m/z"] = hits_str
     return out
 
+#20250929 for combining datasets
+# --- Combine Trainable Datasets (Plan 1) ---
+def _infer_uid_series(df: pd.DataFrame, src_base: str):
+    """
+    Returns a UID series. Prefer MS2scan_no if present; otherwise index-based.
+    UID format: {src_base}#scan{MS2scan_no}  OR  {src_base}#row{n}
+    """
+    # normalize possible scan column variants
+    scan_candidates = ["MS2scan_no", "MS2scan", "ScanNo", "scan", "scan_no", "ms2_scan_no"]
+    scan_col = next((c for c in scan_candidates if c in df.columns), None)
+
+    if scan_col is not None:
+        # convert to string for safe concatenation
+        return df[scan_col].astype(str).map(lambda s: f"{src_base}#scan{s}")
+    else:
+        # stable index numbering
+        # NOTE: don't use df.index because it may be non-contiguous after prev ops
+        return pd.Series([f"{src_base}#row{i}" for i in range(1, len(df) + 1)], index=df.index)
+
+def _ensure_uid_and_origin(df: pd.DataFrame, src_path: str) -> pd.DataFrame:
+    """
+    - Adds UID if no 'UID'/'uid' column exists.
+    - Adds Origin_File and Origin_Basename columns for traceability.
+    Returns a new DataFrame (doesn't modify the input df in-place).
+    """
+    out = df.copy()
+    src_abs = os.path.abspath(src_path)
+    src_base = os.path.splitext(os.path.basename(src_path))[0]
+
+    # Respect existing UID (case-insensitive)
+    uid_col = None
+    for c in out.columns:
+        if str(c).strip().lower() == "uid":
+            uid_col = c
+            break
+    if uid_col is None:
+        out.insert(0, "UID", _infer_uid_series(out, src_base))
+
+    # Always add origin columns (safe to overwrite with same values)
+    out.insert(1, "Origin_Basename", src_base)
+    out.insert(2, "Origin_File", src_abs)
+    return out
+
+def _outer_union_concat(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Concatenate with outer join to keep superset of columns.
+    Missing columns are NA; order: ensure UID/Origin_* stay in front.
+    """
+    if not dfs:
+        return pd.DataFrame()
+    big = pd.concat(dfs, axis=0, join="outer", ignore_index=True)
+
+    # Put UID + Origin_* first if present
+    front = [c for c in ["UID", "Origin_Basename", "Origin_File"] if c in big.columns]
+    rest  = [c for c in big.columns if c not in front]
+    return big[front + rest]
+
+def combine_trainable_datasets_ui(parent=None):
+    """
+    UI entry point:
+      1) Ask for multiple trainable CSVs
+      2) Load each robustly (sniff TSV if needed)
+      3) Ensure UID + Origin_*
+      4) Concatenate (outer union), prompt for save name
+      5) Save combined CSV and a small .txt log
+    """
+    from tkinter import filedialog, messagebox
+
+    filepaths = filedialog.askopenfilenames(
+        title="Select trainable CSV files to combine",
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+    )
+    if not filepaths:
+        return
+
+    dfs = []
+    errors = []
+    for p in filepaths:
+        try:
+            # Heuristic: many of your trainables are comma-CSV; but support TSV just in case
+            prefer_tab = False
+            # if you want to force TSV sniff for certain prefixes:
+            # prefer_tab = os.path.basename(p).lower().startswith(("ms2_", "trainable_"))
+            df = _robust_read_csv(p, prefer_tab=prefer_tab)
+            df = _ensure_uid_and_origin(df, p)
+            dfs.append(df)
+        except Exception as e:
+            errors.append(f"{p} -> {e}")
+
+    if not dfs:
+        messagebox.showerror("Combine Datasets", "No files could be read.\n\n" + "\n".join(errors))
+        return
+
+    combined = _outer_union_concat(dfs)
+
+    # Ask user where to save
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    default_name = f"combined_trainable_{ts}.csv"
+    out_csv = filedialog.asksaveasfilename(
+        title="Save combined CSV as…",
+        defaultextension=".csv",
+        initialfile=default_name,
+        filetypes=[("CSV files", "*.csv")]
+    )
+    if not out_csv:
+        return
+
+    try:
+        combined.to_csv(out_csv, index=False)
+    except Exception as e:
+        messagebox.showerror("Save Failed", f"Could not save combined CSV:\n{e}")
+        return
+
+    # Write a tiny log
+    log_path = os.path.splitext(out_csv)[0] + "_combine_log.txt"
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("GlycoMSP Combine Trainable Datasets Log\n")
+            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Output CSV: {os.path.abspath(out_csv)}\n\n")
+            f.write("Sources:\n")
+            for p, df in zip(filepaths, dfs):
+                f.write(f"  - {os.path.abspath(p)}  (rows after UID/origin inject: {len(df)})\n")
+            f.write("\nRow count (combined): " + str(len(combined)) + "\n")
+    except Exception as e:
+        # Log failure is non-fatal
+        print(f"[combine] Failed to write log: {e}")
+
+    messagebox.showinfo(
+        "Combine Datasets",
+        "Done!\n\n"
+        f"Combined CSV:\n{out_csv}\n\n"
+        f"Log:\n{log_path}"
+    )
+
+#end 20250929
 
 def open_prepare_dataset_window():
     subwin = tk.Toplevel(root)
@@ -5531,50 +5668,7 @@ def open_ml_analysis_window():
 
         # recompute effective if you keep one
         st["effective"] = copy.deepcopy(ed)
-    """
-    def _write_train_ui_into_state(
-        test_size, val_size, stratify, min_per_class,
-        use_balance, majority_label, majority_factor,
-        n_estimators, use_class_weight, real_world_test,
-        thr_enable, thr_tau, thr_margin
-    ):
-        st = _ensure_ml_state()
-        ed = st["editor"]
 
-        # Ensure sections exist
-        tr = ed.setdefault("train", {})
-        mdl = ed.setdefault("model", {})
-        bal = ed.setdefault("balance", {})
-
-        # Train/test/val
-        tr["test_size"] = float(test_size)
-        tr["val_size"] = float(val_size)
-        tr["stratify"] = bool(stratify)
-        tr["real_world_test"] = bool(real_world_test)
-        tr["threshold"] = {
-            "enabled": bool(thr_enable),
-            "tau": float(thr_tau),
-            "margin": float(thr_margin),
-        }
-
-        # Global knobs
-        ed["min_samples_per_class"] = int(min_per_class)
-
-        # Balance
-        bal["enabled"] = bool(use_balance)
-        bal["majority_label"] = str(majority_label or "Non-glycan").strip()
-        bal["majority_factor"] = int(majority_factor)
-
-        # Model (current RF only)
-        mdl["type"] = "RandomForest"
-        mdl["n_estimators"] = int(n_estimators)
-        mdl["class_weight"] = "balanced" if use_class_weight else None
-
-        # Effective = editor for now (you can add file/experiment overlays later)
-        st["effective"] = copy.deepcopy(ed)
-
-        _emit_ml_state_changed_ui_refresh()
-    """
     def _deep_merge(a, b):
         if isinstance(a, dict) and isinstance(b, dict):
             out = dict(a)
@@ -5599,6 +5693,81 @@ def open_ml_analysis_window():
             t1.config(state="normal"); t1.delete("1.0", "end"); t1.insert("1.0", ed); t1.config(state="normal")
         if t2:
             t2.config(state="normal"); t2.delete("1.0", "end"); t2.insert("1.0", eff); t2.config(state="normal")
+
+    #20250929
+    def _drop_meta_and_get_X(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Returns a numeric-only feature matrix X.
+        Drops obviously non-feature metadata columns like UID and Origin_*.
+        Also attempts to coerce object columns to numeric if they are mostly numeric.
+        """
+        import numpy as np
+        meta_exact = {"uid", "predicted_label", "label_str", "class_str",
+                    "origin_file", "origin_basename"}
+        meta_prefix = ("origin_",)
+
+        # drop meta columns
+        drop_cols = []
+        for c in df.columns:
+            lc = str(c).strip().lower()
+            if lc in meta_exact or any(lc.startswith(p) for p in meta_prefix):
+                drop_cols.append(c)
+        df2 = df.drop(columns=drop_cols, errors="ignore").copy()
+
+        # try to coerce mostly numeric object columns
+        for c in list(df2.columns):
+            if df2[c].dtype == object:
+                coerced = pd.to_numeric(df2[c], errors="coerce")
+                # keep coerced if it's largely numeric (>=95% not NaN)
+                if coerced.notna().mean() >= 0.95:
+                    df2[c] = coerced
+
+        # keep strictly numeric columns for X
+        X = df2.select_dtypes(include=[np.number])
+        return X    
+
+    import re
+
+    # Pure manual: FHNSGKDN order, no neg-mode extras
+    _MANUAL_PURE = re.compile(r"^(?:F\d+)?H\d+N\d+(?:S\d+)?(?:G\d+)?(?:KDN\d+)?$", re.IGNORECASE)
+
+    # Manual + PL extensions allowed:
+    #   optional F..., then H...N..., optional S/G/KDN, optional A..., optional trailing s/p suffixes (lowercase)
+    _MANUAL_EXT = re.compile(
+        r"^(?:F\d+)?H\d+N\d+(?:S\d+)?(?:G\d+)?(?:KDN\d+)?(?:A\d+)?(?:[sp]\d+)?$",
+        re.IGNORECASE
+    )
+
+    def _looks_tuplelike_for_structure(x) -> bool:
+        # tuple/list/array or string like "(5,4,0,0,0,1)"
+        if isinstance(x, (tuple, list)):
+            return True
+        if isinstance(x, str) and re.fullmatch(r"\(\s*\d+(?:\s*,\s*\d+){5}\s*\)", x):
+            return True
+        return False
+
+    def normalize_structure_for_training(val, parse_tuple_to_manual):
+        """
+        - If it's tuple-like -> convert using parse_tuple_to_manual (your pretrain_normalizer.parse_structure_to_manual)
+        - If it's already manual (pure or PL-extended, e.g., includes A / trailing s/p) -> KEEP AS-IS
+        - Else if it's composition-like but messy -> try parse_tuple_to_manual (it will reorder FHNSGKDN)
+        - Else -> passthrough (e.g., 'Non-glycan')
+        """
+        s = str(val).strip()
+        if _looks_tuplelike_for_structure(val):
+            return parse_tuple_to_manual(val)
+
+        if _MANUAL_EXT.match(s) or _MANUAL_PURE.match(s):
+            return s  # keep A / s / p (and normal manual) untouched
+
+        # Fallback: if it looks like a composition string (any letter+digits), try parser
+        if re.fullmatch(r"(?:[A-Za-z]+?\d+)+", s):
+            try:
+                return parse_tuple_to_manual(s)
+            except Exception:
+                return s
+
+        return s
 
 
     #20250909
@@ -7735,13 +7904,37 @@ def open_ml_analysis_window():
         if label_col not in df.columns:
             messagebox.showerror("Missing Column", f"{label_col} not found."); return
 
+        #20250929 ver to accept SO3(s), HexA and PO3H(p)
+        # convert the composition to manual-style ONLY when needed
+        print("[MLdebug] labels before:", sorted(set(df[label_col].astype(str)))[:10], "...")
+
+        # Normalize ONLY when needed (do not strip A / s / p!)
+        try:
+            if label_col == "Structure":
+                before = sorted(set(df[label_col].astype(str)))[:10]
+                df[label_col] = df[label_col].map(
+                    lambda x: normalize_structure_for_training(x, normalizer.parse_structure_to_manual)
+                )
+                after  = sorted(set(df[label_col].astype(str)))[:10]
+                print("[MLdebug] labels before:", before, "...")
+                print("[MLdebug] labels after:",  after,  "...")
+            # For GlyToucan/IUPAC, leave as-is.
+        except Exception as e:
+            print("[dev] structure normalization warning:", e)
+            messagebox.showerror(
+                "Structure normalization failed",
+                "Can't normalize labels. See console for details."
+            )
+            return
+        print("[MLdebug] labels after:",  sorted(set(df[label_col].astype(str)))[:10], "...")
+        """
         #convert the composition to man-readable one
         try:
             df[label_col] = df[label_col].apply(normalizer.parse_structure_to_manual)
         except Exception as e:
             print(f"[dev]Encounter structure conversion error")
             messagebox.showerror("Can't convert the structure(composition) to man-like format", str(e)); return
-
+        """
         # encode label AFTER any string/tuple harmonization (if needed)
         y_raw = df[label_col].astype(str)
 
@@ -7821,6 +8014,19 @@ def open_ml_analysis_window():
         #    random_state=42,
         #    n_jobs=-1
         #)
+
+        #20250929
+        # --- NEW: sanitize features & lock column order ---
+        X_train_num = _drop_meta_and_get_X(X_train)
+        cols = list(X_train_num.columns)
+
+        # align val/test to train's columns (fill missing with 0)
+        X_val_num  = _drop_meta_and_get_X(X_val).reindex(columns=cols, fill_value=0)
+        X_test_num = _drop_meta_and_get_X(X_test).reindex(columns=cols, fill_value=0)
+
+        # replace originals
+        X_train, X_val, X_test = X_train_num, X_val_num, X_test_num
+        # --- END NEW ---
 
         #model = RandomForestClassifier(n_estimators=100, random_state=42)
         model.fit(X_train, y_train_enc)
@@ -8616,7 +8822,7 @@ def open_ml_analysis_window():
         return out_path
     """
     #20250915 end here?    
-
+    """
     #creating unlabeled datasets
     def extract_fragment_masses(excel_path, sheet_name="ionlist"):
         xls = pd.ExcelFile(excel_path, engine="openpyxl")
@@ -8656,7 +8862,217 @@ def open_ml_analysis_window():
             result.append(feature_row)
 
         return pd.DataFrame(result)
-    
+        """
+    #20250929 ver
+    # --- creating unlabeled datasets (PL or manual) ---
+
+    def extract_fragment_masses(path, sheet_name="ionlist"):
+        """
+        Load a column of fragment masses from either:
+        • Excel: prefers a sheet named 'ionlist' (or the provided sheet_name)
+        • CSV:   uses a column named 'mass' (case-insensitive)
+        Returns: list[float]
+        """
+        import pandas as pd
+        p = (path or "").strip()
+        if not p:
+            return []
+
+        if p.lower().endswith((".xlsx", ".xls")):
+            xls = pd.ExcelFile(p, engine="openpyxl")
+            # try requested sheet first; else try common names; else first sheet that has a mass-like column
+            sheet_to_use = None
+            wanted = {sheet_name.lower(), "ionlist", "ions", "ion_list"}
+            for s in xls.sheet_names:
+                if s.strip().lower() in wanted:
+                    sheet_to_use = s
+                    break
+            if sheet_to_use is None:
+                # fallback: first sheet with something like 'mass'/'mz'
+                for s in xls.sheet_names:
+                    df = xls.parse(s)
+                    cols = {str(c).strip().lower() for c in df.columns}
+                    if any(k in cols for k in ("mass", "mz", "ion_mz", "m/z")):
+                        sheet_to_use = s
+                        break
+            df = xls.parse(sheet_to_use or xls.sheet_names[0])
+        else:
+            # CSV ion list
+            df = pd.read_csv(p, engine="python")
+
+        # normalize to a 'mass' column
+        colmap = {str(c).strip().lower(): c for c in df.columns}
+        for k in ("mass", "mz", "ion_mz", "m/z"):
+            if k in colmap:
+                series = df[colmap[k]].dropna().astype(float)
+                return series.tolist()
+        return []
+
+
+    def extract_ion_intensities(tsv_like_path, fragment_masses, ppm=20.0):
+        """
+        Read converted MS2 file (tab-separated but *.csv) and
+        return a DataFrame with: protonatedmass, MS2scan_no, and one column per ion.
+        """
+        import numpy as np
+        import pandas as pd
+
+        df = pd.read_csv(tsv_like_path, sep="\t")  # your converter writes TSV
+        # tolerate either literal lists or python-literal strings in peaklist/peakintensity
+        def _parse_list(x):
+            if isinstance(x, (list, tuple)):
+                return list(map(float, x))
+            s = str(x).strip()
+            # tolerate "[]" or "(...)" or "1,2,3"
+            if s.startswith(("(", "[")) and s.endswith((")", "]")):
+                try:
+                    return [float(v) for v in s.strip("()[]").split(",") if v.strip() != ""]
+                except Exception:
+                    pass
+            try:
+                return [float(v) for v in s.split(",") if v.strip() != ""]
+            except Exception:
+                return []
+
+        out_rows = []
+        for _, row in df.iterrows():
+            peaks = _parse_list(row.get("peaklist", ""))
+            intensities = _parse_list(row.get("peakintensity", ""))
+            if not peaks or not intensities:
+                continue
+            if len(peaks) != len(intensities):
+                # skip malformed line
+                continue
+
+            feature_row = {
+                "protonatedmass": row.get("protonatedmass", 0.0),
+                "MS2scan_no": int(row.get("MS2scan_no", 0)),
+            }
+            peak_array = np.array(peaks, dtype=float)
+            intensity_array = np.array(intensities, dtype=float)
+
+            for target in fragment_masses:
+                target = float(target)
+                ppm_tol = target * float(ppm) / 1e6
+                mask = np.abs(peak_array - target) <= ppm_tol
+                if np.any(mask):
+                    feature_row[str(target)] = float(np.log10(np.max(intensity_array[mask]) + 1.0))
+                else:
+                    feature_row[str(target)] = 1.0  # keep “1.0” default you were using
+
+            out_rows.append(feature_row)
+
+        return pd.DataFrame(out_rows)
+
+
+    def create_unlabeled_dataset():
+        """
+        Builds unlabeled feature CSVs for each eligible sample in an experiment JSON.
+        Eligibility now means:
+        - has a converted MS2 file at samples[*].csv
+        - and has EITHER:
+            samples[*].excel (manual annotation sheet), OR
+            samples[*].ionlist_path (+ optional samples[*].ion_sheet)
+        """
+        from pathlib import Path
+        exp_path = filedialog.askopenfilename(filetypes=[("Experiment JSON", "*.json")])
+        if not exp_path:
+            return
+
+        def _sample_in_filename(sample_id, path):
+            name = os.path.basename(path).lower()
+            # require the condition token and the run token (e.g., ST1OE / COKOST1OE / P1KOST1OE and NGE1)
+            must_have = []
+            for tok in sample_id.lower().split("_"):
+                if tok in {"u937", "cells", "ng"}:
+                    continue
+                must_have.append(tok)
+            return all(tok in name for tok in must_have)
+
+        try:
+            with open(exp_path, "r", encoding="utf-8") as f:
+                exp = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Failed to Load JSON", str(e))
+            return
+
+        # ask once for ppm
+        ppm_value = simpledialog.askinteger("PPM Tolerance", "Enter PPM tolerance (e.g., 20):",
+                                            minvalue=1, maxvalue=200)
+        if ppm_value is None:
+            return
+
+        made = 0
+        missing = []
+
+        #future-proof guard
+        # before the samples loop
+        seen_out = set()
+        made_paths = []
+
+        # inside the loop, right after you compute `base` and `out_dir`
+        out_path = os.path.join(out_dir, f"{base}_unlabeled_ppm{ppm_value}.csv")
+        if out_path in seen_out:
+            # collision (likely because two samples share the same CSV)
+            safe_id = re.sub(r'[^A-Za-z0-9._-]+', '_', sample_id)
+            out_path = os.path.join(out_dir, f"{base}__{safe_id}_unlabeled_ppm{ppm_value}.csv")
+
+        # after successful save:
+        seen_out.add(out_path)
+        made_paths.append(out_path)
+
+        for sample_id, sample_info in (exp.get("samples") or {}).items():
+            raw_csv = sample_info.get("csv")
+            # NEW: allow ionlist_path as the source for fragment masses
+            ion_src   = sample_info.get("excel") or sample_info.get("ionlist_path")
+            ion_sheet = sample_info.get("ion_sheet") or "ionlist"
+
+            #newly added for debug
+            if not _sample_in_filename(sample_id, raw_csv):
+                missing.append(f"{sample_id} (csv looks mismatched: {os.path.basename(raw_csv)})")
+                continue
+
+            if not raw_csv or not ion_src:
+                missing.append(sample_id)
+                continue
+
+            try:
+                ion_list = extract_fragment_masses(ion_src, sheet_name=ion_sheet)
+                if not ion_list:
+                    raise ValueError(f"No 'mass' column found in {os.path.basename(ion_src)}")
+
+                feats = extract_ion_intensities(raw_csv, ion_list, ppm=ppm_value)
+
+                # keep output alongside the raw csv
+                out_dir = Path(os.path.dirname(raw_csv))
+                base = Path(os.path.splitext(os.path.basename(raw_csv))[0])
+                out_path = out_dir / f"{base}_unlabeled_ppm{ppm_value}.csv"
+                feats.to_csv(out_path, index=False)
+
+                # remember path for this sample (so Predict tab can pick it up later)
+                sample_info["unlabeled_csv"] = str(out_path)
+                made += 1
+            except Exception as e:
+                print(f"[ERROR] Unlabeled build failed for '{sample_id}': {e}")
+
+        # tell user what happened
+        if made == 0:
+            messagebox.showwarning("No Samples Processed",
+                                "No eligible samples were found in this experiment file.\n"
+                                "Tip: each sample needs 'csv' + ('excel' or 'ionlist_path').")
+        else:
+            # persist updated experiment file with recorded unlabeled paths (non-breaking)
+            try:
+                with open(exp_path, "w", encoding="utf-8") as f:
+                    json.dump(exp, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+            msg = [f"Created {made} unlabeled dataset(s)."]
+            if missing:
+                msg.append(f"Skipped (missing csv/ionlist): {', '.join(missing)}")
+            messagebox.showinfo("Done", "\n".join(msg))    
+
+    """
     #20250915 ver
     def create_unlabeled_dataset():
         # Let the user pick either an experiment .exp.json OR a single sample .method.json
@@ -8785,34 +9201,7 @@ def open_ml_analysis_window():
 
             except Exception as e:
                 print(f"[ERROR] Failed on sample '{sample_id}': {e}")
-        """
-        for sample_id, sample_info in samples.items():
-            try:
-                raw_csv = sample_info.get("csv")
-                annotation_excel = sample_info.get("excel")
-                method_json = sample_info.get("json")
-                out_path = None
 
-                if annotation_excel and raw_csv:
-                    # legacy/manual route (Excel ion sheet)
-                    ion_list = read_fragment_masses_any(annotation_excel, sheet_name="ionlist")
-                    feature_df = extract_ion_intensities(raw_csv, ion_list, ppm=float(ppm_value))
-                    out_path = os.path.splitext(raw_csv)[0] + f"_unlabeled_ppm{ppm_value}.csv"
-                    feature_df.to_csv(out_path, index=False)
-
-                elif method_json and os.path.exists(method_json):
-                    # PL route (external ion list via method.json)
-                    out_path = create_unlabeled_from_method(method_json, default_ppm=ppm_value)
-
-                if out_path:
-                    sample_info["unlabeled_dataset"] = out_path
-                    changed = True
-                else:
-                    print(f"[SKIP] sample '{sample_id}' has neither (csv+excel) nor method.json")
-
-            except Exception as e:
-                print(f"[ERROR] Failed on sample '{sample_id}':", e)
-        """
         if changed:
             # Persist ppm to the experiment JSON for traceability
             J["prediction_parameters"] = {"ppm": int(ppm_value)}
@@ -8826,7 +9215,7 @@ def open_ml_analysis_window():
             messagebox.showinfo("Done", "Unlabeled datasets saved and experiment file updated.")
         else:
             messagebox.showwarning("No Samples Processed", "No eligible samples were found in this experiment file.")
-
+    """
     """
     def create_unlabeled_dataset():
         exp_path = filedialog.askopenfilename(filetypes=[("Experiment JSON", "*.json")])
@@ -9048,7 +9437,7 @@ def open_ml_analysis_window():
     origin_info.grid(row=10, column=0, columnspan=2, padx=10, pady=5)
     # -- Training tab and prediction tab UI (end reminder buttons) --
     tk.Label(train_tab, text="(🔜) Combine Datasets for Training").grid(row=11, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
-    tk.Button(train_tab, text="[Placeholder] Combine Datasets").grid(row=11, column=1, columnspan=2, padx=10, pady=5)
+    tk.Button(train_tab, text="[Placeholder] Combine Datasets", command=lambda: combine_trainable_datasets_ui(root)).grid(row=11, column=1, columnspan=2, padx=10, pady=5)
     
     # --- Tab 2: Predict ---
     predict_tab = ttk.Frame(notebook)

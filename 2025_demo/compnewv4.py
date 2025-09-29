@@ -1,5 +1,5 @@
-version = "1.052"
-last_update = 20250926
+version = "1.053"
+last_update = 20250929
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -122,7 +122,19 @@ def _normalize_derivatization(flags):
 
     return deri, reduced
 
-
+def _norm_range(flags, key, default=(0, 1)):
+    r = flags.get(key, default)
+    # accept [lo, hi], (lo, hi), or a single int "hi"
+    if isinstance(r, (list, tuple)) and len(r) == 2:
+        lo, hi = int(r[0]), int(r[1])
+        if lo > hi:
+            lo, hi = hi, lo
+        return (max(0, lo), max(0, hi))
+    try:
+        hi = int(r)
+        return (0, max(0, hi))
+    except Exception:
+        return default
 
 #N-glycan settings (need revision)
 NG_flags = {
@@ -181,13 +193,43 @@ def _mk_term_obj(sum_tuple, hexA=0):
     # Standard container used by permutation code
     return {"sum": tuple(sum_tuple), "hexA": int(hexA)}
 
+#20250909 ver
+def decide_functional_groups(comp6, hexA, flags):
+    H, N, Ac, Gc, KDN, F = comp6
+
+    so3_on  = bool(flags.get("SO3"))
+    po3h_on = bool(flags.get("PO3H"))
+
+    max_so3  = _norm_range(flags, "SO3_range",  (0, 1))[1] if so3_on  else 0
+    max_po3h = _norm_range(flags, "PO3H_range", (0, 1))[1] if po3h_on else 0
+
+    so3 = 0
+    po3h = 0
+
+    # --- your rules (phosphate preferred, then sulfate) ---
+    # PO3H preference: N == 2, 5 ≤ H ≤ 9, no sialic (Ac/Gc/KDN all 0), F ≤ 1
+    if po3h_on and (N == 2) and (5 <= H <= 9) and (Ac == 0 and Gc == 0 and KDN == 0) and (F <= 1):
+        # scale to allowed upper bound (lets [2,2] request produce 2)
+        po3h = max_po3h
+        return so3, po3h
+
+    # SO3 fallback: N ≥ 3 and H ≥ 4
+    if so3_on and (N >= 3) and (H >= 4):
+        so3 = max_so3
+        return so3, po3h
+
+    # default: none
+    return so3, po3h
+
+"""
+Return (so3, po3h) for this composition.
+Encode your exclusivity/priority rules here.
+Example scaffolding (replace with your real logic):
+"""
+"""
 #20250926 SO3/PO3H mass calc helper
 def decide_functional_groups(comp6, hexA, flags):
-    """
-    Return (so3, po3h) for this composition.
-    Encode your exclusivity/priority rules here.
-    Example scaffolding (replace with your real logic):
-    """
+
     H, N, Ac, Gc, KDN, F = comp6
     # default
     so3 = 0; po3h = 0
@@ -205,7 +247,7 @@ def decide_functional_groups(comp6, hexA, flags):
         so3 = min(1, flags.get("SO3_range", [0,1])[1])
     return so3, po3h
     
-    """
+    
     # Example placeholder rules — replace:
     if prefer_p and N >= 2 and Ac == 0:
         po3h = min(1, flags.get("PO3H_range", [0,1])[1])
@@ -254,7 +296,7 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
             #fix for HCC's calculation ps. C=12.0011 vs 12.000 get 0.0066diff #)316.2028) - 15.023 - 1.0073
         #not fixed for now (in 1 SO3/PO3H I subtract 1 more oxygen since I think that's the linkage place? not sure...)
         if so3 == 2:
-            M += 2 * 1.0073 - 14.0157 - 2 * (16.0313 + 0.0011) # to neutralize [SO3]2- and keep -2 charge with one extra CH2- loss by sulphate addition
+            M += 2 * 1.0073 - 14.0157 -  (16.0313 + 0.0011) + 2 * 0.0011  #*2 is not needed? why # to neutralize [SO3]2- and keep -2 charge with one extra CH2- loss by sulphate addition
             M = M/2 
         if po3h == 2: #directly use M6P per - 4 site (exclude 6P and 1 for B ion )
             M = (M - 204.09977 + 330.1493) - 14.0157 - 15.023 - 1.0073 - 0.0064 - 14.0157 - 16.0313 #-16 was newly added
@@ -389,14 +431,15 @@ def save_glycan_pseudocomp_to_csv(
             # normalize comp / hexA as you already do...
             #row_so3  = int(item.get("SO3", so3))   if isinstance(item, dict) else so3
             #row_po3h = int(item.get("PO3H", po3h)) if isinstance(item, dict) else po3h
-            if isinstance(item, dict):
-                print("[writer] incoming keys:", list(item.keys()),
-                    "SO3=", item.get("SO3"), "PO3H=", item.get("PO3H"))
+            #for debug
+            #if isinstance(item, dict):
+            #    print("[writer] incoming keys:", list(item.keys()),
+            #        "SO3=", item.get("SO3"), "PO3H=", item.get("PO3H"))
 
             row_so3  = int(item.get("SO3",  so3))  if isinstance(item, dict) else so3
             row_po3h = int(item.get("PO3H", po3h)) if isinstance(item, dict) else po3h
 
-            print("[writer] using SO3,PO3H =", row_so3, row_po3h, "for", comp, "HexA", hexA_val)
+            #print("[writer] using SO3,PO3H =", row_so3, row_po3h, "for", comp, "HexA", hexA_val)
 
             if use_v4:
                 mass = precursormassv4(comp, deri=derivatization, reduced=reduced,
@@ -975,6 +1018,18 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
     if user_flags:
         flags.update(user_flags)
     deri, reduced = _normalize_derivatization(user_flags or {})
+
+    #debug
+    """
+    flags["SO3_range"]  = _norm_range(flags, "SO3_range",  (0, 1))
+    flags["PO3H_range"] = _norm_range(flags, "PO3H_range", (0, 1))
+
+    if flags.get("debug"):
+        print("[ranges] SO3_range =", flags["SO3_range"],
+            "PO3H_range =", flags["PO3H_range"],
+            "SO3 toggle =", bool(flags.get("SO3")),
+            "PO3H toggle =", bool(flags.get("PO3H")))
+    """
     #suppose you finished updating the flags
     #generate terminal and internal permutations
     terminal_comb = terminal_NG(**select_flags(flags, 
@@ -1005,8 +1060,8 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
 
     #add catcher for mode, and negative charge groups
     mode = _normalize_mode(flags)
-    so3 = flags.get("SO3", 0)
-    po3h = flags.get("PO3H", 0)
+    #so3 = flags.get("SO3", 0)
+    #po3h = flags.get("PO3H", 0)
 
     if flags["debug"]:
         print(f"[debug]: the unique composition count is {len(final_set)} and first 10 composition is \n")
@@ -1048,6 +1103,8 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
         # optional: show a few that fired
         print("[FG] examples SO3=1:", [r["sum"] for r in rows if r.get("SO3")==1][:5])
         print("[FG] examples PO3H=1:", [r["sum"] for r in rows if r.get("PO3H")==1][:5])
+        print("[FG] examples SO3=2:", [r["sum"] for r in rows if r.get("SO3")==2][:5])
+        print("[FG] examples PO3H=2:", [r["sum"] for r in rows if r.get("PO3H")==2][:5])
             # then call:
         # (A) no range fan-out – simple, uniform groups for all rows
         save_glycan_pseudocomp_to_csv(rows, filename=filename, #passed -> rows
