@@ -1,6 +1,6 @@
 import os
-version = "0.999"
-last_update = 20250929
+version = "0.9991"
+last_update = 20251001
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -141,6 +141,7 @@ except Exception:
 """
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
+# v0.9991: fix minor bugs
 # v0.999: fixed PL unlabel dataset functionality
 # v0.9987: hide the old version of converting PL datasets to trainable data in ML analysis tab (intermediate function. can be removed safely)
 # v0.9985-86: fix the negative mode pseudolabeling issue (the in silico glycan list was fine, now fixing PL workflow itself)
@@ -991,25 +992,52 @@ class MetadataEditorWindow:
 
         tk.Button(raw_file_frame, text="Browse", command=select_raw_file).pack(side=tk.LEFT, padx=5)
 
-
+    #20251001 replace
     def on_conversion_complete(self):
-        #self.status_label.config(text="Conversion complete. Ready for metadata.", fg="green")
-        self._safe_set_status("Conversion complete. Ready for metadata.", fg="green") #20250917 patch
-        # Extract filename base for use in renaming
+        # Status (your existing line)
+        self._safe_set_status("Conversion complete. Ready for metadata.", fg="green")
+
+        # Safely reflect current raw path into the (readonly) Entry if it still exists
+        try:
+            entry = getattr(self, "raw_file_entry", None)
+            if entry and entry.winfo_exists():
+                entry.config(state="normal")
+                entry.delete(0, "end")
+                entry.insert(0, self.current_raw_file or "")
+                entry.config(state="readonly")
+        except tk.TclError:
+            # Widget already destroyed; nothing else to do here
+            return
+
+        # Extract filename base (your existing line)
         self.rawfilename = os.path.splitext(os.path.basename(self.current_raw_file))[0]
 
-        # Re-enable entries and buttons
-        for entry in self.entries.values():
-            entry.config(state="normal")
-        for child in self.window.winfo_children():
-            if isinstance(child, tk.Button):
-                child.config(state="normal")
+        # Re-enable entries and buttons (guard each widget in case the window is closing)
+        try:
+            for entry_widget in getattr(self, "entries", {}).values():
+                if entry_widget and entry_widget.winfo_exists():
+                    entry_widget.config(state="normal")
+            for child in self.window.winfo_children():
+                if isinstance(child, tk.Button) and child.winfo_exists():
+                    child.config(state="normal")
+        except tk.TclError:
+            # Window or widgets may be gone; abort cleanly
+            return
 
-        # Pre-fill if last used
-        if self.last_metadata:
-            self.fill_fields_from_metadata(self.last_metadata)
+        # Pre-fill if last used (as before)
+        if getattr(self, "last_metadata", None):
+            try:
+                self.fill_fields_from_metadata(self.last_metadata)
+            except Exception:
+                # prefill is best-effort; continue even if it fails
+                pass
 
-        self.window.title(f"Metadata for: {os.path.basename(self.current_raw_file)}")
+        # Set title if window still exists
+        try:
+            if self.window and self.window.winfo_exists():
+                self.window.title(f"Metadata for: {os.path.basename(self.current_raw_file)}")
+        except tk.TclError:
+            return
 
     def load_file(self, raw_file):
         self._error_mode = False        # ← NEW
@@ -1749,31 +1777,45 @@ def _robust_read_csv(path, prefer_tab=False):
             last_err = e
     raise last_err
 
+#fix in 20251001
 def _read_ion_df(path):
     import pandas as pd
     if not path:
         return None
     p = str(path).lower()
-
+    ext = os.path.splitext(path)[1].lower() #need or not need
     if p.endswith((".xlsx", ".xls")):
-        sheets = pd.read_excel(path, sheet_name=None)
-        # pick sheet named like "ionlist" first, else the first with a mass-like column
-        preferred = None
-        for name in sheets:
-            if name.strip().lower() in {"ionlist", "ions", "ion_list"}:
-                preferred = sheets[name]
-                break
-        if preferred is None:
-            for df in sheets.values():
-                cols_l = {c.strip().lower() for c in df.columns}
-                if any(c in cols_l for c in {"mass", "mz", "ion_mz", "m/z"}):
-                    preferred = df
+        try:
+            sheets = pd.read_excel(path, sheet_name=None)
+            # pick sheet named like "ionlist" first, else the first with a mass-like column
+            preferred = None
+            for name in sheets:
+                if name.strip().lower() in {"ionlist", "ions", "ion_list"}:
+                    preferred = sheets[name]
                     break
-        if preferred is None:
-            return None
-        df = preferred
+            if preferred is None:
+                for df in sheets.values():
+                    cols_l = {c.strip().lower() for c in df.columns}
+                    if any(c in cols_l for c in {"mass", "mz", "ion_mz", "m/z"}):
+                        preferred = df
+                        break
+            if preferred is None:
+                return None
+            df = preferred
+        except ImportError as e:
+            messagebox.showerror(
+                "Missing dependency",
+                "Reading .xlsx needs 'openpyxl'.\n\nPlease install:\n\npip install openpyxl"
+            )
+            raise            
+    elif p in (".csv", ".tsv"):
+        sep = "\t" if ext == ".tsv" else ","
+        return {"ionlist": pd.read_csv(path, sep=sep, encoding="utf-8")}
     else:
-        df = pd.read_csv(path, engine="python")
+        try:
+            df = pd.read_csv(path, engine="python")
+        except:
+            raise ValueError(f"Unsupported ion-list file: {path}")
 
     # normalize a mass column name
     col_map = {c.lower(): c for c in df.columns}
@@ -4527,6 +4569,17 @@ def open_prepare_dataset_window():
         )
         # just in case it sneaks in from elsewhere:
         out.drop(columns=["observed_mass"], errors="ignore", inplace=True)
+       #20250930 fix win11 issue
+       # 7) Save TSV next to converted CSV  (ABSOLUTE + explicit encoding)
+        outdir  = os.path.dirname(os.path.abspath(csv_path))
+        outname = f"{sample_name}_pseudolabels_{datetime.now().strftime('%Y%m%d')}.tsv"
+        outpath = os.path.abspath(os.path.join(outdir, outname))
+        out.to_csv(outpath, index=False, sep="\t", encoding="utf-8")
+
+        # store absolute path so refresh_tree can always find it
+        files["pseudolabel_csv"] = outpath
+
+        """
         # 7) Save TSV next to converted CSV
         outdir  = os.path.dirname(csv_path)
         outname = f"{sample_name}_pseudolabels_{datetime.now().strftime('%Y%m%d')}.tsv"
@@ -4534,6 +4587,7 @@ def open_prepare_dataset_window():
         out.to_csv(outpath, index=False, sep="\t")
 
         files["pseudolabel_csv"] = outpath
+        """
         append_runlog(files, {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "action": "pseudolabel_run",
@@ -4550,6 +4604,14 @@ def open_prepare_dataset_window():
             },
         })
 
+        # ALWAYS hop back to Tk main thread for UI work
+        if parent:
+            subwin.after(0, lambda p=outpath: messagebox.showinfo(
+                "Pseudolabeling complete", f"Saved and linked:\n{p}"
+            ))
+        subwin.after(0, refresh_tree)
+
+        """
         if parent:
             messagebox.showinfo("Pseudolabeling complete",
                     "Saved and linked:\n" + _norm_for_display(outpath))
@@ -4559,7 +4621,7 @@ def open_prepare_dataset_window():
             refresh_tree()
         except Exception:
             pass
-
+        """
     # --- Assign file to experiment/sample ---
     def assign_file(filetype, filepath, exp_title="Unassigned", sample_name="Unassigned"):
         if exp_title not in experiment_projects:
@@ -8964,24 +9026,25 @@ def open_ml_analysis_window():
 
         return pd.DataFrame(out_rows)
 
-
+    #20251001 fix unbound error and etc
     def create_unlabeled_dataset():
         """
         Builds unlabeled feature CSVs for each eligible sample in an experiment JSON.
-        Eligibility now means:
+        Eligibility:
         - has a converted MS2 file at samples[*].csv
-        - and has EITHER:
-            samples[*].excel (manual annotation sheet), OR
-            samples[*].ionlist_path (+ optional samples[*].ion_sheet)
+        - AND has either samples[*].excel OR samples[*].ionlist_path (+ optional ion_sheet)
         """
+        import re
         from pathlib import Path
+
         exp_path = filedialog.askopenfilename(filetypes=[("Experiment JSON", "*.json")])
         if not exp_path:
             return
 
         def _sample_in_filename(sample_id, path):
+            if not path:
+                return False
             name = os.path.basename(path).lower()
-            # require the condition token and the run token (e.g., ST1OE / COKOST1OE / P1KOST1OE and NGE1)
             must_have = []
             for tok in sample_id.lower().split("_"):
                 if tok in {"u937", "cells", "ng"}:
@@ -8996,72 +9059,72 @@ def open_ml_analysis_window():
             messagebox.showerror("Failed to Load JSON", str(e))
             return
 
-        # ask once for ppm
-        ppm_value = simpledialog.askinteger("PPM Tolerance", "Enter PPM tolerance (e.g., 20):",
-                                            minvalue=1, maxvalue=200)
+        ppm_value = simpledialog.askinteger(
+            "PPM Tolerance", "Enter PPM tolerance (e.g., 20):", minvalue=1, maxvalue=200
+        )
         if ppm_value is None:
             return
 
         made = 0
         missing = []
-
-        #future-proof guard
-        # before the samples loop
         seen_out = set()
         made_paths = []
 
-        # inside the loop, right after you compute `base` and `out_dir`
-        out_path = os.path.join(out_dir, f"{base}_unlabeled_ppm{ppm_value}.csv")
-        if out_path in seen_out:
-            # collision (likely because two samples share the same CSV)
-            safe_id = re.sub(r'[^A-Za-z0-9._-]+', '_', sample_id)
-            out_path = os.path.join(out_dir, f"{base}__{safe_id}_unlabeled_ppm{ppm_value}.csv")
-
-        # after successful save:
-        seen_out.add(out_path)
-        made_paths.append(out_path)
-
         for sample_id, sample_info in (exp.get("samples") or {}).items():
-            raw_csv = sample_info.get("csv")
-            # NEW: allow ionlist_path as the source for fragment masses
+            raw_csv   = sample_info.get("csv")
             ion_src   = sample_info.get("excel") or sample_info.get("ionlist_path")
             ion_sheet = sample_info.get("ion_sheet") or "ionlist"
 
-            #newly added for debug
-            if not _sample_in_filename(sample_id, raw_csv):
-                missing.append(f"{sample_id} (csv looks mismatched: {os.path.basename(raw_csv)})")
-                continue
-
+            # 1) presence check first (avoids calling basename on None)
             if not raw_csv or not ion_src:
                 missing.append(sample_id)
                 continue
 
+            # 2) filename sanity check (optional)
+            if not _sample_in_filename(sample_id, raw_csv):
+                missing.append(f"{sample_id} (csv looks mismatched: {os.path.basename(raw_csv)})")
+                continue
+
             try:
+                # fragment list
                 ion_list = extract_fragment_masses(ion_src, sheet_name=ion_sheet)
                 if not ion_list:
                     raise ValueError(f"No 'mass' column found in {os.path.basename(ion_src)}")
 
+                # features
                 feats = extract_ion_intensities(raw_csv, ion_list, ppm=ppm_value)
 
-                # keep output alongside the raw csv
-                out_dir = Path(os.path.dirname(raw_csv))
-                base = Path(os.path.splitext(os.path.basename(raw_csv))[0])
+                # 3) output next to CSV (define out_dir/base *inside* the loop)
+                out_dir = Path(raw_csv).resolve().parent
+                base    = Path(raw_csv).stem
                 out_path = out_dir / f"{base}_unlabeled_ppm{ppm_value}.csv"
-                feats.to_csv(out_path, index=False)
 
-                # remember path for this sample (so Predict tab can pick it up later)
+                # collision guard (two samples may share same CSV)
+                if str(out_path) in seen_out:
+                    safe_id = re.sub(r'[^A-Za-z0-9._-]+', '_', sample_id)
+                    out_path = out_dir / f"{base}__{safe_id}_unlabeled_ppm{ppm_value}.csv"
+
+                # write
+                feats.to_csv(str(out_path), index=False, encoding="utf-8")
+
+                # remember for this sample and for duplicate guard
                 sample_info["unlabeled_csv"] = str(out_path)
+                seen_out.add(str(out_path))
+                made_paths.append(str(out_path))
                 made += 1
+
             except Exception as e:
                 print(f"[ERROR] Unlabeled build failed for '{sample_id}': {e}")
 
         # tell user what happened
         if made == 0:
-            messagebox.showwarning("No Samples Processed",
-                                "No eligible samples were found in this experiment file.\n"
-                                "Tip: each sample needs 'csv' + ('excel' or 'ionlist_path').")
+            messagebox.showwarning(
+                "No Samples Processed",
+                "No eligible samples were found in this experiment file.\n"
+                "Tip: each sample needs 'csv' + ('excel' or 'ionlist_path')."
+            )
         else:
-            # persist updated experiment file with recorded unlabeled paths (non-breaking)
+            # persist updated experiment file with recorded unlabeled paths
             try:
                 with open(exp_path, "w", encoding="utf-8") as f:
                     json.dump(exp, f, indent=2, ensure_ascii=False)
@@ -9069,8 +9132,8 @@ def open_ml_analysis_window():
                 pass
             msg = [f"Created {made} unlabeled dataset(s)."]
             if missing:
-                msg.append(f"Skipped (missing csv/ionlist): {', '.join(missing)}")
-            messagebox.showinfo("Done", "\n".join(msg))    
+                msg.append(f"Skipped (missing/mismatch): {', '.join(missing)}")
+            messagebox.showinfo("Done", "\n".join(msg))
 
     """
     #20250915 ver
