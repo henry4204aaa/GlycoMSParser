@@ -1,5 +1,5 @@
 import os
-version = "0.99924"
+version = "0.9996"
 last_update = 20251006
 import msprawextractor as mspext
 import threading
@@ -143,6 +143,7 @@ except Exception:
 # v1.00: Able to write manuscript although some bug persists.
 # v0.9999 (future) fix minor bugs and display issues
 # v0.9996: fix gate not working on ones learned with protonated mass
+# v0.9995: not sure if gate fixed completely
 # v0.99924: allow prediction results having 1. normal 2. mass gated (need theo mass from in silico csv) 3. learned w/ protonated mass 4. 2+3
 # v0.9993: allow protonated mass getting learned
 # v0.99921: allow trainable PL dataset retain protonated mass (so next version, in ML we can treat it as feature)
@@ -7496,8 +7497,8 @@ def open_ml_analysis_window():
 
         n_estimators_var.set(mv.get("n_estimators", 400))
         class_weight_var.set((mv.get("class_weight") or "balanced") == "balanced")
-
-        real_world_test_var.set(tv.get("real_world_test", False))
+        #real world change to True as default #20251006
+        real_world_test_var.set(tv.get("real_world_test", True))#False))
 
         th = tv.get("threshold", {}) or {}
         enable_thresh_var.set(th.get("enabled", False))
@@ -8273,347 +8274,409 @@ def open_ml_analysis_window():
             # --- Precursor gate (optional) ---
             out_path_gate = None                    # make sure this exists for later UI messages
             gate_on = bool(apply_pred_precursor_gate_var.get())  # <- use the SAME var name you used in the UI
-
+            # --- START: reporter-friendly table (unchanged from v10) ---
+            # 1) class names
             try:
-                gate_ppm = float(pred_precursor_ppm_var.get() or 10)
+                class_names = list(le.classes_) if le is not None else list(getattr(model, "classes_", []))
             except Exception:
-                gate_ppm = 10.0
+                class_names = list(getattr(model, "classes_", []))
 
-            pred_df = df.copy()                     # working frame for reporting
-            if gate_on:
-                try:
-                    # build lookup from in-silico CSV (composition → [theoretical masses])
-                    insilico_path = (insilico_csv_var.get() or "").strip()
-                    if not insilico_path:
-                        raise RuntimeError("No in-silico CSV selected.")
-                    lib = _read_any_table(insilico_path)
+            # 2) proba (keep this BEFORE gating and summarization)
+            proba = None
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X)
 
-                    # robust column picks
-                    comp_col = next((c for c in ("composition","comp_str","label") if c in lib.columns), None)
-                    mass_col = next((c for c in ("theoretical_mass","Mass","mass") if c in lib.columns), None)
-                    if not comp_col or not mass_col:
-                        raise RuntimeError("In-silico CSV must have composition and theoretical_mass/Mass column.")
-                    lib_comp = lib[comp_col].astype(str).map(_canon_comp)
-                    lib_mass = pd.to_numeric(lib[mass_col], errors="coerce")
-                    comp2masses = {}
-                    for cc, mm in zip(lib_comp, lib_mass):
-                        if pd.notna(mm) and cc:
-                            comp2masses.setdefault(cc, []).append(float(mm))
-
-                    # compute ppm vs. any candidate mass; skip Non-glycan
-                    is_ng = pred_df["Predicted_Label"].astype(str).eq("Non-glycan")
-                    pred_df["ppm_precursor"] = np.nan
-                    pred_df["pred_ok"] = True
-                    pred_df["precursor_gate_comp"] = ""
-
-                    idx = (~is_ng).to_numpy().nonzero()[0]
-                    if len(idx):
-                        pred_comp = pred_df.loc[idx, "Predicted_Label"].astype(str).map(_canon_comp)
-                        obs = pd.to_numeric(pred_df.loc[idx, "protonatedmass"], errors="coerce")
-                        best_ppm = np.full(len(idx), np.nan, dtype=float)
-                        keep     = np.zeros(len(idx), dtype=bool)
-
-                        for j, (pc, pm) in enumerate(zip(pred_comp, obs)):
-                            if not pc or np.isnan(pm): 
-                                continue
-                            masses = comp2masses.get(pc, [])
-                            if not masses:
-                                continue
-                            local_best = min(abs((pm - tm)/tm*1e6) for tm in masses)
-                            best_ppm[j] = local_best
-                            keep[j] = (local_best <= gate_ppm)
-
-                        pred_df.loc[idx, "ppm_precursor"] = best_ppm
-                        pred_df.loc[idx, "precursor_gate_comp"] = pred_comp.to_numpy()
-                        pred_df.loc[idx, "pred_ok"] = keep
-
-                    # (Optionally) filter for reporting only — don’t delete df, keep both views
-                    # pred_df_for_report = pred_df[pred_df["pred_ok"]].copy()
-                except Exception as _ge:
-                    print("[Predict] precursor gate skipped:", _ge)
-                    gate_on = False
-
-
-            # 3) Build a compact DataFrame for the reporter
-            #pred_df = df.copy()
+            pred_df = df.copy()
             pred_df = pred_df.rename(columns={"Predicted_Label": "pred_label"})  # reporter expects 'pred_label'
 
-            # Prefer a single vector column to keep CSV lean
-            # adjust y_proba (duplicated) to proba that holding same meanings
             proba_cols = None
-            if proba is not None and isinstance(proba, (list, tuple)) or hasattr(proba, "shape"):
+            if proba is not None and (isinstance(proba, (list, tuple)) or hasattr(proba, "shape")):
                 try:
                     import numpy as _np
-                    pred_df["proba_vector"] = [ _np.asarray(row, dtype=float) for row in proba ]
+                    pred_df["proba_vector"] = [_np.asarray(row, dtype=float) for row in proba]
                 except Exception:
-                    # fallback: expand into columns if needed
                     if class_names:
                         proba_cols = [f"proba_{c}" for c in class_names]
                     else:
                         proba_cols = [f"proba_{i}" for i in range(proba.shape[1])]
                     for j, col in enumerate(proba_cols):
                         pred_df[col] = proba[:, j]
+            # --- END: reporter-friendly table ---
 
-            # 4) Parameters (use the same thresholds you apply in your pipeline)
-            params = ReportParams(tau=0.60, margin=0.05, topk=5, sample_cols=("experiment_title", "sample_name"))
+            # --- Packaging suffixes (so folders/files tell you MS1/gate) ---
+            train_feats = get_training_features(model, model_file_path) or []
+            ms1_used    = ("protonatedmass" in train_feats) or ("delta_ppm" in train_feats)
+            ms1_suffix  = "_MS1feat" if ms1_used else "_noMS1"
 
-            # --- robust CSV/TSV reader just for in-silico files ---
-            def _read_insilico_robust(path):
-                import pandas as pd
-                try:
-                    # Let pandas sniff the delimiter
-                    df = pd.read_csv(path, sep=None, engine="python")
-                except Exception:
-                    df = pd.read_csv(path)
-
-                # If we still got a single "collapsed" header, try common seps explicitly
-                if len(df.columns) == 1:
-                    for sep in [",", "\t", ";", r"\s+"]:
-                        try:
-                            df2 = pd.read_csv(path, sep=sep if sep != r"\s+" else None,
-                                            engine="python", delim_whitespace=(sep == r"\s+"))
-                            if len(df2.columns) > 1:
-                                return df2
-                        except Exception:
-                            pass
-                return df
-            #20251001 post examine the composition and the mass
-            # === POST-PREDICTION PRECURSOR GATE (skip Non-glycan) ===
+            gate_on = bool(apply_pred_precursor_gate_var.get())
             try:
-                gated_df = None
-                if apply_pred_precursor_gate_var.get():
-                    # tolerance
-                    try:
-                        tol = float(pred_precursor_ppm_var.get())
-                    except Exception:
-                        tol = 10.0
-
-                    insilico_path = (insilico_csv_var.get() or "").strip()
-                    if not insilico_path:
-                        messagebox.showwarning(
-                            "Precursor gate",
-                            "Apply precursor gate is ON, but no in-silico CSV is selected. Gate will be skipped."
-                        )
-                    elif "protonatedmass" not in df.columns:
-                        messagebox.showwarning(
-                            "Precursor gate",
-                            "Input table lacks 'protonatedmass'. Gate will be skipped."
-                        )
-                    else:
-                        import re, unicodedata
-
-                        lib = _read_insilico_robust(insilico_path)
-
-                        # --- robust, unicode-safe header canon ---
-                        canon = {}   # maps normalized_key -> original_column_name
-                        for c in lib.columns:
-                            raw = unicodedata.normalize("NFKC", str(c)).replace("\ufeff", "").replace("\xa0", " ")
-                            k = raw.strip().lower()
-                            k = re.sub(r'[\s_\-]+', '', k)  # remove spaces/underscores/dashes
-                            canon[k] = c
-
-                        # accept many variants
-                        comp_keys  = ("composition","comp","compstr","label","structure","glycan")
-                        mass_keys  = ("Mass","mass","theoreticalmass","theoretical_mass","theomass",
-                                    "monomass","monoisotopicmass","exactmass","precursormass", "protonatedmass")
-
-                        comp_str_col = next((canon[k] for k in comp_keys if k in canon), None)
-                        mass_col     = next((canon[k] for k in mass_keys if k in canon), None)
-
-                        # last-resort: any column whose normalized key endswith 'mass'
-                        if not mass_col:
-                            maybe = [canon[k] for k in canon if k.endswith("mass")]
-                            mass_col = maybe[0] if maybe else None
-
-                        # DEBUG: if we still fail, log what we saw
-                        if (not mass_col or (comp_str_col is None and
-                                            not any(k in canon for k in ("hex","hexnac","neuac","neugc","kdn","fuc","hexa","so3","po3h")))):
-                            if logger:
-                                logger.log(f"[Predict] In-silico headers: {list(lib.columns)}")
-                                logger.log(f"[Predict] Normalized keys: {list(canon.keys())}")
-                        # 1) build lib_comp (canonicalized) from a comp-string if present
-                        lib_comp = None
-                        if comp_str_col is not None:
-                            lib_comp = lib[comp_str_col].astype(str).map(_canon_comp)
-
-                        # 2) otherwise, synthesize comp from wide monomer counts (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc [+ HexA, SO3, PO3H])
-                        if lib_comp is None:
-                            # accept a bunch of aliases
-                            probe = {
-                                "f":"F", "fuc":"F",
-                                "hex":"H", "h":"H",
-                                "hexnac":"N", "n":"N",
-                                "neuac":"S", "s":"S",
-                                "neugc":"G", "g":"G",
-                                "kdn":"KDN",
-                                "hexa":"A", "a":"A",
-                                "so3":"s",
-                                "po3h":"p", "po3":"p"
-                            }
-                            # find which of these exist
-                            present = {tag: canon[key] for key, tag in probe.items() if key in canon}
-                            if present:
-                                def _mkcomp(row):
-                                    def _val(col):
-                                        try: return int(float(row.get(col, 0)))
-                                        except: return 0
-                                    parts = []
-                                    # order matters for canonical label
-                                    for tag, col in (("F",present.get("F")), ("H",present.get("H")), ("N",present.get("N")),
-                                                    ("S",present.get("S")), ("G",present.get("G")), ("KDN",present.get("KDN")),
-                                                    ("A",present.get("A")), ("s",present.get("s")), ("p",present.get("p"))):
-                                        if col:
-                                            v = _val(col)
-                                            if v > 0: parts.append(f"{tag}{v}")
-                                    return _canon_comp("".join(parts))
-                                lib_comp = lib.apply(_mkcomp, axis=1)
-
-                        # 3) lib_mass (float) must be found
-                        if mass_col is None:
-                            messagebox.showwarning(
-                                "Precursor gate",
-                                "In-silico CSV lacks a usable mass column (e.g., 'Mass' or 'theoretical_mass'). Gate skipped."
-                            )
-                        else:
-                            lib_mass = pd.to_numeric(lib[mass_col], errors="coerce")
-                            # if we still failed to derive lib_comp, skip with a clear message (also log available columns)
-                            if lib_comp is None or (isinstance(lib_comp, pd.Series) and not lib_comp.astype(bool).any()):
-                                if logger: logger.log(f"[Predict] insilico columns seen: {list(lib.columns)}")
-                                messagebox.showwarning(
-                                    "Precursor gate",
-                                    "Could not derive compositions from in-silico CSV (no comp-string and no monomer counts). Gate skipped."
-                                )
-                            else:
-                                # --- Build composition → list[mass] without creating a 'composition' column on disk ---
-                                lib_ok = lib_mass.notna() & lib_comp.astype(bool)
-                                comp2masses = {}
-                                for comp, mass in zip(lib_comp[lib_ok], lib_mass[lib_ok]):
-                                    comp2masses.setdefault(str(comp), []).append(float(mass))
-
-                                # Non-glycan rows are always OK (skip MS1 check)
-                                is_ng = df["Predicted_Label"].astype(str).eq("Non-glycan")
-
-                                # prepare outputs (safe defaults)
-                                df["ppm_precursor"] = np.nan
-                                df["pred_ok"] = True
-                                df["precursor_gate_comp"] = ""
-
-                                # === Put review fields up front (A/B/C/D columns) ===
-                                front = [
-                                    "MS2scan_no",          # A
-                                    "protonatedmass",      # B
-                                    "Predicted_Label",     # C
-                                    "ppm_precursor",       # D
-                                    "pred_ok",             # (E) optional but handy
-                                    "precursor_gate_comp", # (F) optional: canonical comp used for gate
-                                ]
-                                front = [c for c in front if c in df.columns]
-                                rest  = [c for c in df.columns if c not in front]
-                                df = df.loc[:, front + rest]
-
-                                idx = (~is_ng).to_numpy().nonzero()[0]
-                                if len(idx):
-                                    pred_comp = df.loc[idx, "Predicted_Label"].astype(str).map(_canon_comp)
-                                    obs = pd.to_numeric(df.loc[idx, "protonatedmass"], errors="coerce")
-
-                                    best_ppm = np.full(len(idx), np.nan, dtype=float)
-                                    keep     = np.zeros(len(idx), dtype=bool)
-                                    for j, (pc, pm) in enumerate(zip(pred_comp, obs)):
-                                        if not pc or np.isnan(pm): 
-                                            continue
-                                        masses = comp2masses.get(pc, [])
-                                        if not masses:
-                                            continue
-                                        local_best = min(abs((pm - tm)/tm*1e6) for tm in masses)
-                                        best_ppm[j] = local_best
-                                        keep[j] = (local_best <= tol)
-                                    df.loc[idx, "ppm_precursor"] = best_ppm
-                                    df.loc[idx, "precursor_gate_comp"] = pred_comp.to_numpy()
-                                    df.loc[idx, "pred_ok"] = keep                        
-
-            except Exception as _gate_e:
-                # be quiet but informative in logs
-                if logger: logger.log(f"[Predict] precursor-gate error: {_gate_e}")
-            # === END POST-PREDICTION GATE ===
-
-            #20251006
-            # ---- build method suffixes for folder/files ----
-            gate_on = bool("pred_ok" in df.columns and df["pred_ok"].notna().any())
-            try:
-                gate_ppm = int(float(pred_precursor_ppm_var.get() or 10))
+                gate_ppm = float(pred_precursor_ppm_var.get() or 10)
             except Exception:
-                gate_ppm = 10
-            # 5) Choose output folder (pack under folder named by method-json stem) Now each run lands in e.g. …/NGE1_method_MS1feat_PG10ppm/.
-            
-            # Suffixes for folder/files
-            ms1_used   = ("protonatedmass" in set(get_training_features(model, model_file_path) or []))
-            ms1_suffix = "_MS1feat" if ms1_used else "_noMS1"
+                gate_ppm = 10.0
             gate_suffix = f"_PG{int(gate_ppm)}ppm" if gate_on else "_noPG"
             method_suffix = ms1_suffix + gate_suffix
 
+            from pathlib import Path
             method_base = _guess_method_basename_for_pack(predict_input_path, df)
             out_dir = Path(os.path.dirname(predict_input_path)) / f"{method_base}{method_suffix}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            #20250915 
-            # 5) Choose output folder (pack under folder named by method-json stem)
-            #from pathlib import Path
-            #method_base = _guess_method_basename_for_pack(predict_input_path, df)
-            #out_dir = Path(os.path.dirname(predict_input_path)) / method_base
-            #out_dir.mkdir(parents=True, exist_ok=True)
-
-
-            ## 5) Choose output folder (same folder as input unlabeled CSV)
-            #from pathlib import Path
-            #out_dir = Path(os.path.dirname(predict_input_path))
-
-            
-            # 6) Run summarization + write artifacts
-            #pred_df_for_report = pred_df
-            pred_df_for_report = pred_df[pred_df["pred_ok"]].copy() if (gate_on and "pred_ok" in pred_df.columns) else pred_df
-            #report_mode = "normal"
+            # --- Precursor gate (robust & optional) ---
+            out_path_gate = None
             if gate_on:
-                pred_df_for_report = pred_df[pred_df["pred_ok"]].copy()
-                report_mode = "postgate"
-                if logger: logger.log("[Predict] Reporting on precursor-gated rows only")
+                try:
+                    # read in-silico and derive composition→[masses]
+                    insilico_path = (insilico_csv_var.get() or "").strip()
+                    if not insilico_path:
+                        raise RuntimeError("No in-silico CSV selected.")
+                    lib = _read_any_table(insilico_path)
 
+                    # --- robust reparse / header clean for in-silico CSV ---
+                    def _clean_cols(cols):
+                        out = []
+                        for c in cols:
+                            s = str(c).replace("\uFEFF", "").strip()  # strip BOM + spaces
+                            out.append(s)
+                        return out
+
+                    # 1) clean current headers
+                    lib.columns = _clean_cols(lib.columns)
+
+                    # 2) if it looks like a single-column read, try common delimiters
+                    if len(lib.columns) == 1:
+                        _one = lib.columns[0]
+                        # log for debugging
+                        if logger: logger.log(f"[Predict] in-silico looked single-col header: {_one!r}; reparsing…")
+                        import pandas as _pd
+                        # try comma, semicolon (EU Excel), then tab
+                        for _sep in (",", ";", "\t"):
+                            try:
+                                _tmp = _pd.read_csv(insilico_path, sep=_sep, engine="python")
+                                _tmp.columns = _clean_cols(_tmp.columns)
+                                if len(_tmp.columns) > 1:
+                                    lib = _tmp
+                                    if logger: logger.log(f"[Predict] reparsed with sep='{_sep}': {lib.columns.tolist()}")
+                                    break
+                            except Exception as _e:
+                                pass
+
+                    # 3) build a case-insensitive lookup AFTER cleaning
+                    norm = {c.lower(): c for c in lib.columns}
+
+                    # pick mass column robustly
+                    mass_col = None
+                    for key in ("theoretical_mass", "mass"):
+                        if key in norm:
+                            mass_col = norm[key]
+                            break
+                    # extra tolerance (e.g., stray spaces/case)
+                    if mass_col is None:
+                        for c in lib.columns:
+                            if c.strip().lower() in ("mass", "theoretical_mass"):
+                                mass_col = c
+                                break
+
+                    if logger:
+                        logger.log(f"[Predict] in-silico columns (cleaned): {lib.columns.tolist()}")
+                        logger.log(f"[Predict] chosen mass_col: {mass_col}")
+
+
+                    # normalize headers
+                    norm = {c.lower().strip(): c for c in lib.columns}
+                    # prefer string comp if present
+                    comp_col = None
+                    for cand in ("composition", "structure", "label", "comp_str"):
+                        if cand in norm:
+                            comp_col = norm[cand]; break
+                    # pick mass column
+                    mass_col = None
+                    for cand in ("theoretical_mass", "mass", "Mass"):
+                        if cand.lower() in norm:
+                            mass_col = norm[cand.lower()]; break
+                    if mass_col is None:
+                        # tolerate Excel columns like 'Mass ' (trailing space) or different case
+                        for c in lib.columns:
+                            if c.strip().lower() in ("mass","theoretical_mass"):
+                                mass_col = c; break
+                    if mass_col is None:
+                        raise RuntimeError("In-silico CSV must have a Mass or theoretical_mass column.")
+
+                    # if no comp string, synthesize from counts
+                    """
+                    if comp_col is None:
+                        # accept any of these count headers (case-insensitive)
+                        monomers = [k for k in norm if k in ("hex","hexnac","fuc","neugc","neuac","kdn","hexa","so3","po3h","s","p","a")]
+                        if not monomers:
+                            raise RuntimeError("In-silico CSV must have 'composition'/counts to match.")
+                        def _counts_to_comp(row):
+                            get = lambda key: int(row.get(norm[key], 0)) if key in norm and pd.notna(row.get(norm[key])) else 0
+                            H  = get("hex"); N = get("hexnac"); F = get("fuc"); G = get("neugc"); S = get("neuac"); K = get("kdn"); A = get("hexa")
+                            s  = get("so3") + get("s"); p = get("po3h") + get("p")
+                            parts = []
+                            # canonical FHNSGKDN order with modifiers A/s/p
+                            if F: parts.append(f"F{F}")
+                            if H: parts.append(f"H{H}")
+                            if N: parts.append(f"N{N}")
+                            if S: parts.append(f"S{S}")
+                            if G: parts.append(f"G{G}")
+                            if K: parts.append(f"K{K}")
+                            if A: parts.append(f"A{A}")  # HexA -> A
+                            if p: parts.append(f"p{p}")
+                            if s: parts.append(f"s{s}")
+                            return "".join(parts) if parts else ""
+                        lib = lib.copy()
+                        lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
+                        comp_col = "__comp"
+                    """
+                    # If no composition string, synthesize one from monomer counts (FHN with modifiers A/s/p, plus G/K if present)
+                    if comp_col is None:
+                        def _get(row, key):
+                            col = norm.get(key)
+                            if col is None:
+                                return 0
+                            v = row.get(col, 0)
+                            try:
+                                return int(float(v))
+                            except Exception:
+                                return 0
+
+                        def _counts_to_comp(row):
+                            F  = _get(row, "Fuc")
+                            H  = _get(row, "Hex")
+                            N  = _get(row, "HexNAc")
+                            NeuAc = _get(row, "NeuAc")
+                            NeuGc = _get(row, "NeuGc")
+                            KDN   = _get(row, "KDN")
+                            HexA  = _get(row, "HexA")
+                            SO3   = _get(row, "SO3") + _get(row, "s")
+                            PO3H  = _get(row, "PO3H") + _get(row, "p")
+
+                            parts = []
+                            # Canonical order: F, H, N, (NeuAc/NeuGc/KDN), A (HexA), modifiers s/p
+                            if F:     parts.append(f"F{F}")
+                            if H:     parts.append(f"H{H}")
+                            if N:     parts.append(f"N{N}")
+                            if NeuAc: parts.append(f"S{NeuAc}")   # use 'S' for NeuAc if your label set uses it; otherwise remove this line
+                            if NeuGc: parts.append(f"G{NeuGc}")
+                            if KDN:   parts.append(f"K{KDN}")
+                            if HexA:  parts.append(f"A{HexA}")    # <-- HexA is 'A' in your schema
+                            if SO3:   parts.append(f"s{SO3}")
+                            if PO3H:  parts.append(f"p{PO3H}")
+                            return "".join(parts)
+
+                        lib = lib.copy()
+                        lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
+                        comp_col = "__comp"
+                    # build lookup composition → list of masses
+                    comp2masses = {}
+                    for comp, mass in zip(lib[comp_col].astype(str), pd.to_numeric(lib[mass_col], errors="coerce")):
+                        if pd.isna(mass) or not comp:
+                            continue
+                        comp2masses.setdefault(comp, []).append(float(mass))
+
+                    # apply gate (skip Non-glycan)
+                    is_ng = pred_df["pred_label"].astype(str).eq("Non-glycan")
+                    pred_df["ppm_precursor"] = np.nan
+                    pred_df["pred_ok"] = True
+
+                    #debug lines
+                    # --- GATE DIAGNOSTICS ---
+                    try:
+                        # same canonicalizer for both sides
+                        def _canon(x):
+                            try:    return _canon_comp(x)
+                            except: return str(x).strip()
+
+                        # build a quick “masses found?” map
+                        # If you created comp2masses above, reuse it; otherwise reconstruct it here:
+                        # comp2masses = {...}  # already built earlier
+
+                        gly = pred_df[ pred_df["pred_label"].astype(str) != "Non-glycan" ].copy()
+                        gly["canon_pred"]  = gly["pred_label"].astype(str).map(_canon)
+                        gly["masses_found"] = gly["canon_pred"].map(lambda c: len(comp2masses.get(c, [])))
+                        gly["has_pm"]      = pd.to_numeric(gly["protonatedmass"], errors="coerce").notna()
+                        gly["kept"]        = gly["pred_ok"].fillna(False)
+
+                        kept  = int(gly["kept"].sum())
+                        total = int(len(gly))
+                        dropped = total - kept
+                        no_lut = int((gly["masses_found"] == 0).sum())
+                        no_pm  = int((~gly["has_pm"]).sum())
+                        bad_ppm = int(((gly["masses_found"] > 0) & gly["has_pm"] & ~gly["kept"]).sum())
+
+                        if logger:
+                            logger.log(f"[Predict][gate] glycan rows total={total}, kept={kept}, dropped={dropped}, "
+                                    f"no_lut={no_lut}, no_pm={no_pm}, ppm_exceeded={bad_ppm}")
+
+                        # write a small debug file of dropped glycans
+                        debug_cols = ["MS2scan_no","pred_label","canon_pred","protonatedmass",
+                                    "ppm_precursor","masses_found","kept"]
+                        gate_dbg = gly[~gly["kept"]][debug_cols].head(1000)  # cap size
+                        dbg_path = (out_dir / (Path(predict_input_path).stem + "_gate_debug.csv")).as_posix()
+                        gate_dbg.to_csv(dbg_path, index=False)
+                        if logger: logger.log(f"[Predict][gate] wrote debug rows → {dbg_path}")
+                    except Exception as _e:
+                        if logger: logger.log(f"[Predict][gate] diagnostics failed: {_e}")
+
+                    # --- EXTRA DIAGNOSTICS: for no_lut rows, fetch Mass candidates by counts-match ---
+                    try:
+                        import re
+
+                        # 1) Normalize + numericize in-silico counts once
+                        lib_counts = lib.copy()
+
+                        def _nz_int(colname):
+                            if colname in lib_counts.columns:
+                                lib_counts[colname] = pd.to_numeric(lib_counts[colname], errors="coerce").fillna(0).astype(int)
+                            else:
+                                lib_counts[colname] = 0
+
+                        # standard headers we saw in your file
+                        _nz_int("Hex")
+                        _nz_int("HexNAc")
+                        _nz_int("Fuc")
+                        _nz_int("NeuAc")
+                        _nz_int("NeuGc")
+                        _nz_int("KDN")
+                        _nz_int("HexA")
+                        _nz_int("SO3")
+                        _nz_int("PO3H")
+
+                        # Mass column (we already picked mass_col earlier)
+                        lib_counts["__Mass__"] = pd.to_numeric(lib_counts[mass_col], errors="coerce")
+
+                        # 2) Parse a predicted label like "F1H4N3A1s1p1" → counts
+                        def _parse_counts(label: str):
+                            d = {"F":0,"H":0,"N":0,"S":0,"G":0,"K":0,"A":0,"s":0,"p":0}
+                            for m in re.finditer(r'([FHNSGKAsp])(\d+)', str(label)):
+                                ch, num = m.group(1), int(m.group(2))
+                                if ch in d:
+                                    d[ch] += num
+                            return d
+                        #fix GPT's loop, you forgot sialic acid, that's mandatory, not optional okay?
+                        # 3) Build a finder: from counts → candidate Mass list
+                        def _find_masses_by_counts(cnt):
+                            m = lib_counts.loc[
+                                (lib_counts["Fuc"]   == cnt["F"]) &
+                                (lib_counts["Hex"]   == cnt["H"]) &
+                                (lib_counts["HexNAc"]== cnt["N"]) &
+                                (lib_counts["NeuAc"]   == cnt["S"]) &
+                                (lib_counts["NeuGc"]   == cnt["G"]) &
+                                (lib_counts["KDN"]   == cnt["K"]) &
+                                (lib_counts["HexA"]  == cnt["A"]) &
+                                (lib_counts["SO3"]   == cnt["s"]) &
+                                (lib_counts["PO3H"]  == cnt["p"]),
+                                "__Mass__"
+                            ].dropna()
+                            return sorted(m.unique().tolist())
+
+                        # 4) Take the first 30 no-lut rows and attach candidate Masses
+                        no_lut_head = gly[gly["masses_found"] == 0].copy().head(30)
+                        if not no_lut_head.empty:
+                            no_lut_head["counts"] = no_lut_head["canon_pred"].map(_parse_counts)
+                            no_lut_head["Mass_candidates"] = no_lut_head["counts"].map(_find_masses_by_counts)
+
+                            # print to logger
+                            if logger:
+                                logger.log(f"[Predict][gate][no_lut] sample {len(no_lut_head)} rows with Mass candidates:")
+                                for r in no_lut_head[["MS2scan_no","pred_label","canon_pred","protonatedmass","Mass_candidates"]].itertuples(index=False):
+                                    logger.log("[no_lut] "
+                                            f"scan={getattr(r,'MS2scan_no',None)}, "
+                                            f"pred='{getattr(r,'pred_label',None)}' "
+                                            f"canon='{getattr(r,'canon_pred',None)}' "
+                                            f"pm={getattr(r,'protonatedmass',None)} "
+                                            f"MassCandidates={getattr(r,'Mass_candidates',None)}")
+
+                            # save a CSV so you can compare in Excel
+                            nolut_bycounts_path = (out_dir / (Path(predict_input_path).stem + "_gate_nolut_bycounts_debug.csv")).as_posix()
+                            no_lut_head[["MS2scan_no","pred_label","canon_pred","protonatedmass","Mass_candidates"]].to_csv(nolut_bycounts_path, index=False)
+                            if logger: logger.log(f"[Predict][gate] wrote by-counts no-lut debug → {nolut_bycounts_path}")
+
+                    except Exception as _e:
+                        if logger: logger.log(f"[Predict][gate] counts-mass diagnostics failed: {_e}")
+
+                    """
+                    # --- EXTRA DIAGNOSTICS: show why no_lut happened ---
+                    try:
+                        # sample a few in-silico keys so we can eyeball format mismatches
+                        if logger:
+                            _keys_sample = list(comp2masses.keys())[:20]
+                            logger.log(f"[Predict][gate] comp2masses sample keys (first 20): {_keys_sample}")
+
+                        # prepare a lambda that returns the candidate mass list for a canon label
+                        _mass_list = lambda c: comp2masses.get(c, [])
+
+                        # build a table for rows with no LUT (masses_found == 0)
+                        no_lut_df = gly[gly["masses_found"] == 0].copy()
+                        if not no_lut_df.empty:
+                            no_lut_df["candidates_from_library"] = no_lut_df["canon_pred"].map(_mass_list)
+
+                            # show a few lines in the log
+                            head_rows = no_lut_df[["MS2scan_no","pred_label","canon_pred",
+                                                "protonatedmass","candidates_from_library"]].head(20)
+                            if logger:
+                                for r in head_rows.itertuples(index=False):
+                                    logger.log("[Predict][gate][no_lut] "
+                                            f"scan={getattr(r,'MS2scan_no',None)}, "
+                                            f"pred='{getattr(r,'pred_label',None)}' "
+                                            f"canon='{getattr(r,'canon_pred',None)}' "
+                                            f"pm={getattr(r,'protonatedmass',None)} "
+                                            f"candidates={getattr(r,'candidates_from_library',None)}")
+
+                            # write full CSV for inspection
+                            nolut_path = (out_dir / (Path(predict_input_path).stem + "_gate_nolut_debug.csv")).as_posix()
+                            no_lut_df[["MS2scan_no","pred_label","canon_pred","protonatedmass",
+                                    "candidates_from_library"]].to_csv(nolut_path, index=False)
+                            if logger: logger.log(f"[Predict][gate] wrote no-lut debug → {nolut_path}")
+                    except Exception as _e:
+                        if logger: logger.log(f"[Predict][gate] extra diagnostics failed: {_e}")
+                    """
+                    idx = (~is_ng).to_numpy().nonzero()[0]
+                    if len(idx):
+                        # canonicalize predicted comps (uses your _canon_comp if present)
+                        def _canon(x):
+                            try:
+                                return _canon_comp(x)
+                            except Exception:
+                                return str(x)
+                        comps = pred_df.loc[idx, "pred_label"].astype(str).map(_canon)
+                        obs   = pd.to_numeric(pred_df.loc[idx, "protonatedmass"], errors="coerce")
+                        best  = np.full(len(idx), np.nan)
+                        keep  = np.zeros(len(idx), dtype=bool)
+                        for j, (c, pm) in enumerate(zip(comps, obs)):
+                            if not c or np.isnan(pm):
+                                continue
+                            masses = comp2masses.get(c, [])
+                            if not masses:
+                                continue
+                            best[j] = min(abs((pm - tm)/tm*1e6) for tm in masses)
+                            keep[j] = (best[j] <= gate_ppm)
+                        pred_df.loc[idx, "ppm_precursor"] = best
+                        pred_df.loc[idx, "pred_ok"] = keep
+
+                    # gated copy for disk & for report
+                    out_path_gate = (out_dir / (Path(predict_input_path).stem + f"_predicted{ms1_suffix}_PG{int(gate_ppm)}ppm_only.csv")).as_posix()
+                    df["pred_ok"] = pred_df["pred_ok"].values  # keep in the full table too
+                    df.to_csv(out_dir / (Path(predict_input_path).stem + f"_predicted{method_suffix}.csv"), index=False)
+                    pred_df_for_report = pred_df[pred_df["pred_ok"]].copy()
+                except Exception as _e:
+                    # Gate skipped → just report everything
+                    if logger: logger.log(f"[Predict] Precursor gate skipped: {_e}")
+                    pred_df_for_report = pred_df.copy()
+            else:
+                pred_df_for_report = pred_df.copy()
+
+            # --- Reporter: summarize & write (keep run_sum as dict) ---
+            params = ReportParams(tau=0.60, margin=0.05, topk=5, sample_cols=("experiment_title", "sample_name"))
             pred_rows, class_sum, by_sample_sum, run_sum = summarize_predictions(
                 pred_df_for_report,
                 class_names=class_names if class_names else None,
-                proba_cols=proba_cols,
+                proba_cols=proba_cols,   # None if using 'proba_vector'
                 params=params,
             )
-            # ✅ if you want to carry the suffix inside the dict, do this (safe no-op if run_sum isn’t a dict)
             if isinstance(run_sum, dict):
                 run_sum["method_suffix"] = method_suffix
 
-            # pass a filename stem that includes method + report mode
-            #run_sum = method_suffix  # if your reporter uses it
-            arts = write_prediction_report(
-                out_dir=out_dir,
-                pred_rows=pred_rows,
-                class_summary=class_sum,
-                by_sample=by_sample_sum,
-                run_summary=run_sum,
-                params=params,
-                # if your writer supports it, add a 'name_suffix' kw; otherwise it will just use out_dir
-                # name_suffix=f"{method_suffix}_{report_mode}"
-            )
-            # 6) Run summarization + write artifacts
-
-            """
-            #Force the gated results showing if it's on (really?)
-            if "pred_ok" in pred_df.columns:
-                pred_df = pred_df[pred_df["pred_ok"]].copy()
-                logger.log(f"[Predict] Showing precursor mass gated results")
-
-            pred_rows, class_sum, by_sample_sum, run_sum = summarize_predictions(
-                pred_df,
-                class_names=class_names if class_names else None,
-                proba_cols=proba_cols,  # None if using 'proba_vector'
-                params=params,
-            )
-
             arts = write_prediction_report(
                 out_dir=out_dir,
                 pred_rows=pred_rows,
@@ -8622,74 +8685,29 @@ def open_ml_analysis_window():
                 run_summary=run_sum,
                 params=params,
             )
-            """
-            # 7) Show popup (we're on the Tk main thread here; if you later thread this, wrap with root.after)
-            
-            #try:
-            #    show_prediction_summary_popup(root, run_summary=run_sum, artifacts=arts, class_summary_df=class_sum)
-            ##except Exception as _e:
-            #    print("[warn] Failed to show summary popup:", _e)
 
-            # --- END: Prediction summary integration ---
-            # main table (all rows)
-            # write main full table and (if gate ON) the gated-only table
+            # Save tables (all rows; gated-only if present) + user popup
             out_path_all = (out_dir / (Path(predict_input_path).stem + f"_predicted{method_suffix}.csv")).as_posix()
             df.to_csv(out_path_all, index=False)
-
-            out_path_gate = None
-            if gate_on and "pred_ok" in pred_df.columns:
-                out_path_gate = (out_dir / (Path(predict_input_path).stem + f"_predicted{ms1_suffix}_PG{int(gate_ppm)}ppm_only.csv")).as_posix()
-                pred_df[pred_df["pred_ok"]].to_csv(out_path_gate, index=False)
-
-            # Message box text
-            extra_line = f"\nGated table:\n{out_path_gate}" if out_path_gate else ""
-            messagebox.showinfo("Prediction Complete",
-                f"MS1 feature (expected by model): {'YES' if ms1_used else 'NO'}\n"
-                f"Precursor gate: {'ON' if gate_on else 'OFF'}{(' ('+str(gate_ppm)+' ppm)') if gate_on else ''}\n\n"
-                f"Packed into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra_line}"
-            )
-
-            """
-            out_path_all = (out_dir / (Path(predict_input_path).stem + f"_predicted{method_suffix}.csv")).as_posix()
-            df.to_csv(out_path_all, index=False)
-            # Gated copy (if gate ran)
-            out_path_gate = None
-            if gate_on:
-                out_path_gate = (out_dir / (Path(predict_input_path).stem + f"_predicted{ms1_suffix}_PG{gate_ppm}ppm_only.csv")).as_posix()
-                df[df["pred_ok"]].to_csv(out_path_gate, index=False)
-                if logger: logger.log(f"[Predict] Precursor gate kept {int(df['pred_ok'].sum())}/{len(df)} → {out_path_gate}")
+            if out_path_gate and "pred_ok" in df.columns and df["pred_ok"].any():
+                # already written above when gate ran; keep this guard for safety
+                pass
 
             ms1_line  = f"MS1 feature (expected by model): {'YES' if ms1_used else 'NO'}"
-            gate_line = f"Precursor gate: {'ON' if gate_on else 'OFF'}" + (f" ({gate_ppm} ppm)" if gate_on else "")
-
+            gate_line = f"Precursor gate: {'ON' if gate_on else 'OFF'}" + (f" ({int(gate_ppm)} ppm)" if gate_on else "")
             try:
                 show_prediction_summary_popup(root, run_summary=run_sum, artifacts=arts, class_summary_df=class_sum)
             except Exception as _e:
                 print("[warn] Failed to show summary popup:", _e)
 
-            extra = f"\nGated table:\n{out_path_gate}" if out_path_gate else ""
-            messagebox.showinfo(
-                "Prediction Complete",
-                f"{ms1_line}\n{gate_line}\n\nPacked into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra}"
+            extra = f"\nGated table:\n{out_path_gate}" if (out_path_gate and os.path.exists(out_path_gate)) else ""
+            messagebox.showinfo("Prediction Complete", f"{ms1_line}\n{gate_line}\n\nPacked into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra}")
+            messagebox.showinfo("Prediction Complete",
+                f"MS1 feature (expected by model): {'YES' if ms1_used else 'NO'}\n"
+                f"Precursor gate: {'ON' if gate_on else 'OFF'}{(' ('+str(gate_ppm)+' ppm)') if gate_on else ''}\n\n"
+                f"Packed into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra}"
             )
 
-            
-            out_path = (out_dir / (Path(predict_input_path).stem + "_predicted.csv")).as_posix()
-            df.to_csv(out_path, index=False)
-            messagebox.showinfo(
-                "Prediction Complete",
-                f"Packed into folder:\n{out_dir}\n\nMain table:\n{out_path}"
-            )
-            # gated copy (only if gate ran)
-            if "pred_ok" in df.columns and df["pred_ok"].notna().any():
-                try:
-                    gate_ppm = int(float(pred_precursor_ppm_var.get() or 10))
-                except Exception:
-                    gate_ppm = 10
-                out_gate = (out_dir / (Path(predict_input_path).stem + f"_predicted_PG{gate_ppm}ppm.csv")).as_posix()
-                df[df["pred_ok"]].to_csv(out_gate, index=False)
-                if logger: logger.log(f"[Predict] Precursor gate kept {int(df['pred_ok'].sum())}/{len(df)} → {out_gate}")
-            """
             ## --- END: Prediction summary integration ---
             #out_path = os.path.splitext(predict_input_path)[0] + "_predicted.csv"
             #df.to_csv(out_path, index=False)
@@ -9865,7 +9883,7 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v0.6 Build 20250929")
+root.title("GlycoMSP File Manager GUI v0.6 Build 20251006")
 root.geometry("840x600")
 root.minsize(840, 600)
 
