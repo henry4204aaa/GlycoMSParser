@@ -1,6 +1,6 @@
 import os
-version = "0.9996"
-last_update = 20251006
+version = "0.9998"
+last_update = 20251010
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -142,6 +142,7 @@ except Exception:
 # v1.01? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
 # v1.00: Able to write manuscript although some bug persists.
 # v0.9999 (future) fix minor bugs and display issues
+# v0.9998: really fix gate issue (confirmed on manual datasets)
 # v0.9996: fix gate not working on ones learned with protonated mass
 # v0.9995: not sure if gate fixed completely
 # v0.99924: allow prediction results having 1. normal 2. mass gated (need theo mass from in silico csv) 3. learned w/ protonated mass 4. 2+3
@@ -7642,16 +7643,16 @@ def open_ml_analysis_window():
         # use_mass_feature already read above: use_mass_feature = bool(include_mass_train_var.get())
 
         def _prep_ms1_block(X, y, use_mass):
-            import pandas as _pd
+            #import pandas as _pd
             X = X.copy()
             if use_mass:
                 if "protonatedmass" in X.columns:
                     # make numeric and impute
-                    X["protonatedmass"] = _pd.to_numeric(X["protonatedmass"], errors="coerce")
+                    X["protonatedmass"] = pd.to_numeric(X["protonatedmass"], errors="coerce")
 
                     # Non-glycan → 0.0 (use string labels here, before encoding)
                     if y is not None:
-                        y_ser = _pd.Series(list(y), index=X.index).astype(str)
+                        y_ser = pd.Series(list(y), index=X.index).astype(str)
                         X.loc[y_ser.eq("Non-glycan"), "protonatedmass"] = 0.0
 
                     # any remaining NaNs → 0.0 to satisfy RF
@@ -8271,6 +8272,157 @@ def open_ml_analysis_window():
                         parts.append(f"{key}{n}")
                 return "".join(parts)
 
+            #new precursor gate maybe
+            import re
+
+
+            def _find_col(df: pd.DataFrame, candidates):
+                """Return the first existing column from candidates (case-insensitive)."""
+                cols = {c.lower(): c for c in df.columns}
+                for name in candidates:
+                    if name.lower() in cols:
+                        return cols[name.lower()]
+                return None
+
+            _LABEL_RE = re.compile(r"""
+                (?:F(?P<F>\d+))?      # Fuc
+                (?:H(?P<H>\d+))?      # Hex
+                (?:N(?P<N>\d+))?      # HexNAc
+                (?:S(?P<S>\d+))?      # NeuAc (Sialic acid)
+                (?:G(?P<G>\d+))?      # NeuGc
+                (?:KDN(?P<KDN>\d+))?  # KDN (explicit token)
+            """, re.VERBOSE)
+
+            def _canon_label(s: str) -> str:
+                """Normalize labels to FHNSGKDN order; keep only nonzero terms.
+                Accepts variants like 'H5N2', 'F1H5N2S1', 'H5N2KDN1', etc."""
+                if not isinstance(s, str) or not s:
+                    return ""
+                m = _LABEL_RE.fullmatch(s)
+                if not m:
+                    # Try to expand bare 'K1' -> 'KDN1', or tolerate lowercase
+                    s2 = s.upper().replace("K", "KDN")
+                    m = _LABEL_RE.fullmatch(s2)
+                    if not m:
+                        return ""
+                parts = []
+                F = int(m.group("F") or 0)
+                H = int(m.group("H") or 0)
+                N = int(m.group("N") or 0)
+                S = int(m.group("S") or 0)
+                G = int(m.group("G") or 0)
+                KDN = int(m.group("KDN") or 0)
+                if F:   parts.append(f"F{F}")
+                if H:   parts.append(f"H{H}")
+                if N:   parts.append(f"N{N}")
+                if S:   parts.append(f"S{S}")
+                if G:   parts.append(f"G{G}")
+                if KDN: parts.append(f"KDN{KDN}")
+                return "".join(parts)
+
+            def _label_from_counts(row: pd.Series) -> str:
+                """Construct FHNSGKDN label from count columns if no label string exists."""
+                # Common column names (case-insensitive)
+                def g(name): 
+                    for cand in [name, name.capitalize()]:
+                        if cand in row:
+                            return int(row[cand]) if pd.notna(row[cand]) else 0
+                    return 0
+                F   = g("F") or g("Fuc")
+                H   = g("H") or g("Hex")
+                N   = g("N") or g("HexNAc")
+                S   = g("S") or g("NeuAc")
+                G   = g("G") or g("NeuGc")
+                KDN = g("KDN")
+                parts = []
+                if F:   parts.append(f"F{F}")
+                if H:   parts.append(f"H{H}")
+                if N:   parts.append(f"N{N}")
+                if S:   parts.append(f"S{S}")
+                if G:   parts.append(f"G{G}")
+                if KDN: parts.append(f"KDN{KDN}")
+                return "".join(parts)
+
+            def apply_mass_gate(df_pred: pd.DataFrame,
+                                df_lib: pd.DataFrame,
+                                ppm_threshold: float = 10.0,
+                                logger=None) -> pd.DataFrame:
+                """
+                Adds columns:
+                - 'ppm_precursor' (float)
+                - 'pred_ok' (bool)
+                Requires df_pred to have observed mass in one of:
+                ['protonatedmass','precursor_mz','mz']
+                and predicted label in one of:
+                ['Predicted','Predicted_Label','label','pred_label']
+                Library must provide theoretical mass via one of:
+                ['Mass','mass','theoretical_mass'] and a label column or counts.
+                """
+                log = (logger.info if logger else print)
+
+                # --- find columns (case-insensitive) ---
+                pred_lab_col = _find_col(df_pred, ["Predicted","Predicted_Label","label","pred_label"])
+                obs_mz_col   = _find_col(df_pred, ["protonatedmass","precursor_mz","mz"])
+                if not pred_lab_col or not obs_mz_col:
+                    log("[gate] ERROR: missing required columns in predictions "
+                        f"(label? {bool(pred_lab_col)}, mass? {bool(obs_mz_col)}). Skipping gate.")
+                    df_pred = df_pred.copy()
+                    df_pred["ppm_precursor"] = pd.NA
+                    df_pred["pred_ok"] = False
+                    return df_pred
+
+                theo_mass_col = _find_col(df_lib, ["Mass","mass","theoretical_mass"])
+                lib_label_col = _find_col(df_lib, ["Label","label","Predicted","composition","Comp","Glycan"])
+                if not theo_mass_col:
+                    log("[gate] ERROR: library has no theoretical mass column (Mass/mass/theoretical_mass). Skipping gate.")
+                    df_pred = df_pred.copy()
+                    df_pred["ppm_precursor"] = pd.NA
+                    df_pred["pred_ok"] = False
+                    return df_pred
+
+                # --- prepare library: ensure a canonical label column ---
+                lib = df_lib.copy()
+                if lib_label_col:
+                    lib["__label__"] = lib[lib_label_col].astype(str).map(_canon_label)
+                else:
+                    lib["__label__"] = lib.apply(_label_from_counts, axis=1).map(_canon_label)
+
+                # Drop library rows that still have empty labels or missing masses
+                lib = lib[pd.notna(lib[theo_mass_col])]
+                lib = lib[lib["__label__"] != ""]
+                lib = lib.drop_duplicates(subset="__label__", keep="first")
+
+                # --- prepare predictions: canonicalize labels ---
+                out = df_pred.copy()
+                out["__label__"] = out[pred_lab_col].astype(str).map(_canon_label)
+
+                # --- join ---
+                merged = out.merge(lib[["__label__", theo_mass_col]],
+                                on="__label__", how="left", suffixes=("", "_lib"))
+
+                # compute ppm only where theoretical mass is available
+                theo = merged[theo_mass_col]
+                obs  = merged[obs_mz_col]
+                with pd.option_context("mode.use_inf_as_na", True):
+                    ppm = (obs - theo) / theo * 1e6
+                merged["ppm_precursor"] = ppm.where(pd.notna(theo))
+
+                # determine pass/fail
+                merged["pred_ok"] = merged["ppm_precursor"].abs() <= ppm_threshold
+
+                # warn if nothing matched
+                n_labels_matched = merged[theo_mass_col].notna().sum()
+                if n_labels_matched == 0:
+                    uniq_preds = sorted(set(out["__label__"]) - {""})
+                    log(f"[gate] WARNING: 0 compositions matched between predictions and library. "
+                        f"Pred labels example: {uniq_preds[:8]} ... "
+                        "Check label format and library columns (Label/F/H/N/S/G/KDN + Mass).")
+
+                # clean up temp column
+                merged.drop(columns=["__label__"], inplace=True)
+                return merged            
+
+
             # --- Precursor gate (optional) ---
             out_path_gate = None                    # make sure this exists for later UI messages
             gate_on = bool(apply_pred_precursor_gate_var.get())  # <- use the SAME var name you used in the UI
@@ -8323,8 +8475,11 @@ def open_ml_analysis_window():
 
             # --- Precursor gate (robust & optional) ---
             out_path_gate = None
+            import pandas as _pd
+            import numpy as np
             if gate_on:
                 try:
+
                     # read in-silico and derive composition→[masses]
                     insilico_path = (insilico_csv_var.get() or "").strip()
                     if not insilico_path:
@@ -8347,7 +8502,6 @@ def open_ml_analysis_window():
                         _one = lib.columns[0]
                         # log for debugging
                         if logger: logger.log(f"[Predict] in-silico looked single-col header: {_one!r}; reparsing…")
-                        import pandas as _pd
                         # try comma, semicolon (EU Excel), then tab
                         for _sep in (",", ";", "\t"):
                             try:
@@ -8402,32 +8556,6 @@ def open_ml_analysis_window():
                         raise RuntimeError("In-silico CSV must have a Mass or theoretical_mass column.")
 
                     # if no comp string, synthesize from counts
-                    """
-                    if comp_col is None:
-                        # accept any of these count headers (case-insensitive)
-                        monomers = [k for k in norm if k in ("hex","hexnac","fuc","neugc","neuac","kdn","hexa","so3","po3h","s","p","a")]
-                        if not monomers:
-                            raise RuntimeError("In-silico CSV must have 'composition'/counts to match.")
-                        def _counts_to_comp(row):
-                            get = lambda key: int(row.get(norm[key], 0)) if key in norm and pd.notna(row.get(norm[key])) else 0
-                            H  = get("hex"); N = get("hexnac"); F = get("fuc"); G = get("neugc"); S = get("neuac"); K = get("kdn"); A = get("hexa")
-                            s  = get("so3") + get("s"); p = get("po3h") + get("p")
-                            parts = []
-                            # canonical FHNSGKDN order with modifiers A/s/p
-                            if F: parts.append(f"F{F}")
-                            if H: parts.append(f"H{H}")
-                            if N: parts.append(f"N{N}")
-                            if S: parts.append(f"S{S}")
-                            if G: parts.append(f"G{G}")
-                            if K: parts.append(f"K{K}")
-                            if A: parts.append(f"A{A}")  # HexA -> A
-                            if p: parts.append(f"p{p}")
-                            if s: parts.append(f"s{s}")
-                            return "".join(parts) if parts else ""
-                        lib = lib.copy()
-                        lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
-                        comp_col = "__comp"
-                    """
                     # If no composition string, synthesize one from monomer counts (FHN with modifiers A/s/p, plus G/K if present)
                     if comp_col is None:
                         def _get(row, key):
@@ -8467,17 +8595,48 @@ def open_ml_analysis_window():
                         lib = lib.copy()
                         lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
                         comp_col = "__comp"
-                    # build lookup composition → list of masses
+
+                    #new patch
+                                        
+                    # ADD: canonicalize library strings even if the CSV already has a composition column
+                    def _canon_safe(x):
+                        try:
+                            return _canon_comp(str(x))
+                        except Exception:
+                            return str(x).strip()
+
+                    if comp_col is None:
+                        # (your existing counts→string code stays as-is)
+                        ...
+                        lib = lib.copy()
+                        lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
+                        comp_col = "__comp"
+                    else:
+                        # <<< NEW: canonicalize provided composition strings so they match prediction labels
+                        lib = lib.copy()
+                        lib[comp_col] = lib[comp_col].astype(str).map(_canon_safe)
+
+                    # build lookup composition → list of masses  (unchanged)
                     comp2masses = {}
                     for comp, mass in zip(lib[comp_col].astype(str), pd.to_numeric(lib[mass_col], errors="coerce")):
-                        if pd.isna(mass) or not comp:
+                        if pd.isna(mass):
                             continue
-                        comp2masses.setdefault(comp, []).append(float(mass))
+                        comp_key = _canon_safe(comp)
+                        comp2masses.setdefault(comp_key, []).append(float(mass))
+
+                    # build lookup composition → list of masses
+                    #comp2masses = {}
+                    #for comp, mass in zip(lib[comp_col].astype(str), pd.to_numeric(lib[mass_col], errors="coerce")):
+                    #    if pd.isna(mass) or not comp:
+                    #        continue
+                    #    comp2masses.setdefault(comp, []).append(float(mass))
 
                     # apply gate (skip Non-glycan)
                     is_ng = pred_df["pred_label"].astype(str).eq("Non-glycan")
                     pred_df["ppm_precursor"] = np.nan
-                    pred_df["pred_ok"] = True
+                    # CHANGE: default to False; only set True for glycans that pass
+                    pred_df["pred_ok"] = False
+                    #pred_df["pred_ok"] = True
 
                     #debug lines
                     # --- GATE DIAGNOSTICS ---
@@ -8596,42 +8755,20 @@ def open_ml_analysis_window():
                         if logger: logger.log(f"[Predict][gate] counts-mass diagnostics failed: {_e}")
 
                     """
-                    # --- EXTRA DIAGNOSTICS: show why no_lut happened ---
-                    try:
-                        # sample a few in-silico keys so we can eyeball format mismatches
-                        if logger:
-                            _keys_sample = list(comp2masses.keys())[:20]
-                            logger.log(f"[Predict][gate] comp2masses sample keys (first 20): {_keys_sample}")
-
-                        # prepare a lambda that returns the candidate mass list for a canon label
-                        _mass_list = lambda c: comp2masses.get(c, [])
-
-                        # build a table for rows with no LUT (masses_found == 0)
-                        no_lut_df = gly[gly["masses_found"] == 0].copy()
-                        if not no_lut_df.empty:
-                            no_lut_df["candidates_from_library"] = no_lut_df["canon_pred"].map(_mass_list)
-
-                            # show a few lines in the log
-                            head_rows = no_lut_df[["MS2scan_no","pred_label","canon_pred",
-                                                "protonatedmass","candidates_from_library"]].head(20)
-                            if logger:
-                                for r in head_rows.itertuples(index=False):
-                                    logger.log("[Predict][gate][no_lut] "
-                                            f"scan={getattr(r,'MS2scan_no',None)}, "
-                                            f"pred='{getattr(r,'pred_label',None)}' "
-                                            f"canon='{getattr(r,'canon_pred',None)}' "
-                                            f"pm={getattr(r,'protonatedmass',None)} "
-                                            f"candidates={getattr(r,'candidates_from_library',None)}")
-
-                            # write full CSV for inspection
-                            nolut_path = (out_dir / (Path(predict_input_path).stem + "_gate_nolut_debug.csv")).as_posix()
-                            no_lut_df[["MS2scan_no","pred_label","canon_pred","protonatedmass",
-                                    "candidates_from_library"]].to_csv(nolut_path, index=False)
-                            if logger: logger.log(f"[Predict][gate] wrote no-lut debug → {nolut_path}")
-                    except Exception as _e:
-                        if logger: logger.log(f"[Predict][gate] extra diagnostics failed: {_e}")
-                    """
                     idx = (~is_ng).to_numpy().nonzero()[0]
+                    if len(idx):
+                        # canonicalize predicted comps (uses your _canon_comp if present)
+                        def _canon(x):
+                            ...
+                        comps = pred_df.loc[idx, "pred_label"].astype(str).map(_canon)
+                        obs   = pd.to_numeric(pred_df.loc[idx, "protonatedmass"], errors="coerce")
+                        best  = np.full(len(idx), np.nan)
+                        keep  = np.zeros(len(idx), dtype=bool)
+                        for j, (c, pm) in enumerate(zip(comps, obs)):
+                            ...
+                        pred_df.loc[idx, "ppm_precursor"] = best
+                        pred_df.loc[idx, "pred_ok"] = keep
+                    
                     if len(idx):
                         # canonicalize predicted comps (uses your _canon_comp if present)
                         def _canon(x):
@@ -8653,18 +8790,176 @@ def open_ml_analysis_window():
                             keep[j] = (best[j] <= gate_ppm)
                         pred_df.loc[idx, "ppm_precursor"] = best
                         pred_df.loc[idx, "pred_ok"] = keep
+                    """
+                    # --- compute ppm for glycan rows only (robust: string LUT + counts fallback) ---
+                    import numpy as _np
+                    import pandas as _pd
 
+                    # 1) Canonical prediction strings, but keep the raw too for logging
+                    pred_df["__canon_pred__"] = pred_df["pred_label"].astype(str).map(_canon_safe)
+
+                    gly_mask = (~is_ng).to_numpy()
+                    idx = _np.nonzero(gly_mask)[0]
+
+                    labels = pred_df.loc[gly_mask, "__canon_pred__"].astype(str).to_numpy()
+                    obs    = _pd.to_numeric(pred_df.loc[gly_mask, "protonatedmass"], errors="coerce").to_numpy()
+
+                    best_ppm = _np.full(labels.shape[0], _np.nan, dtype=float)
+                    keep     = _np.zeros(labels.shape[0], dtype=bool)
+
+                    # Reuse your counts parser and finder from diagnostics
+                    def _parse_counts(label: str):
+                        import re
+                        d = {"F":0,"H":0,"N":0,"S":0,"G":0,"K":0,"A":0,"s":0,"p":0}
+                        for m in re.finditer(r'([FHNSGKAsp])(\d+)', str(label)):
+                            ch, num = m.group(1), int(m.group(2))
+                            if ch in d:
+                                d[ch] += num
+                        return d
+
+                    def _masses_by_counts(lbl: str):
+                        cnt = _parse_counts(lbl)
+                        m = lib_counts.loc[
+                            (lib_counts["Fuc"]   == cnt["F"]) &
+                            (lib_counts["Hex"]   == cnt["H"]) &
+                            (lib_counts["HexNAc"]== cnt["N"]) &
+                            (lib_counts["NeuAc"] == cnt["S"]) &
+                            (lib_counts["NeuGc"] == cnt["G"]) &
+                            (lib_counts["KDN"]   == cnt["K"]) &
+                            (lib_counts["HexA"]  == cnt["A"]) &
+                            (lib_counts["SO3"]   == cnt["s"]) &
+                            (lib_counts["PO3H"]  == cnt["p"]),
+                            "__Mass__"
+                        ].dropna()
+                        return sorted(m.unique().tolist())
+
+                    def _masses_for_label(lbl: str):
+                        # try string LUT first
+                        m = comp2masses.get(lbl, [])
+                        if m:
+                            return m
+                        # fallback to counts-based match
+                        return _masses_by_counts(lbl)
+
+                    gppm = float(gate_ppm)
+                    for j, (lbl, pm) in enumerate(zip(labels, obs)):
+                        if not lbl or _np.isnan(pm):
+                            continue
+                        masses = _masses_for_label(lbl)
+                        if not masses:
+                            # verbose log once for the first few misses
+                            if logger and j < 5:
+                                logger.log(f"[gate][miss] no library masses for label '{lbl}' (pm={pm:.6f})")
+                            continue
+
+                        m = _np.asarray(masses, dtype=float)
+                        diffs = (pm - m) / m * 1e6
+                        k = _np.nanargmin(_np.abs(diffs))
+                        best_ppm[j] = float(diffs[k])
+
+                        passed = abs(best_ppm[j]) <= gppm
+                        keep[j] = passed
+
+                        # DEBUG: log every hit (so we can see matches in the terminal)
+                        try:
+                            scan_no = pred_df.loc[idx[j], "MS2scan_no"]
+                        except Exception:
+                            scan_no = None
+                        if logger:
+                            logger.log(
+                                f"[gate][hit] scan={scan_no} label='{lbl}' pm={pm:.6f} "
+                                f"bestTheo={m[k]:.6f} ppm={best_ppm[j]:.2f} → {'PASS' if passed else 'FAIL'}"
+                            )
+
+                    # write back only for glycan rows
+                    pred_df.loc[idx, "ppm_precursor"] = best_ppm
+                    pred_df.loc[idx, "pred_ok"]       = keep
+
+                    """
+                    # --- compute ppm for glycan rows only (explicit protonatedmass, canonical labels) ---
+                    pred_df["__canon_pred__"] = pred_df["pred_label"].astype(str).map(_canon_safe)
+
+                    gly_mask = (~is_ng).to_numpy()
+                    idx = np.nonzero(gly_mask)[0]
+
+                    labels = pred_df.loc[gly_mask, "__canon_pred__"].astype(str).to_numpy()
+                    obs    = pd.to_numeric(pred_df.loc[gly_mask, "protonatedmass"], errors="coerce").to_numpy()
+
+                    best_ppm = np.full(labels.shape[0], np.nan, dtype=float)
+                    keep     = np.zeros(labels.shape[0], dtype=bool)
+
+                    for j, (lbl, pm) in enumerate(zip(labels, obs)):
+                        if not lbl or np.isnan(pm):
+                            continue
+                        masses = comp2masses.get(lbl, [])
+                        if not masses:
+                            continue
+                        m = np.asarray(masses, dtype=float)
+                        diffs = (pm - m) / m * 1e6
+                        k = np.nanargmin(np.abs(diffs))
+                        best_ppm[j] = float(diffs[k])
+                        keep[j] = (abs(best_ppm[j]) <= float(gate_ppm))  # gate_ppm is your existing threshold
+
+                    # write back only for glycan rows
+                    pred_df.loc[idx, "ppm_precursor"] = best_ppm
+                    pred_df.loc[idx, "pred_ok"] = keep
+                    """
                     # gated copy for disk & for report
                     out_path_gate = (out_dir / (Path(predict_input_path).stem + f"_predicted{ms1_suffix}_PG{int(gate_ppm)}ppm_only.csv")).as_posix()
                     df["pred_ok"] = pred_df["pred_ok"].values  # keep in the full table too
+                    #now ppm falls to csv, not in logger or terminal only
+                    df["ppm_precursor"] = pred_df["ppm_precursor"].values   # <<< add this
                     df.to_csv(out_dir / (Path(predict_input_path).stem + f"_predicted{method_suffix}.csv"), index=False)
                     pred_df_for_report = pred_df[pred_df["pred_ok"]].copy()
+                    #convenient passed class count
+                    # Save a simple gated count table: composition, n
+                    gate_counts = (pred_df_for_report
+                                .groupby("pred_label", dropna=False)
+                                .size()
+                                .reset_index(name="count")
+                                .sort_values("count", ascending=False))
+                    gate_counts_path = (out_dir / (Path(predict_input_path).stem + "_PG_counts.csv")).as_posix()
+                    gate_counts.to_csv(gate_counts_path, index=False)
+                    if logger: logger.log(f"[Predict][gate] wrote gated counts → {gate_counts_path}")
+
+
                 except Exception as _e:
                     # Gate skipped → just report everything
                     if logger: logger.log(f"[Predict] Precursor gate skipped: {_e}")
                     pred_df_for_report = pred_df.copy()
             else:
                 pred_df_for_report = pred_df.copy()
+
+            #
+            # --- Harmonize probability vectors so all rows have same length ---
+            import json, ast
+            def _parse_vec(x):
+                s = str(x).strip()
+                if s in ("", "nan", "None"):
+                    return []
+                try:
+                    try:
+                        v = json.loads(s)
+                    except Exception:
+                        v = ast.literal_eval(s)
+                    if isinstance(v, (list, tuple)):
+                        return [float(z) for z in v]
+                except Exception:
+                    pass
+                return []
+
+            if "proba_vector" in pred_df_for_report.columns:
+                vecs = pred_df_for_report["proba_vector"].map(_parse_vec)
+                target = len(class_names) if (class_names and len(class_names) > 0) else max((len(v) for v in vecs), default=0)
+                if target > 0:
+                    vecs = vecs.map(lambda v: (v + [0.0]*target)[:target])
+                    pred_df_for_report["proba_vector"] = vecs#.map(json.dumps)
+                    proba_cols = None
+            else:
+                if proba_cols:
+                    for c in proba_cols:
+                        if c not in pred_df_for_report.columns:
+                            pred_df_for_report[c] = 0.0
 
             # --- Reporter: summarize & write (keep run_sum as dict) ---
             params = ReportParams(tau=0.60, margin=0.05, topk=5, sample_cols=("experiment_title", "sample_name"))
@@ -9014,7 +9309,7 @@ def open_ml_analysis_window():
             if n>0: parts.append(f"{key}{n}")
         return "".join(parts)
 
-    def _load_insilico_for_gate(path: str) -> _pd.DataFrame:
+    def _load_insilico_for_gate(path: str) -> pd.DataFrame:
         """
         Accepts:
         - New wide CSV: Hex,HexNAc,NeuAc,NeuGc,KDN,Fuc[,HexA,SO3,PO3H], Mass
@@ -9022,16 +9317,16 @@ def open_ml_analysis_window():
         - Already-canonical: composition, theoretical_mass
         Returns a DataFrame with at least: composition (canonical str), theoretical_mass (float)
         """
-        df = _pd.read_csv(path)
+        df = pd.read_csv(path)
         cols = {c.lower(): c for c in df.columns}
 
         # Case 1: already has 'composition' + 'theoretical_mass' (or 'mass')
         if "composition" in cols and ("theoretical_mass" in cols or "mass" in cols):
             comp_col = cols["composition"]
             mass_col = cols.get("theoretical_mass", cols.get("mass"))
-            out = _pd.DataFrame({
+            out = pd.DataFrame({
                 "composition": df[comp_col].astype(str).map(_canonicalize_comp_string),
-                "theoretical_mass": _pd.to_numeric(df[mass_col], errors="coerce")
+                "theoretical_mass": pd.to_numeric(df[mass_col], errors="coerce")
             })
             return out.dropna(subset=["theoretical_mass"])
 
@@ -9061,12 +9356,12 @@ def open_ml_analysis_window():
                 cols["hex"]:"Hex", cols["hexnac"]:"HexNAc", cols["neuac"]:"NeuAc",
                 cols["neugc"]:"NeuGc", cols["kdn"]:"KDN", cols["fuc"]:"Fuc"
             }).copy()
-            tmp["HexA"] = _pd.to_numeric(hexA, errors="coerce").fillna(0).astype(int)
-            tmp["SO3"]  = _pd.to_numeric(so3,  errors="coerce").fillna(0).astype(int)
-            tmp["PO3H"] = _pd.to_numeric(po3h, errors="coerce").fillna(0).astype(int)
-            out = _pd.DataFrame({
+            tmp["HexA"] = pd.to_numeric(hexA, errors="coerce").fillna(0).astype(int)
+            tmp["SO3"]  = pd.to_numeric(so3,  errors="coerce").fillna(0).astype(int)
+            tmp["PO3H"] = pd.to_numeric(po3h, errors="coerce").fillna(0).astype(int)
+            out = pd.DataFrame({
                 "composition": tmp.apply(_build_row, axis=1),
-                "theoretical_mass": _pd.to_numeric(tmp[mass_col], errors="coerce")
+                "theoretical_mass": pd.to_numeric(tmp[mass_col], errors="coerce")
             })
             return out.dropna(subset=["theoretical_mass"])
 
@@ -9074,8 +9369,8 @@ def open_ml_analysis_window():
         if len(df.columns) == 2:
             comp_col, mass_col = df.columns[0], df.columns[1]
             comp = df[comp_col].astype(str).map(_canonicalize_comp_string)
-            mass = _pd.to_numeric(df[mass_col], errors="coerce")
-            return _pd.DataFrame({"composition": comp, "theoretical_mass": mass}).dropna(subset=["theoretical_mass"])
+            mass = pd.to_numeric(df[mass_col], errors="coerce")
+            return pd.DataFrame({"composition": comp, "theoretical_mass": mass}).dropna(subset=["theoretical_mass"])
 
         # Fallback → raise a clear message the UI can show
         raise ValueError("In-silico CSV must have composition/theoretical_mass OR standard wide columns.")
@@ -9883,7 +10178,7 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v0.6 Build 20251006")
+root.title("GlycoMSP File Manager GUI v0.6 Build 20251010 core 0.9998")
 root.geometry("840x600")
 root.minsize(840, 600)
 
