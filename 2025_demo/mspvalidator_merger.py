@@ -68,7 +68,8 @@ elemental_masses = {
 'H': 1.007825,
 'Na': 22.9898,
 'N': 14.0037,
-'O': 15.9995
+'O': 15.9995,
+'C': 12.0011 #true? not sure
 }
 
 etc_masses = {
@@ -101,6 +102,30 @@ adducts_masses.update({
 })
 
 H_MASS = 1.007825
+
+#20251012 try to fix MS2scan_no error when manual data + neg
+# put this near the top with other helpers
+def _normalize_headers(df):
+    df = df.copy()
+    df.columns = [str(c).strip().replace("\ufeff","") for c in df.columns]
+    # unifying common variants to the expected names
+    alias = {
+        "MS2Scan_no": "MS2scan_no",
+        "MS2 scan no": "MS2scan_no",
+        "MS2_scan_no": "MS2scan_no",
+        "ms2scan_no": "MS2scan_no",
+    }
+    df.rename(columns={k: v for k, v in alias.items() if k in df.columns}, inplace=True)
+    return df
+
+def _ensure_ms2_col(df, where="(unknown)"):
+    if "MS2scan_no" not in df.columns:
+        # last-ditch: some sheets store it as index
+        if str(df.index.name).strip() == "MS2scan_no":
+            df = df.reset_index()
+        else:
+            raise KeyError(f"MS2scan_no (after normalization) not found in {where}. Columns: {list(df.columns)}")
+    return df
 
 def _parse_functional_groups(row):
     """
@@ -266,22 +291,54 @@ def adding_protonated_and_observed_mass(df, derivatization): #type should be sol
     return df
 
 def extractannotation(annotationdf, extractiondf, debug = False):
+    #harden
+    # normalize headers first (handles BOM/whitespace/case/underscores)
+    annotationdf  = _normalize_headers(annotationdf)
+    extractiondf  = _normalize_headers(extractiondf)
+
+    # make sure the join key really exists as a column
+    annotationdf  = _ensure_ms2_col(annotationdf, where="annotationdf")
+    extractiondf  = _ensure_ms2_col(extractiondf, where="extractiondf")
+
+    # coerce MS2scan_no to integer (Excel sometimes loads as object/float)
+    for df in (annotationdf, extractiondf):
+        try:
+            df["MS2scan_no"] = df["MS2scan_no"].astype("Int64")  # nullable int, safe on NaN
+        except Exception:
+            pass
     if debug:
         print(extractiondf.head())
         print(annotationdf.head())
         print(f"merged dafaframe by MS2scan_no{extractiondf.columns}")
         print(f"annotationdf columns are {annotationdf.columns}")
-    extracted_df = pd.merge(annotationdf, extractiondf, on="MS2scan_no", how="inner")
+    merged = pd.merge(annotationdf, extractiondf, on="MS2scan_no", how="inner", validate="m:1")
+
+    # if any tool duplicated the key (rare), collapse to the canonical name
+    if "MS2scan_no_x" in merged.columns or "MS2scan_no_y" in merged.columns:
+        merged = merged.rename(columns={"MS2scan_no_x": "MS2scan_no"})
+        if "MS2scan_no_y" in merged.columns:
+            merged.drop(columns=["MS2scan_no_y"], inplace=True)
+
+    #extracted_df = pd.merge(annotationdf, extractiondf, on="MS2scan_no", how="inner")
     #no error handling part now
     if debug:
         #temporarily save the merged file for debugging. Complete this part with writing information to log file as well.
         #extracted_df.to_csv("annotated_intermediate1.csv", index=False)
-        print("temporarily disabled intermediate file export after debug finished v0.8")        
-    return extracted_df
+        print("[debug]temporarily disabled intermediate file export after debug finished v0.8")        
+    return merged #extracted_df
 
 #slice the combined dataframe to the columns we need
 #added MS2scan_no for further id tracking (developing)
 def slice_combined_df(df):
+    #20251012 
+    cols = ["protonatedmass","peaklist","peakintensity","Structure",
+            "IUPACname(optional)","Glycanannotation2","MS2scan_no"]
+    existing = [c for c in cols if c in df.columns]
+    missing  = [c for c in cols if c not in df.columns]
+    if missing:
+        # keep going; these may be optional labels
+        print(f"[WARN] Missing columns in slice: {missing}")  # or logger.debug
+        pass
     return df[["protonatedmass","peaklist","peakintensity","Structure", "IUPACname(optional)","Glycanannotation2", "MS2scan_no"]] 
 
 

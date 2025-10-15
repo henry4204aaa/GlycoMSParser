@@ -1,5 +1,5 @@
-version = "1.053"
-last_update = 20250929
+version = "1.06"
+last_update = 20251015
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -34,7 +34,7 @@ last_update = 20250929
 #version changelog:
 #v1.2 (future): add O-man and fix hybrid NG generation logic
 #v1.1 (future): finished version for publication
-#v1.06 (future): add OG sulphation (no phosphate right...? right?)
+#v1.06: add OG sulphation (no phosphate right...? right?)
 #v1.053: fix NG with adding 2 PO3H/SO3
 #v1.052: fix NG with adding 1 PO3H/SO3
 #v1.051: NG negative mode with HexA is implemented. NOTE that we haven't implement the SO3/PO3H rules so the charge and final mass is WRONG <-HEAD 20250926
@@ -218,6 +218,29 @@ def decide_functional_groups(comp6, hexA, flags):
         so3 = max_so3
         return so3, po3h
 
+    # default: none
+    return so3, po3h
+
+
+def decide_functional_groups_OG(comp6, hexA, flags, debug=False):
+    H, N, Ac, Gc, KDN, F = comp6
+
+    so3_on  = bool(flags.get("SO3"))
+    po3h_on = bool(flags.get("PO3H"))
+    if debug:
+        print("OG doesn't have Phosphate, force set to 0")
+
+    max_so3  = _norm_range(flags, "SO3_range",  (0, 1))[1] if so3_on  else 0
+    max_po3h = 0 #_norm_range(flags, "PO3H_range", (0, 1))[1] if po3h_on else 0
+
+    so3 = 0
+    po3h = 0
+
+    # --- your rules (phosphate preferred, then sulfate) ---
+    # OG rules: 2 sulphate need at least 3 
+    #if max_so3 == 2 and ((N + H + F + Ac) > 2):
+    so3 = max_so3
+    #    return so3, po3h
     # default: none
     return so3, po3h
 
@@ -1604,8 +1627,8 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
 
     #add catcher for mode, and negative charge groups
     mode = _normalize_mode(flags)
-    so3 = flags.get("SO3", 0)
-    po3h = flags.get("PO3H", 0)
+    #so3 = flags.get("SO3", 0)
+    #po3h = flags.get("PO3H", 0)
 
 
     if flags["debug"]:
@@ -1622,7 +1645,7 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
              print("[debug] Allow composition check by sugar unit numbers")
         #checked_final = compcheck(OG_comps, flags["Hex_range"], flags["HexNAc_range"],
         #                          flags["Neu5Ac_range"], flags["Neu5Gc_range"], flags["KDN_range"], flags["Fucose_range"], flags["debug"])
-        
+
         res = compcheck(OG_comps,
                         flags["Hex_range"], flags["HexNAc_range"],
                         flags["Neu5Ac_range"], flags["Neu5Gc_range"],
@@ -1631,10 +1654,23 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
         passed = res[0] #if flags["debug"] else res
         #save_glycan_pseudocomp_to_csv(passed, filename=filename,
         #                            include_header=True, derivatization=deri, reduced=reduced)        
-        save_glycan_pseudocomp_to_csv(passed, filename=filename,
+        rows = []
+        for comp, hexA in passed:
+            so3_val, po3h_val = decide_functional_groups_OG(comp, hexA, flags)
+            rows.append({"sum": comp, "hexA": hexA, "SO3": so3_val, "PO3H": po3h_val})
+            #for debug
+        print("[FG] totals  SO3:", sum(1 for r in rows if r.get("SO3",0)),
+            " PO3H:",        sum(1 for r in rows if r.get("PO3H",0)))
+        # optional: show a few that fired
+        print("[FG] examples SO3=1:", [r["sum"] for r in rows if r.get("SO3")==1][:5])
+        print("[FG] examples PO3H=1:", [r["sum"] for r in rows if r.get("PO3H")==1][:5])
+        print("[FG] examples SO3=2:", [r["sum"] for r in rows if r.get("SO3")==2][:5])
+        print("[FG] examples PO3H=2:", [r["sum"] for r in rows if r.get("PO3H")==2][:5])
+
+        save_glycan_pseudocomp_to_csv(rows, filename=filename,
                                 include_header=True,
                                 derivatization=deri, reduced=reduced,
-                                mode=mode, so3=so3, po3h=po3h, use_v4=True)
+                                mode=mode, so3=0, po3h=0, use_v4=True)
         #return checked_final, True
     else:
         if flags["debug"]:
@@ -1643,7 +1679,7 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
             save_glycan_pseudocomp_to_csv(OG_comps, filename=filename,
                                   include_header=True,
                                   derivatization=deri, reduced=reduced,
-                                  mode=mode, so3=so3, po3h=po3h, use_v4=True)
+                                  mode=mode, so3=0, po3h=0, use_v4=True)
         #return OG_comps, False
     
 
