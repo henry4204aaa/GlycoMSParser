@@ -1,6 +1,6 @@
 import os
-version = "0.9999"
-last_update = 20251208
+version = "0.99991"
+last_update = 20251215
 import msprawextractor as mspext
 import threading
 from tkinter import ttk
@@ -298,8 +298,19 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         super().__init__(master)
         self.title("Constraint-based Glycan Annotation Setup")
-        self.geometry("620x640")
+        #self.geometry("620x640")
+        #self.geometry("760x880")
+        self.geometry("840x720")
+        self.minsize(840, 720)
         self.resizable(True, True)
+        """#allow window to open in the center of window
+        self.update_idletasks()
+        w = self.winfo_width()
+        h = self.winfo_height()
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        """
 
         self.meta_json_path = meta_json_path
         self.on_submit = on_submit
@@ -482,17 +493,29 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             "allow5ac","allow5gc","allowkdn","allowfuc","allowpsa",
             # NEW:
             "allowHexA","HexA_range","SO3","SO3_range","PO3H","PO3H_range",
-            #
-            "arm_count","internal_minrep","internal_maxrep","topology",
+            #"arm_count",
+            "internal_minrep","internal_maxrep","topology",
             "compcheck","Hex_range","HexNAc_range","Neu5Ac_range","Neu5Gc_range","KDN_range","Fucose_range"
         }
         self.flag_vars = {}
-        #newly added
+        # Define the keys group for the CGA window
         # Keys that belong to the "Advanced options" collapsible group
         ADVANCED_KEYS = {"debug", "dev", "force_exit", "topology", "perman"}
+        # Keys that belong to the "glycotope restraints" sub-frame
+        GLYCOTOPE_KEYS = {
+            "alphagal_like","allowldnc","allowleby","allow5ac","allow5gc",
+            "allowkdn","allowfuc","allowpsa","allowHexA", "allowldnf"
+        }
+        INTERNAL_EXT_KEYS = {"arm_count", "internal_minrep", "internal_maxrep"}
+        NG_CORE_KEYS = {"corefuc", "bicorefuc", "highman", "hybrid"}
+        SUBSTITUENT_NEG_KEYS = {"SO3", "SO3_range", "PO3H", "PO3H_range"}
+        COMPOSITION_KEYS = {
+            "HexA_range", "Hex_range", "HexNAc_range",
+            "Neu5Ac_range", "Neu5Gc_range", "KDN_range",
+            "Fucose_range", "compcheck"
+        }
         # controls visibility of "Advanced options" panel
         self.show_advanced_var = tk.BooleanVar(value=False)
-        
 
         left = ttk.Frame(flags_frame)
         right = ttk.Frame(flags_frame)
@@ -511,6 +534,9 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
                 ttk.Label(parent, text="(components auto-filled on submit)").grid(row=row, column=1, sticky="w")
 
         def add_int(parent, key, row, lo, hi):
+            label = key
+            if key == "arm_count":
+                label = "arm_count (N-glycans)"
             ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
             var = tk.IntVar(value=_coerce_int_like(self.flags.get(key, 0), 0))
             ttk.Spinbox(parent, from_=lo, to=hi, textvariable=var, width=6).grid(row=row, column=1, sticky="w", padx=6)
@@ -531,7 +557,59 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         def _current_keys():
             gtype = self.meta_vars["Glycan Type"].get().strip().upper()
             return NG_KEYS if gtype == "N" else OG_KEYS
-        
+
+
+
+        #move OG core panel here to avoid called before assignment exceptions
+        # --- O-glycan core types (multi-select) ---
+        #core_frame = ttk.LabelFrame(self, text="O-glycan core types (select 1–4)")
+        #core_frame.pack(fill="x", padx=12, pady=(0, 6))
+        # Now a sub-frame inside "In-Silico Generation Flags"
+        #core_frame = ttk.LabelFrame(flags_frame, text="O-glycan core types (select 1–4)")
+        #core_frame = ttk.LabelFrame(right, text="O-glycan core types (select 1–4)")
+        # placed inside the right column by _toggle_og_core_panel()
+        self.og_core_vars = {i: tk.BooleanVar(value=False) for i in (0, 1, 2, 3, 4)}
+        def _selected_coretypes():
+            sel = [i for i, v in self.og_core_vars.items() if v.get()]
+            return sel if sel else [1, 2, 3, 4]  # sensible default
+        """
+        row = 0
+        for i, label in [(0, "Tn Antigen"), (1, "Core 1"), (2, "Core 2"), (3, "Core 3"), (4, "Core 4")]:
+            ttk.Checkbutton(core_frame, text=label, variable=self.og_core_vars[i]).grid(
+                row=row // 2, column=row % 2, sticky="w", padx=8, pady=3
+            )
+            row += 1
+        def _toggle_og_core_panel():
+            # Show only for O-glycan
+            gtype = self.meta_vars["Glycan Type"].get().strip().upper()
+            core_frame.pack_forget()
+            if gtype == "O":
+                # if outside the block then use this old one
+                #core_frame.pack(fill="x", padx=12, pady=(0, 6))
+                # show inside the "In-Silico Generation Flags" block
+                #core_frame.pack(fill="x", padx=10, pady=(4, 6))
+                # now put dynamically under composition restraints
+                core_frame.grid(row=self._ogcore_row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        """
+
+
+        def _snapshot_flags():
+            snap = {}
+            # flags
+            for k, w in self.flag_vars.items():
+                if isinstance(w, tuple):
+                    val = (int(w[0].get()), int(w[1].get()))
+                elif isinstance(w, tk.BooleanVar):
+                    val = bool(w.get())
+                else:
+                    val = int(w.get())
+                snap[k] = val
+                # keep latest GUI value so we can restore even when widgets are rebuilt/hidden
+                self.flags[k] = val
+            # OG core types (added below)
+            snap["_ogcore"] = {i: v.get() for i, v in self.og_core_vars.items()}
+            return snap
+        """
         def _snapshot_flags():
             snap = {}
             # flags
@@ -549,7 +627,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             snap["_ogcore"] = {i: v.get() for i, v in self.og_core_vars.items()}
             return snap
         
-        """
+        
         def _snapshot_flags():
             snap = {}
             # flags
@@ -580,6 +658,145 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
                 if i in self.og_core_vars:
                     self.og_core_vars[i].set(bool(val))
 
+        def _rebuild_flag_panel(*_):
+            # preserve state
+            snap = _snapshot_flags()
+            # clear frames
+            for child in left.winfo_children():
+                child.destroy()
+            for child in right.winfo_children():
+                child.destroy()
+            for child in advanced_frame.winfo_children():
+                child.destroy()
+            self.flag_vars.clear()
+
+            # choose keys for current glycan type
+            keys = [k for k in flag_spec.keys() if k in _current_keys()]
+
+            # split into glycotope / main / advanced
+            glycotope_keys = [k for k in keys if k in GLYCOTOPE_KEYS]
+            internal_keys = [k for k in keys if k in INTERNAL_EXT_KEYS]
+            ngcore_keys = [k for k in keys if k in NG_CORE_KEYS]
+            substituent_neg_keys = [k for k in keys if k in SUBSTITUENT_NEG_KEYS]
+            composition_keys = [k for k in keys if k in COMPOSITION_KEYS]
+            main_keys = [
+                k for k in keys
+                if (
+                    k not in ADVANCED_KEYS
+                    and k not in GLYCOTOPE_KEYS
+                    and k not in INTERNAL_EXT_KEYS
+                    and k not in NG_CORE_KEYS
+                    and k not in SUBSTITUENT_NEG_KEYS
+                    and k not in COMPOSITION_KEYS
+                )
+            ]
+            adv_keys = [k for k in keys if k in ADVANCED_KEYS]
+
+            # remaining main keys go into left/right columns
+            half = (len(main_keys) + 1) // 2
+            left_keys, right_keys = main_keys[:half], main_keys[half:]
+
+            # generic renderer
+            def render_column(parent, keys_subset, start_row=0):
+                r = start_row
+                for k in keys_subset:
+                    ftype, extra = flag_spec[k]
+                    if ftype == "bool":
+                        add_bool(parent, k, r)
+                    elif ftype == "int":
+                        lo, hi = extra
+                        add_int(parent, k, r, lo, hi)
+                    elif ftype == "range":
+                        lo, hi = extra
+                        add_range(parent, k, r, lo, hi)
+                    r += 1
+                return r
+
+            # --- glycotope restraints sub-frame (left side) ---
+            left_start_row = 0
+            # row 0: glycotope restraints
+            if glycotope_keys:
+                glyco_frame = ttk.LabelFrame(left, text="glycotope restraints")
+                glyco_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                render_column(glyco_frame, glycotope_keys, start_row=0)
+                left_start_row = 1 # other left-column flags start under this frame
+
+            # row 1: substituent(neg)
+            if substituent_neg_keys:
+                subneg_frame = ttk.LabelFrame(left, text="substituent(neg)")
+                subneg_frame.grid(row=left_start_row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                render_column(subneg_frame, substituent_neg_keys, start_row=0)
+                left_start_row += 1
+
+            # --- internal extension/elongation sub-frame (right side) ---
+            right_start_row = 0
+            # row 0: internal extension/elongation
+            if internal_keys:
+                internal_frame = ttk.LabelFrame(right, text="internal extension/elongation")
+                internal_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                render_column(internal_frame, internal_keys, start_row=0)
+                right_start_row = 1  # next content goes to row 1+
+            # row 1: NG Core Flags (N-glycan only keys, but safe to render normally)
+            if ngcore_keys:
+                ngcore_frame = ttk.LabelFrame(right, text="NG Core Flags")
+                ngcore_frame.grid(row=right_start_row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                render_column(ngcore_frame, ngcore_keys, start_row=0)
+                right_start_row += 1
+            # row 2: composition restraints
+            if composition_keys:
+                comp_frame = ttk.LabelFrame(right, text="composition restraints")
+                comp_frame.grid(row=right_start_row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                render_column(comp_frame, composition_keys, start_row=0)
+                right_start_row += 1
+                # OG core types should appear under the right-side stack (after composition restraints)
+                # O-glycan core types (only render when Glycan Type == O)
+                if self.meta_vars["Glycan Type"].get().strip().upper() == "O":
+                    ogcore_frame = ttk.LabelFrame(right, text="O-glycan core types (select 1–4)")
+                    ogcore_frame.grid(
+                        row=right_start_row,
+                        column=0,
+                        columnspan=2,
+                        sticky="w",
+                        pady=(0, 4)
+                    )
+
+                    core_labels = {
+                        0: "Tn Antigen",
+                        1: "Core 1",
+                        2: "Core 2",
+                        3: "Core 3",
+                        4: "Core 4",
+                    }
+
+                    r = 0
+                    for i in (0, 1, 2, 3, 4):
+                        ttk.Checkbutton(
+                            ogcore_frame,
+                            text=core_labels[i],
+                            variable=self.og_core_vars[i]
+                        ).grid(row=r // 2, column=r % 2, sticky="w", padx=6)
+                        r += 1
+
+                    right_start_row += 1
+
+            # main columns (remaining flags)
+            render_column(left, left_keys, start_row=left_start_row)
+            render_column(right, right_keys, start_row=right_start_row)
+
+            # advanced panel (optional)
+            if self.show_advanced_var.get() and adv_keys:
+                if not advanced_frame.winfo_manager():
+                    advanced_frame.pack(fill="x", padx=10, pady=(0, 8))
+                render_column(advanced_frame, adv_keys, start_row=0)
+            else:
+                advanced_frame.pack_forget()
+
+            # show/hide O-core panel according to glycan type
+            #_toggle_og_core_panel()
+            # restore state
+            _restore_flags(snap)
+
+        """
         def _rebuild_flag_panel(*_):
             # preserve state
             snap = _snapshot_flags()
@@ -622,7 +839,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             _toggle_og_core_panel()
             # restore state
             _restore_flags(snap)   
-        """
+        
         def _rebuild_flag_panel(*_):
             # preserve state
             snap = _snapshot_flags()
@@ -655,34 +872,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             # restore state
             _restore_flags(snap)   
         """
-        # --- O-glycan core types (multi-select) ---
-        #core_frame = ttk.LabelFrame(self, text="O-glycan core types (select 1–4)")
-        #core_frame.pack(fill="x", padx=12, pady=(0, 6))
-        # Now a sub-frame inside "In-Silico Generation Flags"
-        core_frame = ttk.LabelFrame(flags_frame, text="O-glycan core types (select 1–4)")
-
-        self.og_core_vars = {i: tk.BooleanVar(value=False) for i in (0, 1, 2, 3, 4)}
-
-        row = 0
-        for i, label in [(0, "Tn Antigen"), (1, "Core 1"), (2, "Core 2"), (3, "Core 3"), (4, "Core 4")]:
-            ttk.Checkbutton(core_frame, text=label, variable=self.og_core_vars[i]).grid(
-                row=row // 2, column=row % 2, sticky="w", padx=8, pady=3
-            )
-            row += 1
-
-        def _selected_coretypes():
-            sel = [i for i, v in self.og_core_vars.items() if v.get()]
-            return sel if sel else [1, 2, 3, 4]  # sensible default
-
-        def _toggle_og_core_panel():
-            # Show only for O-glycan
-            gtype = self.meta_vars["Glycan Type"].get().strip().upper()
-            core_frame.pack_forget()
-            if gtype == "O":
-                # if outside the block then use this old one
-                #core_frame.pack(fill="x", padx=12, pady=(0, 6))
-                # show inside the "In-Silico Generation Flags" block
-                core_frame.pack(fill="x", padx=10, pady=(4, 6))
 
         # After creating the Glycan Type combobox (named via self.meta_vars["Glycan Type"])
         gly_cb = meta_frame.grid_slaves(row=0, column=1)[0]  # the Combobox you just created
@@ -704,112 +893,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         # Initial render
         _rebuild_flag_panel()
 
-        """
-        # --- Flag editor (selected subset; excludes termi_comp/internal_comp) ---
-        flags_frame = ttk.LabelFrame(self, text="In-Silico Generation Flags")
-        flags_frame.pack(fill="both", expand=True, padx=12, pady=6)
-
-        flag_spec = {
-            # monitoring / flow
-            "debug": ("bool", None),
-            "dev": ("bool", None),
-            "force_exit": ("bool", None),
-            # composition options
-            "alphagal_like": ("bool", None),
-            "allowldnc": ("bool", None),
-            "allowleby": ("bool", None),
-            "allow5ac": ("bool", None),
-            "allow5gc": ("bool", None),
-            "allowkdn": ("bool", None),
-            "allowfuc": ("bool", None),
-            "allowpsa": ("int", (0, 3)),
-            "allowldnf": ("bool", None),
-            # iteration logic
-            "arm_count": ("int", (0, 8)),
-            "internal_minrep": ("int", (0, 6)),
-            "internal_maxrep": ("int", (0, 10)),
-            "topology": ("bool", None),
-            # core flags (NG)
-            "corefuc": ("bool", None),
-            "bicorefuc": ("bool", None),
-            "highman": ("bool", None),
-            "perman": ("bool", None),
-            "hybrid": ("bool", None),  # note: hybrid components are derived later, not edited here
-            # optional composition check
-            "compcheck": ("bool", None),
-            "Hex_range": ("range", (0, 20)),
-            "HexNAc_range": ("range", (0, 20)),
-            "Neu5Ac_range": ("range", (0, 10)),
-            "Neu5Gc_range": ("range", (0, 10)),
-            "KDN_range": ("range", (0, 10)),
-            "Fucose_range": ("range", (0, 10)),
-        }
-
-        self.flag_vars = {}
-
-        left = ttk.Frame(flags_frame)
-        right = ttk.Frame(flags_frame)
-        left.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=8)
-        right.pack(side="left", fill="both", expand=True, padx=(5, 10), pady=8)
-
-        def _coerce_int_like(val, default=0):
-            return int(val) if isinstance(val, (int, float, str)) and str(val).strip() != "" else int(default)
-
-        def add_bool(parent, key, row):
-            var = tk.BooleanVar(value=bool(self.flags.get(key, False)))
-            ttk.Checkbutton(parent, text=key, variable=var).grid(row=row, column=0, sticky="w", pady=3)
-            self.flag_vars[key] = var
-            if key == "hybrid":
-                ttk.Label(parent, text="(components auto-filled on submit)").grid(row=row, column=1, sticky="w")
-
-        def add_int(parent, key, row, lo, hi):
-            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
-            var = tk.IntVar(value=_coerce_int_like(self.flags.get(key, 0), 0))
-            ttk.Spinbox(parent, from_=lo, to=hi, textvariable=var, width=6).grid(row=row, column=1, sticky="w", padx=6)
-            self.flag_vars[key] = var
-
-        def add_range(parent, key, row, lo, hi):
-            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
-            default = self.flags.get(key, [0, 0])
-            vmin = tk.IntVar(value=_coerce_int_like(default[0] if isinstance(default, (list, tuple)) else 0, 0))
-            vmax = tk.IntVar(value=_coerce_int_like(default[1] if isinstance(default, (list, tuple)) else 0, 0))
-            wrap = ttk.Frame(parent)
-            wrap.grid(row=row, column=1, sticky="w")
-            ttk.Spinbox(wrap, from_=lo, to=hi, textvariable=vmin, width=5).pack(side="left")
-            ttk.Label(wrap, text=" to ").pack(side="left")
-            ttk.Spinbox(wrap, from_=lo, to=hi, textvariable=vmax, width=5).pack(side="left")
-            self.flag_vars[key] = (vmin, vmax)
-
-        keys = list(flag_spec.keys())
-        half = (len(keys) + 1) // 2
-        left_keys, right_keys = keys[:half], keys[half:]
-
-        def render_column(parent, keys_subset):
-            r = 0
-            for k in keys_subset:
-                ftype, extra = flag_spec[k]
-                if ftype == "bool":
-                    add_bool(parent, k, r)
-                elif ftype == "int":
-                    lo, hi = extra
-                    add_int(parent, k, r, lo, hi)
-                elif ftype == "range":
-                    lo, hi = extra
-                    add_range(parent, k, r, lo, hi)
-                r += 1
-
-        render_column(left, left_keys)
-        render_column(right, right_keys)
-        """
-        """
-        btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=12, pady=(6, 12))
-        ttk.Button(btns, text="Load Flags…", command=self.load_flags).pack(side="left", padx=4)
-        ttk.Button(btns, text="Save Flags…", command=self.save_flags).pack(side="left", padx=4)
-        ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(btns, text="Generate In-Silico CSV", command=self.submit).pack(side="left", padx=4)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=4)
-        """
         # --- BELOW your metadata + flags UI ---
 
         # Small panel to show current links (insilico / ion list)
@@ -818,21 +901,42 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         self.insilico_path_var = tk.StringVar(value=initial_insilico or "")
         self.ionlist_path_var  = tk.StringVar(value=initial_ionlist or "")
+        # allow the path column to expand
+        links_frame.columnconfigure(1, weight=1)
 
+        ttk.Label(links_frame, text="In-silico glycan list (compositions):").grid(row=0, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(
+            links_frame,
+            textvariable=self.insilico_path_var,
+            justify="left",
+            wraplength=760  # adjust if you change geometry width
+        ).grid(row=0, column=1, sticky="we", padx=8, pady=4)
+
+        ttk.Label(links_frame, text="Fragmentation ion list (features):").grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        ttk.Label(
+            links_frame,
+            textvariable=self.ionlist_path_var,
+            justify="left",
+            wraplength=760
+        ).grid(row=1, column=1, sticky="we", padx=8, pady=4)
+
+        """
         ttk.Label(links_frame, text="In-silico glycan list (compositions):").grid(row=0, column=0, sticky="w", padx=10, pady=4)
         ttk.Label(links_frame, textvariable=self.insilico_path_var).grid(row=0, column=1, sticky="w", padx=8, pady=4)
 
         ttk.Label(links_frame, text="Fragmentation ion list (features):").grid(row=1, column=0, sticky="w", padx=10, pady=4)
         ttk.Label(links_frame, textvariable=self.ionlist_path_var).grid(row=1, column=1, sticky="w", padx=8, pady=4)
-
+        """
         # --- Footer buttons
-        btns = ttk.Frame(self)
-        btns.pack(fill="x", padx=12, pady=(6, 12))
+        #btns = ttk.Frame(self)
+        #btns.pack(fill="x", padx=12, pady=(6, 12))
+        # --- Footer buttons (top row: preparation) ---
+        btns_top = ttk.Frame(self)
+        btns_top.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Button(btns_top, text="Load CGA settings", command=self.load_flags).pack(side="left", padx=4)
+        ttk.Button(btns_top, text="Save CGA settings", command=self.save_flags).pack(side="left", padx=4)
 
-        ttk.Button(btns, text="Load CGA settings", command=self.load_flags).pack(side="left", padx=4)
-        ttk.Button(btns, text="Save CGA settings", command=self.save_flags).pack(side="left", padx=4)
-
-        ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Separator(btns_top, orient="vertical").pack(side="left", fill="y", padx=8)
         #20250910
         def _on_generate():
             payload = {"flags": self.collect_flags(),
@@ -852,27 +956,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
                 if isinstance(maybe_path, str) and os.path.exists(maybe_path):
                     self.insilico_path_var.set(maybe_path)
 
-        """
-        # Generate in-silico: call the provided on_generate/on_submit callback
-        def _on_generate():
-            payload = {"flags": self.collect_flags(),
-                    "metadata": {
-                        "Glycan Type": self.meta_vars["Glycan Type"].get(),
-                        "Mass Analyzer charge mode": self.meta_vars["Mass Analyzer charge mode"].get(),
-                        "Derivatization Type": self.meta_vars["Derivatization Type"].get(),
-                        "_meta_json": self.meta_json_path or "",
-                        "_overrides_applied": any(self.meta_vars[k].get() != self._meta_original.get(k, "")
-                                                    for k in self._meta_original)
-                    }}
-            # Back-compat: accept either on_submit or on_generate
-            cb = self.on_submit or self.on_generate
-            if cb:
-                # If the callback returns a path, reflect it in the UI
-                maybe_path = cb(payload)
-                if isinstance(maybe_path, str) and os.path.exists(maybe_path):
-                    self.insilico_path_var.set(maybe_path)
-        """
-        ttk.Button(btns, text="Generate In-Silico CSV", command=_on_generate).pack(side="left", padx=4)
+        ttk.Button(btns_top, text="Generate In-Silico CSV", command=_on_generate).pack(side="left", padx=4)
 
         # Link existing in-silico (no auto popups unless user clicks)
         def _link_existing():
@@ -886,7 +970,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             if cb:
                 cb(p)
 
-        ttk.Button(btns, text="Link in silico glycan list", command=_link_existing).pack(side="left", padx=4)
+        ttk.Button(btns_top, text="Link in silico glycan list", command=_link_existing).pack(side="left", padx=4)
 
         # Attach ion list (optional)
         def _attach_ionlist():
@@ -899,9 +983,12 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             if cb:
                 cb(p)
 
-        ttk.Button(btns, text="Add Ion List", command=_attach_ionlist).pack(side="left", padx=4)
+        ttk.Button(btns_top, text="Add Ion List", command=_attach_ionlist).pack(side="left", padx=4)
+        ttk.Separator(btns_top, orient="vertical").pack(side="left", fill="y", padx=8)
 
-        ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
+        # --- Footer buttons (bottom row: execution) ---
+        btns_bottom = ttk.Frame(self)
+        btns_bottom.pack(fill="x", padx=8, pady=(2, 10))
 
         # Start pseudolabeling (enabled if converted CSV + insilico present)
         def _start():
@@ -921,9 +1008,8 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             if cb:
                 cb(payload)
 
-        ttk.Button(btns, text="Start CGA analysis", command=_start).pack(side="left", padx=4)
-
-        ttk.Button(btns, text="Close", command=self.destroy).pack(side="right", padx=4)
+        ttk.Button(btns_bottom, text="Start CGA analysis", command=_start).pack(side="left", padx=2)
+        ttk.Button(btns_bottom, text="Close", command=self.destroy).pack(side="left", padx=4)
 
 
     def collect_flags(self):
@@ -9805,6 +9891,27 @@ def open_ml_analysis_window():
     tk.Label(train_tab, text="Step 1: Load Trainable Dataset (.csv)").grid(row=0, column=0, sticky="w", padx=10, pady=5)
     train_load_button = tk.Button(train_tab, text="Select CSV File", command=select_train_csv)
     train_load_button.grid(row=0, column=1, padx=5, pady=5)
+    # flags (keep existing variables; only move the widgets)
+    is_pseudolabel_var = tk.BooleanVar(value=False)
+    include_mass_train_var = tk.BooleanVar(value=False)
+
+    # --- NEW: options row between Step 1 and Step 2 ---
+    options_row = ttk.Frame(train_tab)
+    options_row.grid(row=1, column=0, columnspan=6, sticky="w", padx=10, pady=(0, 5))
+
+    ttk.Checkbutton(
+        options_row,
+        text="CGA dataset?",
+        variable=is_pseudolabel_var
+    ).pack(side="left", padx=(0, 16))
+
+    ttk.Checkbutton(
+        options_row,
+        text="Use protonated mass as a model feature (Non-glycan = 0)",
+        variable=include_mass_train_var
+    ).pack(side="left", padx=(0, 16))
+
+    """
     # flag: manual vs pseudo-labeled
     is_pseudolabel_var = tk.BooleanVar(value=False)
     pseudo_check = tk.Checkbutton(
@@ -9824,25 +9931,25 @@ def open_ml_analysis_window():
         text="Use protonated mass as a model feature (Non-glycan = 0)",
         variable=include_mass_train_var
     ).grid(row=0, column=4, sticky="w")
+    """
 
 
-
-    tk.Label(train_tab, text="Step 2: Select Label Column").grid(row=1, column=0, sticky="w", padx=10, pady=5)
+    tk.Label(train_tab, text="Step 2: Select Label Column").grid(row=2, column=0, sticky="w", padx=10, pady=5)
     label_dropdown = ttk.Combobox(train_tab, values=['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID'])
     label_dropdown.set("Structure")
-    label_dropdown.grid(row=1, column=1, padx=5, pady=5)
+    label_dropdown.grid(row=2, column=1, padx=5, pady=5)
 
-    tk.Label(train_tab, text="Step 3: Choose Classifier").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+    tk.Label(train_tab, text="Step 3: Choose Classifier").grid(row=3, column=0, sticky="w", padx=10, pady=5)
     classifier_var = tk.StringVar(value="rf")
     rf_button = tk.Radiobutton(train_tab, text="Random Forest (✔ functional)", variable=classifier_var, value="rf")
     xgb_button = tk.Radiobutton(train_tab, text="XGBoost (placeholder)", variable=classifier_var, value="xgb")
     svm_button = tk.Radiobutton(train_tab, text="SVM (placeholder)", variable=classifier_var, value="svm")
     knn_button = tk.Radiobutton(train_tab, text="KNN (placeholder)", variable=classifier_var, value="knn")
 
-    rf_button.grid(row=2, column=1, sticky="w")
-    xgb_button.grid(row=3, column=1, sticky="w")
-    svm_button.grid(row=4, column=1, sticky="w")
-    knn_button.grid(row=5, column=1, sticky="w")
+    rf_button.grid(row=3, column=1, sticky="w")
+    xgb_button.grid(row=4, column=1, sticky="w")
+    svm_button.grid(row=5, column=1, sticky="w")
+    knn_button.grid(row=6, column=1, sticky="w")
 
 
 
@@ -9958,19 +10065,19 @@ def open_ml_analysis_window():
 
     # then bump your existing "Step 4: Train/Test Parameters" and below down to start at row=7 or 8
     
-    tk.Label(train_tab, text="Step 4: Train/Test Parameters").grid(row=6, column=0, sticky="w", padx=10, pady=5)
-    ttk.Label(train_tab, textvariable=ml_summary_var).grid(row=7, column=0, sticky="w", padx=10, pady=(0,6))
-    tk.Button(train_tab, text="Set Parameters / Train the Model", command=open_train_settings).grid(row=6, column=1, padx=5, pady=5)
+    tk.Label(train_tab, text="Step 4: Train/Test Parameters").grid(row=7, column=0, sticky="w", padx=10, pady=5)
+    ttk.Label(train_tab, textvariable=ml_summary_var).grid(row=8, column=0, sticky="w", padx=10, pady=(0,6))
+    tk.Button(train_tab, text="Set Parameters / Train the Model", command=open_train_settings).grid(row=7, column=1, padx=5, pady=5)
 
     train_button = tk.Button(train_tab, text="Train Model", command=train_model, bg="#CCE5FF")
-    train_button.grid(row=8, column=0, columnspan=2, pady=10)
+    train_button.grid(row=9, column=0, columnspan=2, pady=10)
 
-    tk.Label(train_tab, text="Trainable File Info (Origin Tracking)").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
+    tk.Label(train_tab, text="Trainable File Info (Origin Tracking)").grid(row=10, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
     origin_info = tk.Text(train_tab, height=4, width=70, state="disabled", wrap="word")
-    origin_info.grid(row=10, column=0, columnspan=2, padx=10, pady=5)
+    origin_info.grid(row=11, column=0, columnspan=2, padx=10, pady=5)
     # -- Training tab and prediction tab UI (end reminder buttons) --
-    tk.Label(train_tab, text="Combine Datasets for Training").grid(row=11, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
-    tk.Button(train_tab, text="Select Datasets", command=lambda: combine_trainable_datasets_ui(root)).grid(row=11, column=1, columnspan=2, padx=10, pady=5)
+    tk.Label(train_tab, text="Combine Datasets for Training").grid(row=12, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
+    tk.Button(train_tab, text="Select Datasets", command=lambda: combine_trainable_datasets_ui(root)).grid(row=12, column=1, columnspan=2, padx=10, pady=5)
     # --- Tab 2: Predict ---
     predict_tab = ttk.Frame(notebook)
     notebook.add(predict_tab, text="Predict")
