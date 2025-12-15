@@ -3,11 +3,11 @@
     "samples": {
         "zf_sPerMeNG_intestine": {
             "csv": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\ms2_zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.csv",
-            "excel": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\20240922_temp_zf_intestine_1.xlsx",
+            "excel": "C:\\Users\\Sakazuki\\Desktop\\zf_finalcompare\\Man_results\\20240922_temp_zf_intestine_1_fix2025.xlsx",
             "metadata": "G:\\\u5176\u4ed6\u96fb\u8166\\My Computer\\GlycoMSParser\\zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.json",
             "raw_file": "G:\\zf_sPerMeNG_intestine",
             "validated": true
         }
     },
-    "generated_on": "2025-08-25 19:34"
+    "generated_on": "2025-10-10 20:22"
 }
