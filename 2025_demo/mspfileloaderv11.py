@@ -1,7 +1,8 @@
 import os
-version = "0.99991"
-last_update = 20251215
+version = "1.0"
+last_update = 20260116
 import msprawextractor as mspext
+import mzmlreader as mspmzmlext
 import threading
 from tkinter import ttk
 import time #for testing
@@ -1080,7 +1081,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 #metadata class 
 
 class MetadataEditorWindow:
-    def __init__(self, parent, raw_file_list, on_each_metadata_ready_callback, on_finish=None, output_dir=None, skip_conversion=False):
+    def __init__(self, parent, raw_file_list, on_each_metadata_ready_callback, on_finish=None, output_dir=None, skip_conversion=False, input_kind=None):
         self.parent = parent
         self.raw_file_list = raw_file_list
         self.callback = on_each_metadata_ready_callback
@@ -1090,6 +1091,7 @@ class MetadataEditorWindow:
         self.metadata = {}
         self.output_dir = output_dir
         self.skip_conversion = skip_conversion
+        self.input_kind = input_kind
         self.entries = {}
         self.files = {}   # ← add this line in 20250916
         fields = [
@@ -1247,11 +1249,16 @@ class MetadataEditorWindow:
             self._convert_in_progress = True
             try:
                 # ask extractor to write into the chosen output folder (if any)
-                res = mspext.convert_raw_to_csv(
-                    raw_file,
-                    outdir=self.output_dir,
-                    debug=True
-                )
+                if getattr(self, "input_kind", "raw") == "mzml":
+                    res = mspmzmlext.extract_mzML(raw_file,
+                                                  outdir=self.output_dir,
+                                                  debug=True)
+                else:
+                    res = mspext.convert_raw_to_csv(
+                        raw_file,
+                        outdir=self.output_dir,
+                        debug=True
+                    )
 
                 def _norm_path(p: str | None) -> str | None:
                     """Make absolute; if it's a bare name, assume output_dir (else CWD)."""
@@ -2176,6 +2183,55 @@ def select_files_generic(filetype_key, allow_multiple=False, on_select_callback=
 
 
 def launch_metadata_batch():
+    # need to rebuild to accept mzML
+    # allow mzML conversion without pymsreader. (change the hierarchy to adapt)
+    """
+    Entry point for the 'Convert Raw to csv' button.
+
+    Current behavior:
+      - RAW: existing workflow (metadata batch + mspext raw conversion)
+      - mzML: placeholder (inform user and halt), module hook will be inserted later
+    """
+
+    has_raw  = bool(selected_files.get("raw"))
+    has_mzml = bool(selected_files.get("mzml"))
+
+    # 0) mzML placeholder branch (must come BEFORE pymsreader checks)
+    if has_mzml and not has_raw:
+        mzml_list = selected_files["mzml"]
+        try:
+            import pymzml
+        except Exception as e:
+            messagebox.showerror("pymzML Module Missing", f"Could not import mzmlreader.\n\n{e}")
+            return
+        status_var.set("Converting mzML file to csv...check the metadata assignment window.")
+        progress.start()
+        MetadataEditorWindow(
+            root,
+            mzml_list,
+            on_metadata_ready,
+            on_finish=reset_main_status,
+            input_kind="mzml"
+            )
+        return
+        messagebox.showinfo(
+            "mzML Support (Preview)",
+            "mzML file was selected.\n\n"
+            "mzML conversion will be supported in the next version.\n"
+            "For now, please convert from Thermo .RAW on Windows as usual."
+        )
+        return
+
+    # (Optional) prevent ambiguous mixed selection
+    if has_mzml and has_raw:
+        messagebox.showwarning(
+            "Ambiguous Input",
+            "Both RAW and mzML files are selected.\n\n"
+            "Please convert one format at a time (clear one selection and retry)."
+        )
+        return
+
+
     if not mspext.pymsreader:
         logger.log("[ERROR] Raw file conversion is not available — pymsfilereader missing.")
         messagebox.showerror(
@@ -2186,7 +2242,7 @@ def launch_metadata_batch():
         return
 
     if "raw" not in selected_files or not selected_files["raw"]:
-        messagebox.showwarning("No Raw File", "Please select at least one raw file.")
+        messagebox.showwarning("No Raw File selected", "Please select at least one raw file.")
         return
 
     rawfilelist = selected_files["raw"]
@@ -9943,13 +9999,13 @@ def open_ml_analysis_window():
     classifier_var = tk.StringVar(value="rf")
     rf_button = tk.Radiobutton(train_tab, text="Random Forest (✔ functional)", variable=classifier_var, value="rf")
     xgb_button = tk.Radiobutton(train_tab, text="XGBoost (placeholder)", variable=classifier_var, value="xgb")
-    svm_button = tk.Radiobutton(train_tab, text="SVM (placeholder)", variable=classifier_var, value="svm")
-    knn_button = tk.Radiobutton(train_tab, text="KNN (placeholder)", variable=classifier_var, value="knn")
+    #svm_button = tk.Radiobutton(train_tab, text="SVM (placeholder)", variable=classifier_var, value="svm")
+    #knn_button = tk.Radiobutton(train_tab, text="KNN (placeholder)", variable=classifier_var, value="knn")
 
     rf_button.grid(row=3, column=1, sticky="w")
     xgb_button.grid(row=4, column=1, sticky="w")
-    svm_button.grid(row=5, column=1, sticky="w")
-    knn_button.grid(row=6, column=1, sticky="w")
+    #svm_button.grid(row=5, column=1, sticky="w")
+    #knn_button.grid(row=6, column=1, sticky="w")
 
 
 
@@ -10393,9 +10449,9 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v0.6 Build 20251010 core 0.9998")
-root.geometry("840x600")
-root.minsize(840, 600)
+root.title("GlycoMSP File Manager GUI v1.0 Build 20260116 core v1.000")
+root.geometry("800x480")
+root.minsize(800, 480)
 
 
 
@@ -10404,12 +10460,14 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=10)
 
 tk.Button(button_frame, text="Select Raw File", command=lambda: select_file("raw")).grid(row=0, column=0, padx=5)
-#tk.Button(button_frame, text="Select mzML File", command=lambda: select_file("mzml")).grid(row=0, column=1, padx=5)
-tk.Button(button_frame, text="Select CSV File", command=lambda: select_file("csv")).grid(row=0, column=2, padx=5)
-tk.Button(button_frame, text="Select Excel File", command=lambda: select_file("excel")).grid(row=0, column=3, padx=5)
-tk.Button(button_frame, text="Clear All", command=clear_files).grid(row=0, column=4, padx=5)
+tk.Button(button_frame, text="Select mzML File", command=lambda: select_file("mzml")).grid(row=0, column=1, padx=5)
+#move csv and excel selection to data explorer
+#tk.Button(button_frame, text="Select CSV File", command=lambda: select_file("csv")).grid(row=0, column=2, padx=5)
+#tk.Button(button_frame, text="Select Excel File", command=lambda: select_file("excel")).grid(row=0, column=3, padx=5)
+tk.Button(button_frame, text="Clear All", command=clear_files).grid(row=0, column=2, padx=5)
+tk.Button(button_frame, text="About", command=open_about_window).grid(row=0, column=3, padx=5)
 tk.Button(root, text="Save Log", command=save_log_to_file).pack(pady=5)
-tk.Button(root, text="About", command=open_about_window).pack(pady=5)
+#tk.Button(root, text="About", command=open_about_window).pack(pady=5)
 # Text widget to log selected files
 text_widget = tk.Text(root, height=15, width=80)
 text_widget.pack(pady=10)
