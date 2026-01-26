@@ -57,7 +57,7 @@ def _extract_feature_row_from_peaks(peaks: np.ndarray, intens: np.ndarray, targe
     out = {}
     if len(peaks) == 0 or len(intens) == 0 or len(targets) == 0:
         for t in targets:
-            out[str(float(t))] = 0.0
+            out[str(float(t))] = 1.0
         return out
 
     for t in targets:
@@ -65,9 +65,9 @@ def _extract_feature_row_from_peaks(peaks: np.ndarray, intens: np.ndarray, targe
         mask = np.abs(peaks - t) <= tol
         if mask.any():
             intensity = float(np.max(intens[mask]))
-            out[str(float(t))] = float(np.log10(intensity + 1.0))
+            out[str(float(t))] = float(np.log10(intensity)+ 1.0) #fixed 20260122
         else:
-            out[str(float(t))] = 0.0
+            out[str(float(t))] = 1.0
     return out
 
 def to_training_dataset(

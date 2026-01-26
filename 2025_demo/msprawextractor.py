@@ -79,6 +79,9 @@ def fillexpinfo(rawfilepath, loadfile=None, debug=False):
 
     #define metadata
     metadata = {
+        "json_type": "glycomsp.metadata",
+        "schema_version": "1.0.0",
+        #above are fixes for next version json update
         "Experiment Title": expTitle,
         "Experiment Description": expDescription,
         "Author running this analysis": expAuthor,

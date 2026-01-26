@@ -376,7 +376,7 @@ def _intensity_from_logi1(logi1):
     """
     if logi1 is None or logi1 <= 1.0:
         return 0.0
-    return float(10.0 ** float(logi1) - 1.0)
+    return float(10.0 ** float(logi1)) - 1.0 #fixed 20260122
 
 def attach_ion_hits_with_intensity_on_matched(
     matched_df: pd.DataFrame,
@@ -487,7 +487,7 @@ def attach_ion_hits_with_intensity_on_matched(
                         k = int(np.argmax(ints[mask]))
                         best_mz = float(np.asarray(peaks[mask])[k])
                         I = float(np.asarray(ints[mask])[k])
-                        logi1 = float(np.log10(I + 1.0))
+                        logi1 = float(np.log10(I) + 1.0) #fixed 20260122
                         ppm_err = (best_mz - ref_mz) / ref_mz * 1e6
                 relI = I / basepeak if basepeak > 0 else 0.0
 
@@ -1160,11 +1160,11 @@ code = dedent('''
                     ppm_err = compute_ppm_error(best_mz, target)
                     rec = {'MS2scan_no': scan, 'ion_mass': target, 'found': True,
                            'best_peak_mz': best_mz, 'ppm_error': ppm_err,
-                           'intensity_log10': float(np.log10(best_int + 1.0)), 'intensity_raw': best_int}
+                           'intensity_log10': float(np.log10(best_int) + 1.0), 'intensity_raw': best_int}
                 else:
                     rec = {'MS2scan_no': scan, 'ion_mass': target, 'found': False,
                            'best_peak_mz': np.nan, 'ppm_error': np.nan,
-                           'intensity_log10': 0.0, 'intensity_raw': 0.0}
+                           'intensity_log10': 1.0, 'intensity_raw': 0.0}
                 for c in ion_id_cols:
                     rec[c] = irow[c]
                 out_rows.append(rec)

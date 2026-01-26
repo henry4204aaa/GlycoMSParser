@@ -5,3 +5,4 @@ numpy
 scikit_learn
 skops
 pymsfilereader
+pymzml

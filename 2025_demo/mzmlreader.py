@@ -114,6 +114,9 @@ def fillexpinfo(mzmlfilepath, loadfile=None, debug=False):
 
     #define metadata
     metadata = {
+        "json_type": "glycomsp.metadata",
+        "schema_version": "1.0.0",
+        #above are fixes for next version json update
         "Experiment Title": expTitle,
         "Experiment Description": expDescription,
         "Author running this analysis": expAuthor,
@@ -227,7 +230,7 @@ def save_to_csv(csvname, data, debug=False):
 
     if debug:
         csvwritetime = time.time() - perf_esti2
-        print(f"[debug] Finished exported {exportcsv} from raw data")
+        print(f"[debug] Finished exported {exportcsv} from mzml data")
         print(f"[debug] Time spent for extraction: {csvwritetime:.3f} seconds.")
     return exportcsv
 
@@ -375,7 +378,7 @@ def extract_mzML(mzmlfilepath=None, outdir=None, round=False, debug = False):
         debug_logs = None
     if debug:
         extractiontime = time.time() - perf_esti1  #timestamp1: time spent for raw file extraction
-        print("[debug]Raw file has been closed.")
+        print("[debug]mzml file conversion finished.")
         print("[debug]Preparing information for writing...")
         print(f"[debug]Time spent for extraction: {int(extractiontime)} seconds.")
 
