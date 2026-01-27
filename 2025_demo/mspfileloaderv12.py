@@ -1496,7 +1496,15 @@ class MetadataEditorWindow:
         # callback after metadata is created
         if self.callback:
             self.callback(raw_path, self.metadata, savename)
-
+        # If we're only generating metadata (no conversion/batch), close immediately
+        if getattr(self, "skip_conversion", False):
+            try:
+                print("[Should close window]20260126 GPT suggested fix on metadata/method writing close winodow fix. Not sure if it works")
+                self.window.destroy()
+            except Exception:
+                print("[Exception happened when closing window after method data generation]20260126 GPT suggested fix on metadata/method writing close winodow fix. Not sure if it works")
+                pass
+            return
     #20250917 ends
 
 
@@ -2496,15 +2504,31 @@ def open_prepare_dataset_window():
             del experiment_projects[exp]  # if no samples left, remove experiment too
         refresh_tree()
 
-    def store_metadata_back_to_sample(exp_name, sample_name, rawfile, metadata, savename):
-        json_path = os.path.join(os.path.dirname(rawfile), savename + ".json")
+    #20260126 changed
+    #weird
+    def store_metadata_back_to_sample(exp_name, sample_name, rawfile, metadata, savename, outdir=None):
+        base_dir = outdir or os.path.dirname(rawfile)
+        json_path = os.path.join(base_dir, savename + ".json")
 
         # Fallback if sample doesn't exist yet (e.g., metadata was created before file assignment)
+        # Ensure experiment and sample containers exist
+        if exp_name not in experiment_projects:
+            experiment_projects[exp_name] = {"samples": {}, "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M")}
         if sample_name not in experiment_projects[exp_name]["samples"]:
             experiment_projects[exp_name]["samples"][sample_name] = {"csv": None, "excel": None, "json": None}
 
+        # Now safe to reference sample
         sample = experiment_projects[exp_name]["samples"][sample_name]
-        sample["json"] = json_path
+        sample.setdefault("metadata", None)
+
+        # Enforce header fields on newly generated metadata
+        metadata["json_type"] = "glycomsp.metadata"
+        metadata["schema_version"] = "1.0.0"
+
+        # Store as metadata (not method)
+        sample["metadata"] = json_path
+
+        refresh_tree()
 
         # Try to rename sample to raw name (from metadata), only if different
         try:
@@ -2518,7 +2542,7 @@ def open_prepare_dataset_window():
             sample_name = raw_base
 
         refresh_tree()
-        write_method_file(exp_name)
+        write_method_file(exp_name)#uncommented 20260127 after fixed
     
     def open_metadata_editor_for_sample(exp_name, sample_name):
         from tkinter import simpledialog
@@ -2542,7 +2566,7 @@ def open_prepare_dataset_window():
         editor = MetadataEditorWindow(
             parent=root,
             raw_file_list=[raw_file_path],
-            on_each_metadata_ready_callback=lambda rf, md, name: store_metadata_back_to_sample(exp_name, sample_name, rf, md, name),
+            on_each_metadata_ready_callback=lambda rf, md, name: store_metadata_back_to_sample(exp_name, sample_name, rf, md, name, outdir),#20260126
             output_dir=outdir,
             skip_conversion=True
         )
@@ -4394,10 +4418,12 @@ def open_prepare_dataset_window():
         }
 
         for sname, files in experiment_projects[exp_name]["samples"].items():
-            if not all([files.get("csv"), files.get("excel"), files.get("json")]):
+            #if not all([files.get("csv"), files.get("excel"), files.get("json")]):
+            if not all([files.get("csv"), files.get("excel"), files.get("metadata")]): #change json ->metadata specifically
                 continue
             try:
-                with open(files["json"], "r") as f:
+                #with open(files["json"], "r") as f:
+                with open(files["metadata"], "r", encoding="utf-8") as f:
                     meta = json.load(f)
             except Exception:
                 meta = {}
@@ -4405,7 +4431,8 @@ def open_prepare_dataset_window():
             entry = {
                 "csv": os.path.abspath(os.path.normpath(files["csv"])),#files["csv"],  #os.path.basename(files["csv"]),
                 "excel": os.path.abspath(os.path.normpath(files["excel"])),#files["excel"], #os.path.basename(files["excel"]),
-                "metadata": os.path.abspath(os.path.normpath(files["json"])),#files["json"], #os.path.basename(files["json"]),
+                #"metadata": os.path.abspath(os.path.normpath(files["json"])),#files["json"], #os.path.basename(files["json"]),
+                "metadata": os.path.abspath(os.path.normpath(files["metadata"])),
                 "raw_file": os.path.abspath(os.path.normpath(meta.get("Raw filename", "not linked"))),#meta.get("Raw filename", "not linked"),
                 "validated": (exp_name, sname) in linked_validated_samples
             }
@@ -4426,8 +4453,8 @@ def open_prepare_dataset_window():
                 if sample_method_folder:
                     sample_path = os.path.join(sample_method_folder, f"{sname}.method.json")
                 else:
-                    sample_path = os.path.join(os.path.dirname(files["json"]), f"{sname}.method.json")
-
+                    #sample_path = os.path.join(os.path.dirname(files["json"]), f"{sname}.method.json")
+                    sample_path = os.path.join(os.path.dirname(files["metadata"]), f"{sname}.method.json")
                 with open(sample_path, "w") as sf:
                     json.dump(sample_method, sf, indent=4)
                 logger.log(f"[Method] Per-sample method saved: {sample_path}")
