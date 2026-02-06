@@ -1,6 +1,6 @@
 import os
-version = "1.01"
-last_update = 20260126
+version = "1.0121"
+last_update = 20260204
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -110,6 +110,19 @@ JSON_TYPE_METHOD    = "glycomsp.method"
 JSON_TYPE_EXPERIMENT= "glycomsp.experiment"
 
 SCHEMA_V1 = "1.0.0"
+import hashlib
+from typing import Optional
+
+def file_sha256(path: str) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024*1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
 
 def _now_iso_utc():
     # ISO8601 UTC string with seconds
@@ -340,8 +353,13 @@ def _norm_for_display(p):
     return os.path.normpath(p) if p else p
 
 #20250907 preventing key error in GUI #need real test to see behavior changes
-FILETYPE_TO_KEY = {"csv": "csv", "excel": "excel", "json": "json",
-                   "method": "json", "metadata": "json"}  # extend if you add new labels
+FILETYPE_TO_KEY = {
+    "csv": "csv",
+    "excel": "excel",
+    "json": "json",        # metadata as json(legacy)
+    "method": "json",      # method json stored as "json"
+    "metadata": "metadata" # metadata json stored as "metadata"
+}
 def normalize_ftype(ft: str) -> str:
     return FILETYPE_TO_KEY.get(ft.lower().strip(), ft.lower().strip())
 #
@@ -1555,6 +1573,8 @@ def _robust_read_csv(path, prefer_tab=False):
     last_err = None
     for kw in tries:
         try:
+            if kw.get("engine") == "python":
+                kw.pop("low_memory", None)
             df = pd.read_csv(path, **kw)
             df.columns = [str(c).strip() for c in df.columns]
             return df
@@ -2219,41 +2239,245 @@ def open_prepare_dataset_window():
         return os.path.normpath(p if os.path.isabs(p) else os.path.join(base_dir, p))
 
     def _current_exp_title():
-        """Best-effort: get the Experiment currently selected in the tree, else the first one."""
+        """Return selected experiment name; if selection is inside sample/method/file, climb to Experiment node."""
         sel = tree.selection()
         if sel:
             node = sel[0]
-            parent = tree.parent(node)
-            exp_node = parent or node
-            txt = tree.item(exp_node, "text")
-        else:
-            roots = tree.get_children()
-            if not roots:
-                return None
-            txt = tree.item(roots[0], "text")
-        return txt.replace("Experiment: ", "").split(" (")[0].strip()
+            while node:
+                txt = tree.item(node, "text") or ""
+                if txt.startswith("Experiment:"):
+                    return txt.replace("Experiment:", "").strip().split(" (")[0].strip()
+                node = tree.parent(node)
+        # fallback to first root
+        roots = tree.get_children()
+        if not roots:
+            return None
+        txt = tree.item(roots[0], "text") or ""
+        return txt.replace("Experiment:", "").strip().split(" (")[0].strip()
+
+    #patch to avoid dropping exp info when load -> save new exp json from legacy format
+    def _infer_method_kinds(files: dict):
+        kinds = []
+        has_csv = bool(files.get("csv"))
+        has_meta = bool(files.get("metadata"))
+
+        if has_csv and has_meta and files.get("excel"):
+            kinds.append("MAS")
+        if has_csv and has_meta and files.get("ionlist_path") and files.get("insilico_csv"):
+            kinds.append("CGA")
+        return kinds
+    #20260204
+    def _ensure_method_stub(files: dict, family: str, sample_name: str):
+        """
+        Ensure files["_methods"] contains at least one method entry (stub allowed).
+        This is required because refresh_tree shows CGA artifacts only under Method nodes.
+        """
+        if not isinstance(files, dict):
+            return
+
+        methods = files.get("_methods")
+        if not isinstance(methods, list):
+            methods = []
+            files["_methods"] = methods
+
+        # If a method with same family already exists, do nothing
+        for m in methods:
+            if (m.get("family") or "").upper() == family.upper():
+                return
+
+        # Create a stub method entry (path can be None until we export)
+        methods.append({
+            "method_id": str(uuid.uuid4()),
+            "method_name": f"{sample_name}.{family}.method.v1 (unsaved)",
+            "family": family.upper(),
+            "path": None,
+            "status": "unknown",
+            "notes": ""
+        })
+
+    def _ensure_methods_before_saving_exp_v1(exp_title: str):
+        """
+        Silent upgrade:
+        - if sample has legacy links but no method list, generate method v1 files (MAS/CGA) into method folder
+        - populate files["_methods"] so saving exp v1 never loses info
+        """
+        samples = experiment_projects.get(exp_title, {}).get("samples", {})
+        if not samples:
+            return
+
+        for sample_name, files in samples.items():
+            if not isinstance(files, dict):
+                continue
+
+            # If methods already present, keep them
+            methods = files.get("_methods")
+            if isinstance(methods, list) and methods:
+                continue
+
+            # If at least one existing method path is linked, promote it into _methods
+            if files.get("json"):
+                files["_methods"] = [{
+                    "method_id": str(uuid.uuid4()),
+                    "method_name": os.path.basename(files["json"]),
+                    "family": "UNKNOWN",
+                    "path": files["json"],
+                    "status": "unknown",
+                    "notes": "promoted from active method"
+                }]
+                continue
+
+            # Otherwise: legacy-only links exist → generate method(s)
+            kinds = _infer_method_kinds(files)
+            if not kinds:
+                # nothing we can upgrade
+                continue
+
+            files["_methods"] = []
+
+            for kind in kinds:
+                try:
+                    # Auto-save path in method folder (no dialogs)
+                    out_path = save_method_v1_for_sample(
+                        exp_title,
+                        sample_name,
+                        out_path=None,
+                        kind=kind,
+                        auto=True
+                    )
+                    files["_methods"].append({
+                        "method_id": str(uuid.uuid4()),
+                        "method_name": os.path.basename(out_path),
+                        "family": kind,
+                        "path": out_path,
+                        "status": "unknown",
+                        "notes": "auto-generated from legacy links"
+                    })
+                except Exception as e:
+                    logger.log(f"[EXP v1][UPGRADE] Failed to auto-generate {kind} method for {exp_title}/{sample_name}: {e}")
+
+            # Set active method to the first created one (so current UI keeps working)
+            if files["_methods"]:
+                files["json"] = files["_methods"][0]["path"]
 
     def export_experiment_json(exp_title, out_path):
-        """Serialize everything we currently know for that experiment (all keys under a sample)."""
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        base = os.path.dirname(out_path)
-
+        """
+        Experiment JSON v1:
+        - stores only method references + per-method validation status (snapshot + authoritative)
+        - does NOT duplicate method contents
+        - supports multiple methods per sample via sample["_methods"] (internal cache)
+        """
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        samples = experiment_projects.get(exp_title, {}).get("samples", {}) or {}
+        _ensure_methods_before_saving_exp_v1(exp_title)
         payload = {
-            "experiment": exp_title,
-            "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "samples": {}
+            "experiment": {
+                "title": exp_title,
+                "description": "",
+                "tags": []
+            },
+            "workspace": {
+                "preferred_method_folder": sample_method_folder if "sample_method_folder" in globals() else "",
+                "preferred_exp_path": experiment_method_paths.get(exp_title, "") if "experiment_method_paths" in globals() else "",
+                "ui_order": list(samples.keys())
+            },
+            "samples": [],
+            "validation_policy": {
+                "hash_alg": "sha256",
+                "allow_missing_method": True,
+                "allow_hash_mismatch": True
+            }
         }
-        payload = _ensure_header(payload, JSON_TYPE_EXPERIMENT)  #20260126
-        samples = experiment_projects.get(exp_title, {}).get("samples", {})
+        payload = _ensure_header(payload, JSON_TYPE_EXPERIMENT)
+
+        def _infer_family(files: dict) -> str:
+            # heuristic for legacy-loaded states
+            if files.get("ionlist_path") or files.get("insilico_csv") or files.get("pseudolabel_csv"):
+                return "CGA"
+            if files.get("excel"):
+                return "MAS"
+            return "UNKNOWN"
 
         for sname, files in samples.items():
-            # Shallow copy and relativize every string value
-            record = {}
-            for k, v in (files or {}).items():
-                if isinstance(v, str) and v.strip():
-                    record[k] = _to_posix(v)   # <— store POSIX in JSON
-                    #record[k] = _rel(v, base)
-            payload["samples"][sname] = record
+            files = files or {}
+
+            # Prefer multi-method cache if present; else fall back to active method path (files["json"])
+            methods = []
+            if isinstance(files.get("_methods"), list) and files["_methods"]:
+                methods = files["_methods"]
+            else:
+                mp = files.get("json")
+                if mp:
+                    methods = [{
+                        "method_name": os.path.basename(mp),
+                        "family": _infer_family(files),
+                        "path": mp,
+                        "status": "unknown",
+                        "notes": ""
+                    }]
+            if not methods:
+                print("legacy might hit this")
+                out_methods = []
+            out_methods = []
+            for m in methods:
+                mpath = m.get("path") or m.get("method_path") or m.get("json")
+                if not isinstance(mpath, str) or not mpath.strip():
+                    continue
+
+                mpath = mpath.strip()
+                exists = os.path.exists(mpath)
+                h = file_sha256(mpath) if exists else None
+
+                # if you already store per-method status, keep it; else derive
+                status = m.get("status")
+                if not status:
+                    status = "missing" if not exists else "unknown"
+
+                out_methods.append({
+                    "method_id": m.get("method_id") or str(uuid.uuid4()),
+                    "method_name": m.get("method_name") or os.path.basename(mpath),
+                    "family": m.get("family") or "UNKNOWN",
+                    "method_ref": {
+                        "path": _to_posix(mpath),
+                        "hash": {"alg": "sha256", "value": h} if h else None,
+                        "last_seen_utc": _now_iso_utc()
+                    },
+                    "validation": {
+                        "status": status,
+                        "checked_utc": _now_iso_utc(),
+                        "notes": m.get("notes", "")
+                    }
+                })
+
+            payload["samples"].append({
+                "sample_name": sname,
+                "methods": out_methods
+            })
+            if not out_methods:
+                    # Create a non-destructive placeholder so v1 exp.json never drops the sample completely
+                out_methods = [{
+                    "method_id": str(uuid.uuid4()),
+                    "method_name": f"{sname}.INCOMPLETE",
+                    "family": "UNKNOWN",
+                    "method_ref": {
+                        "path": None,
+                        "last_seen_utc": _now_iso_utc()
+                    },
+                    "validation": {
+                        "status": "incomplete",
+                        "checked_utc": _now_iso_utc(),
+                        "notes": "No method JSON available yet (missing required inputs to auto-generate)."
+                    }
+                }]
+
+        # prune None recursively (so hash=None doesn't clutter JSON)
+        def _prune_none(x):
+            if isinstance(x, dict):
+                return {k: _prune_none(v) for k, v in x.items() if v is not None}
+            if isinstance(x, list):
+                return [_prune_none(v) for v in x]
+            return x
+
+        payload = _prune_none(payload)
 
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -2261,10 +2485,10 @@ def open_prepare_dataset_window():
         experiment_method_paths[exp_title] = out_path
         if exp_title in experiment_status_labels:
             experiment_status_labels[exp_title].config(text=f"EXP file: {out_path}")
-        logger.log(f"[EXP] Saved → {out_path}")
+        logger.log(f"[EXP v1] Saved → {out_path}")
         return out_path
 
-    def import_experiment_json(in_path):
+    def import_experiment_json_old(in_path):#if new code doesn't work, switch to old
         base = os.path.dirname(in_path)
         #with open(in_path, "r", encoding="utf-8") as f:
         #    data = json.load(f)
@@ -2294,6 +2518,135 @@ def open_prepare_dataset_window():
         logger.log(f"[EXP] Loaded ← {in_path}")
         refresh_tree()
         return exp_title
+    
+    def import_experiment_json(in_path):
+        base = os.path.dirname(in_path)
+
+        data = load_typed_json(
+            in_path,
+            expected_type=JSON_TYPE_EXPERIMENT,
+            allow_legacy=True,
+            context="[EXP] "
+        )
+
+        # v1: {"experiment": {"title": ...}, "samples": [ ... ]}
+        # legacy: {"experiment": "...", "samples": { ... }}
+
+        if isinstance(data.get("experiment"), dict):
+            exp_title = data["experiment"].get("title") or "Unnamed Experiment"
+        else:
+            exp_title = data.get("experiment") or "Unnamed Experiment"
+
+        experiment_projects.setdefault(exp_title, {"samples": {}})
+        dst = experiment_projects[exp_title]["samples"]
+
+        # ---- v1 loader ----
+        if isinstance(data.get("samples"), list):
+            for s in data["samples"]:
+                if not isinstance(s, dict):
+                    continue
+                sname = s.get("sample_name")
+                if not sname:
+                    continue
+
+                # Ensure sample entry exists
+                dst.setdefault(sname, {"csv": None, "excel": None, "metadata": None, "json": None})
+                files = dst[sname]
+
+                methods = s.get("methods") or []
+                norm_methods = []
+                active_method_path = None
+
+                for m in methods:
+                    if not isinstance(m, dict):
+                        continue
+                    ref = m.get("method_ref") or {}
+                    mpath = ref.get("path") or m.get("path")
+                    if not isinstance(mpath, str) or not mpath.strip():
+                        continue
+
+                    mpath_abs = _abs(_from_posix(mpath), base)
+                    exists = os.path.exists(mpath_abs)
+
+                    # Validate by hash if present
+                    status = (m.get("validation") or {}).get("status") or ("missing" if not exists else "unknown")
+                    notes = (m.get("validation") or {}).get("notes") or ""
+                    expected_hash = ((ref.get("hash") or {}).get("value")) if isinstance(ref.get("hash"), dict) else None
+
+                    if exists and expected_hash:
+                        current_hash = file_sha256(mpath_abs)
+                        if current_hash and current_hash != expected_hash:
+                            status = "warn"
+                            notes = (notes + " | hash mismatch").strip(" |")
+
+                    norm_methods.append({
+                        "method_id": m.get("method_id"),
+                        "method_name": m.get("method_name") or os.path.basename(mpath_abs),
+                        "family": m.get("family") or "UNKNOWN",
+                        "path": mpath_abs,
+                        "status": status,
+                        "notes": notes
+                    })
+
+                    if active_method_path is None and exists:
+                        active_method_path = mpath_abs
+
+                # store list for future UI ("Sample -> Methods")
+                files["_methods"] = norm_methods
+
+                # choose an active method (first existing); fallback to first path even if missing
+                if active_method_path is None and norm_methods:
+                    active_method_path = norm_methods[0]["path"]
+
+                # If we have an active method, load it and populate current sample files
+                if active_method_path and os.path.exists(active_method_path):
+                    try:
+                        #md = load_typed_json(active_method_path, expected_type=JSON_TYPE_METHOD, allow_legacy=True, context="[METHOD] ")
+                        #norm = normalize_method_json(md, active_method_path, base_dir=os.path.dirname(active_method_path))
+                        # norm is expected to map into your internal keys: csv/excel/metadata/json/ionlist_path/etc.
+                        #for k, v in (norm or {}).items():
+                        #    files[k] = v
+                        #files["json"] = active_method_path  # keep active method linked
+                        md = load_typed_json(
+                            active_method_path,
+                            expected_type=JSON_TYPE_METHOD,
+                            allow_legacy=True,
+                            context="[METHOD] "
+                        )
+                        exp2, sample2, tree_entry, v1_obj = normalize_method_json(
+                            md,
+                            active_method_path,
+                            base_dir=os.path.dirname(active_method_path)
+                        )
+
+                        # tree_entry is the dict mapping into internal keys: csv/excel/metadata/json/ionlist_path/etc.
+                        for k, v in (tree_entry or {}).items():
+                            files[k] = v
+
+                        files["json"] = active_method_path  # keep active method linked
+                
+                    except Exception as e:
+                        logger.log(f"[EXP v1] Failed to load method for sample={sname}: {e}")
+
+            experiment_method_paths[exp_title] = in_path
+            logger.log(f"[EXP v1] Loaded ← {in_path}")
+            refresh_tree()
+            return exp_title
+
+        # ---- legacy loader (keep your old behavior) ----
+        for sname, sample_blob in (data.get("samples") or {}).items():
+            if isinstance(sample_blob, dict) and "files" in sample_blob:
+                files = sample_blob.get("files") or {}
+            else:
+                files = sample_blob or {}
+            resolved = {k: _abs(_from_posix(v), base) for k, v in files.items() if isinstance(v, str) and v.strip()}
+            dst[sname] = resolved
+
+        experiment_method_paths[exp_title] = in_path
+        logger.log(f"[EXP legacy] Loaded ← {in_path}")
+        refresh_tree()
+        return exp_title
+
     # --- END: exp.json save/load helpers ---
     ###
 
@@ -2317,6 +2670,275 @@ def open_prepare_dataset_window():
 
     ttk.Button(toolbar, text="Check integrity", command=_check_integrity_clicked)\
        .pack(side="left", padx=4)
+
+    #20260127 quick test fix on method file
+    def _get_selected_exp_sample():
+        item = tree.selection()
+        if not item:
+            messagebox.showwarning("Method v1", "Select a sample node first.")
+            return None, None
+        iid = item[0]
+
+        # Your TreeView structure is Experiment -> Sample -> Files.
+        # For a file row, parent is sample; for sample row, parent is experiment.
+        text = tree.item(iid, "text")
+
+        parent = tree.parent(iid)
+        if not parent:
+            return None, None
+
+        # If user selected a file row, go up one to sample
+        if text.startswith(("CSV:", "EXCEL:", "Metadata:", "Method:", "Ion List:", "Pseudolabel CSV:", "In silico", "Trainable", "Unlabeled")):
+            iid = parent
+            parent = tree.parent(iid)
+
+        # Now iid should be sample row, parent should be experiment row
+        sample_text = tree.item(iid, "text")
+        exp_text = tree.item(parent, "text") if parent else ""
+
+        # Expected labels from your UI: "Experiment: X" and "Sample: Y"
+        exp_name = exp_text.replace("Experiment:", "").strip()
+        #sample_name = sample_text.replace("Sample:", "").strip()
+        exp_name = exp_name.split(" (")[0].strip()   # safety if you add status tags later
+        sample_name = clean_sample_name(sample_text) # <-- THIS is the key fix
+        return exp_name, sample_name
+    #20260202
+    def _get_selected_context():
+        """
+        Returns:
+        exp_name, sample_name, method_path (may be None if no method)
+        Works if user clicks Sample/Method/File nodes.
+        """
+        sel = tree.selection()
+        if not sel:
+            return None, None, None
+
+        node = sel[0]
+
+        # climb to sample
+        cur = node
+        sample_node = None
+        while cur:
+            t = tree.item(cur, "text")
+            if "Sample:" in t:
+                sample_node = cur
+                break
+            cur = tree.parent(cur)
+        if not sample_node:
+            return None, None, None
+
+        exp_node = tree.parent(sample_node)
+        exp_text = tree.item(exp_node, "text")
+        exp_name = exp_text.replace("Experiment:", "").strip().split(" (")[0].strip()
+
+        sample_text = tree.item(sample_node, "text")
+        sample_name = clean_sample_name(sample_text)
+
+        # climb to method node (optional)
+        cur = node
+        method_node = None
+        while cur:
+            t = tree.item(cur, "text")
+            if t.startswith("Method:"):
+                method_node = cur
+                break
+            cur = tree.parent(cur)
+
+        files = experiment_projects.get(exp_name, {}).get("samples", {}).get(sample_name, {})
+        method_path = None
+
+        if method_node:
+            # find "Method JSON:" child basename
+            basename = None
+            for child in tree.get_children(method_node):
+                ct = tree.item(child, "text")
+                if ct.startswith("Method JSON:"):
+                    basename = ct.replace("Method JSON:", "").strip()
+                    break
+            if basename:
+                # match by basename in _methods
+                for m in (files.get("_methods") or []):
+                    p = m.get("path")
+                    if p and os.path.basename(p) == basename:
+                        method_path = p
+                        break
+                # fallback: active
+                if method_path is None and files.get("json") and os.path.basename(files["json"]) == basename:
+                    method_path = files["json"]
+
+        if method_path is None:
+            method_path = files.get("json")  # active method fallback
+
+        return exp_name, sample_name, method_path
+        
+    def _ensure_method_stub(files: dict, family: str, sample_name: str):
+        """Ensure there is a Method node to hang CGA/MAS artifacts under in the tree."""
+        if not isinstance(files, dict):
+            return
+
+        methods = files.get("_methods")
+        if not isinstance(methods, list):
+            methods = []
+            files["_methods"] = methods
+
+        famU = (family or "").upper()
+
+        # already exists?
+        for m in methods:
+            if (m.get("family") or "").upper() == famU:
+                return
+
+        methods.append({
+            "method_id": str(uuid.uuid4()),
+            "method_name": f"{sample_name}.{famU}.method.v1 (unsaved)",
+            "family": famU,
+            "path": None,
+            "status": "unknown",
+            "notes": ""
+        })
+
+
+    def _register_or_update_method_ref(files: dict, out_path: str, family: str):
+        """Attach a saved method JSON path to the right method entry and keep legacy 'json' in sync."""
+        famU = (family or "").upper()
+        methods = files.get("_methods")
+        if not isinstance(methods, list):
+            methods = []
+            files["_methods"] = methods
+
+        # update existing
+        for m in methods:
+            if (m.get("family") or "").upper() == famU:
+                m["path"] = out_path
+                m["method_name"] = os.path.basename(out_path)
+                m["status"] = m.get("status") or "unknown"
+                break
+        else:
+            methods.append({
+                "method_id": str(uuid.uuid4()),
+                "method_name": os.path.basename(out_path),
+                "family": famU,
+                "path": out_path,
+                "status": "unknown",
+                "notes": ""
+            })
+
+        # legacy compatibility: lots of code still reads files["json"]
+        files["json"] = out_path
+
+    def _get_selected_context_old():
+        """
+        Return (exp_name, sample_name, method_path_or_none).
+        Works when user selects:
+        - a Sample node
+        - a Method node
+        - a File node under a Method
+        - a File node under Sample
+        """
+        sel = tree.selection()
+        if not sel:
+            return None, None, None
+
+        node = sel[0]
+
+        # climb upwards to find sample node
+        sample_node = node
+        while sample_node:
+            t = tree.item(sample_node, "text")
+            if "Sample:" in t:
+                break
+            sample_node = tree.parent(sample_node)
+        if not sample_node:
+            return None, None, None
+
+        exp_node = tree.parent(sample_node)
+        if not exp_node:
+            return None, None, None
+
+        exp_text = tree.item(exp_node, "text")
+        exp_name = exp_text.replace("Experiment:", "").strip()
+        exp_name = exp_name.split(" (")[0].strip()
+
+        sample_text = tree.item(sample_node, "text")
+        sample_name = clean_sample_name(sample_text)
+
+        # try find method path:
+        # - if selection is inside a method node, read the "Method JSON:" child or use _methods cache
+        method_path = None
+
+        # Case A: selected somewhere under a method node → find nearest "Method:" ancestor
+        method_node = node
+        while method_node:
+            tt = tree.item(method_node, "text")
+            if tt.startswith("Method:"):
+                break
+            method_node = tree.parent(method_node)
+
+        if method_node and tree.item(method_node, "text").startswith("Method:"):
+            # Search children for "Method JSON:"
+            for child in tree.get_children(method_node):
+                ct = tree.item(child, "text")
+                if ct.startswith("Method JSON:"):
+                    # match the method entry by basename if possible
+                    basename = ct.replace("Method JSON:", "").strip()
+                    files = experiment_projects[exp_name]["samples"].get(sample_name, {})
+                    for m in (files.get("_methods") or []):
+                        p = m.get("path")
+                        if p and os.path.basename(p) == basename:
+                            method_path = p
+                            break
+                    if method_path is None:
+                        # fall back: if active method matches
+                        active = files.get("json")
+                        if active and os.path.basename(active) == basename:
+                            method_path = active
+                    break
+
+        # Case B: no method ancestor; use active method if present
+        if method_path is None:
+            files = experiment_projects[exp_name]["samples"].get(sample_name, {})
+            method_path = files.get("json")
+
+        return exp_name, sample_name, method_path
+
+    def _export_method_v1(force_family: str):
+        exp_name, sample_name, method_path = _get_selected_context() #20260202 replace _get_selected_exp_sample()
+        if not exp_name or not sample_name:
+            return
+
+        # Build v1 dict from current links (no writing yet)
+        try:
+            v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=force_family)
+        except Exception as e:
+            messagebox.showerror("Method v1", str(e))
+            return
+
+        # Ask user where to save
+        csv_path = experiment_projects[exp_name]["samples"][sample_name].get("csv")
+        default_dir = os.path.dirname(csv_path) if csv_path else os.getcwd()
+        default_name = f"{sample_name}.{force_family}.method.v1.json"
+        out_path = filedialog.asksaveasfilename(
+            title="Save Method v1 JSON",
+            initialdir=default_dir,
+            initialfile=default_name,
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")]
+        )
+        if not out_path:
+            return
+
+        # Save
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(v1, f, indent=2, ensure_ascii=False)
+            files = experiment_projects[exp_name]["samples"][sample_name]
+            _register_or_update_method_ref(files, out_path, family=force_family)
+            refresh_tree()
+        except Exception as e:
+            messagebox.showerror("Method v1", f"Failed to save:\n{out_path}\n{e}")
+            return
+
+        messagebox.showinfo("Method v1", f"Saved:\n{out_path}")
 
     #20251002
     include_mass_feat_var = tk.BooleanVar(value=False)
@@ -2347,30 +2969,51 @@ def open_prepare_dataset_window():
 
     # --- Tree logic ---
     def on_tree_select(event):
-        sel = tree.selection()
-        if not sel:
+        exp_name, sample_name, method_path = _get_selected_context()
+        if not exp_name or not sample_name:
             link_button.config(state="disabled")
+            merge_button.config(state="disabled")
             return
 
-        item_text = tree.item(sel[0], "text")
-        sample_name = clean_sample_name(item_text)
+        files = experiment_projects.get(exp_name, {}).get("samples", {}).get(sample_name, {}) or {}
+        has_merge_inputs = bool(files.get("csv") and files.get("excel") and files.get("metadata"))
+        is_validated = (exp_name, sample_name) in linked_validated_samples
 
-        parent_id = tree.parent(sel[0])
-        exp_text = tree.item(parent_id, "text") if parent_id else ""
-        exp_name = exp_text.replace("Experiment: ", "").split(" (")[0].strip()
+        if not is_validated:
+            link_button.config(state="normal")
+            merge_button.config(state="disabled")
+        else:
+            link_button.config(state="disabled")
+            merge_button.config(state="normal" if has_merge_inputs else "disabled")
 
-        # Check if it's a valid sample in the experiment and if  it's okay to merge
-        if exp_name in experiment_projects and sample_name in experiment_projects[exp_name]["samples"]:
-            if (exp_name, sample_name) not in linked_validated_samples:
-                link_button.config(state="normal")
-                merge_button.config(state="disabled")
-            else:
-                link_button.config(state="disabled")
-                merge_button.config(state="normal")
-
-    tree.bind("<<TreeviewSelect>>", on_tree_select)
+            tree.bind("<<TreeviewSelect>>", on_tree_select)
 
     def try_link_selected_sample():
+        sel = tree.selection()
+        if not sel:
+            return
+        node = sel[0]
+        text = tree.item(node, "text")
+
+        # climb until we find a Sample node (or root)
+        while node:
+            t = tree.item(node, "text")
+            if "Sample:" in t:   # works with ✅/⚠️/❌ prefixes since you already clean those
+                break
+            node = tree.parent(node)
+
+        if not node:
+            return  # not inside a sample
+
+        sample_id = node
+        exp_id = tree.parent(sample_id)
+
+        sample_name = clean_sample_name(tree.item(sample_id, "text"))
+        exp_name = tree.item(exp_id, "text").replace("Experiment: ", "").split(" (")[0].strip()
+
+        link_and_validate_sample(exp_name, sample_name)
+
+    def try_link_selected_sample_old():
         sel = tree.selection()
         if not sel:
             return
@@ -2391,22 +3034,80 @@ def open_prepare_dataset_window():
             for sample_name, files in exp_data.get("samples", {}).items():
                 has_csv = bool(files.get("csv"))
                 has_excel = bool(files.get("excel"))
-                has_json = bool(files.get("json"))
+                #has_json = bool(files.get("json")) -> now it's clearly metadata
+                has_meta = bool(files.get("metadata"))
 
                 # Decide how to display the sample label
                 if (exp_title, sample_name) in linked_validated_samples:
                     sample_display = f"✅ Sample: {sample_name}"
                 elif (exp_title, sample_name) in validation_failed_samples:
                     sample_display = f"⛔ Sample: {sample_name} (validation failed)"
-                elif has_csv and has_excel and has_json:
+                #elif has_csv and has_excel and has_json:
+                elif has_csv and has_excel and has_meta:
                     sample_display = f"⚠️ Sample: {sample_name} (unvalidated)"
-                elif not has_json:
+                #elif not has_json:
+                elif not has_meta:
                     sample_display = f"❌ Sample: {sample_name} (metadata missing)"
                 else:
                     sample_display = f"Sample: {sample_name}"
 
                 sample_node = tree.insert(exp_node, "end", text=sample_display, open=True)
+                #20260202 update 1
+                # ---- (A) Show sample-level anchors under Sample ----
+                # These are “sample identity” / shared inputs
+                for ftype in ["csv", "excel", "metadata"]:
+                    if files.get(ftype):
+                        if ftype == "metadata":
+                            label = "Metadata"
+                        else:
+                            label = ftype.upper()
+                        tree.insert(sample_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
 
+                # ---- (B) Build method list ----
+                # New: allow multiple methods per sample.
+                # Internal cache (future): files["_methods"] = [ {method_name, family, path, ...}, ... ]
+                methods = []
+                if isinstance(files.get("_methods"), list) and files["_methods"]:
+                    methods = files["_methods"]
+                else:
+                    # fallback: current flat structure has only one active method path in files["json"]
+                    if files.get("json"):
+                        methods = [{
+                            "method_name": os.path.basename(files["json"]),
+                            "family": "UNKNOWN",
+                            "path": files["json"],
+                        }]
+
+                # ---- (C) Insert Method nodes ----
+                if not methods:
+                    # no method yet → show a placeholder so users see what's missing
+                    tree.insert(sample_node, "end", text="Method: (none)")
+                else:
+                    for idx, m in enumerate(methods, start=1):
+                        mname = m.get("method_name") or f"Method {idx}"
+                        fam = m.get("family") or "UNKNOWN"
+                        method_node = tree.insert(sample_node, "end", text=f"Method: {mname} [{fam}]", open=False)
+
+                        # method JSON itself
+                        mpath = m.get("path")
+                        if mpath:
+                            tree.insert(method_node, "end", text=f"Method JSON: {os.path.basename(mpath)}")
+
+                        # Current code still stores method-specific artifacts in the flat "files" dict.
+                        # Until we implement per-method file separation, show active artifacts under the first method node.
+                        if idx == 1:
+                            for ftype in ["insilico_csv", "ionlist_path", "pseudolabel_csv"]:
+                                if files.get(ftype):
+                                    if ftype == "insilico_csv":
+                                        label = "In-silico CSV"
+                                    elif ftype == "ionlist_path":
+                                        label = "Ion List"
+                                    elif ftype == "pseudolabel_csv":
+                                        label = "Pseudolabel CSV"
+                                    else:
+                                        label = ftype.upper()
+                                    tree.insert(method_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
+                """
                 for ftype in ["csv", "excel", "json", "metadata", "insilico_csv", "ionlist_path", "pseudolabel_csv"]:
                     if files.get(ftype):
                         if ftype == "json":
@@ -2422,6 +3123,7 @@ def open_prepare_dataset_window():
                         else:
                             label = ftype.upper()
                         tree.insert(sample_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
+                """
     # --- statistics ---
     def show_experiment_summary(exp_name):
         if exp_name not in experiment_projects:
@@ -2580,6 +3282,15 @@ def open_prepare_dataset_window():
     #live update of ion hits
 
     def current_selected_files():
+        exp_name, sample_name, method_path = _get_selected_context()
+        if not exp_name or not sample_name:
+            return None
+        try:
+            return experiment_projects[exp_name]["samples"][sample_name]
+        except KeyError:
+            return None
+
+    def current_selected_files_old():
         """Return the files dict for the currently selected sample,
         even if a child file node is selected."""
         sel = tree.selection()
@@ -2814,7 +3525,8 @@ def open_prepare_dataset_window():
             return
 
         # Check metadata
-        if not sample.get("json"):
+        #if not sample.get("json"):
+        if not sample.get("metadata"):
             proceed = messagebox.askyesno("Metadata Missing", "No metadata found. Would you like to create it now?")
             if not proceed:
                 return
@@ -2823,7 +3535,15 @@ def open_prepare_dataset_window():
 
         # All checks passed → mark as validated
         linked_validated_samples.add((exp_name, sample_name))
-        write_method_file(exp_name)
+        #write_method_file(exp_name)
+        # NEW: generate a per-sample Method v1 (MAS) instead of saving experiment .exp.json here
+        try:
+            save_method_v1_for_sample(exp_name, sample_name, kind="MAS", auto=True)
+        except Exception as e:
+            logger.log(f"[Method v1][ERROR] Failed to auto-export Method v1 for {exp_name}/{sample_name}: {e}")
+            messagebox.showwarning("Method v1", f"Validated, but failed to export Method v1.\n\n{e}")
+            print("try to use old write method file. Notice that it generates .exp.json for unknown reasons")
+            write_method_file(exp_name)
         messagebox.showinfo("Validated", f"Sample '{sample_name}' under '{exp_name}' is now validated.")
         refresh_tree()
 
@@ -2863,26 +3583,6 @@ def open_prepare_dataset_window():
                 pass
         return None
 
-    #
-        #20250919?
-    # 20250919 move from prepare dataset
-    #20250918
-    # ---- ML params context glue for the panel ----
-    def _current_exp_title():
-        """Best-effort experiment currently selected (you already use this pattern above)."""
-        sel = tree.selection()
-        if sel:
-            node = sel[0]
-            parent = tree.parent(node)
-            exp_node = parent or node
-            txt = tree.item(exp_node, "text")
-        else:
-            roots = tree.get_children()
-            if not roots:
-                return None
-            txt = tree.item(roots[0], "text")
-        return txt.replace("Experiment: ", "").split(" (")[0].strip()
-
     def _get_ml_context():
         """
         Returns the three things the panel needs:
@@ -2905,6 +3605,10 @@ def open_prepare_dataset_window():
 
 
     def try_merge_selected_sample():
+        exp_name, sample_name, method_path = _get_selected_context()
+        if not exp_name or not sample_name:
+            return
+        """
         sel = tree.selection()
         if not sel:
             return
@@ -2913,7 +3617,7 @@ def open_prepare_dataset_window():
         sample_name = clean_sample_name(tree.item(sample_node, "text"))
         exp_node = tree.parent(sample_node)
         exp_name = tree.item(exp_node, "text").replace("Experiment: ", "").split(" (")[0].strip()
-
+        """
         files = experiment_projects[exp_name]["samples"][sample_name]
         if not all([files.get("csv"), files.get("excel"), files.get("json")]):
             messagebox.showerror("Error", "Sample is missing required files.")
@@ -4247,6 +4951,30 @@ def open_prepare_dataset_window():
 
                 except Exception as e:
                     logger.log(f"[WARNING] Failed to save method file for '{sample_name}': {e}")
+    def handle_metadata_selection(filepaths):
+        for path in filepaths:
+            title = extract_title_from_metadata(path) or "Unassigned"
+            rawname = extract_rawname_from_metadata(path) or "Unassigned"
+
+            # IMPORTANT: store as metadata, not json(method)
+            assign_file("metadata", path, title, "Unassigned")
+
+            sample_name = "Unassigned"
+
+            # Auto-rename sample (move from 'Unassigned' to rawname)
+            if title in experiment_projects:
+                samples = experiment_projects[title]["samples"]
+                if "Unassigned" in samples:
+                    if rawname in samples:
+                        messagebox.showwarning("Sample Exists", f"Sample '{rawname}' already exists. Skipping rename.")
+                    else:
+                        samples[rawname] = samples.pop("Unassigned")
+                        sample_name = rawname
+                        refresh_tree()
+
+            # DO NOT auto-write method here.
+            # Metadata import should not create method/exp side-effects.
+        
     def extract_title_from_metadata(json_path):
         try:
             #with open(json_path, "r") as f:
@@ -4410,6 +5138,103 @@ def open_prepare_dataset_window():
             assign_file(ftype, entry, to_exp, to_sample)
 
     # --- write to method ---
+
+    def save_method_v1_for_sample(exp_name, sample_name, out_path=None, *, kind="MAS", auto=False):
+        """
+        Save Method v1 for a sample.
+
+        Backward compatible:
+        - old style: save_method_v1_for_sample(exp, sample, out_path, auto=False)
+        - new style: save_method_v1_for_sample(exp, sample, kind="MAS", auto=True)  (out_path auto-resolved)
+
+        kind: "MAS" or "CGA"
+        auto:
+        - if True and out_path is None, write into sample_method_folder (if set) else CSV folder fallback
+        - if False and out_path is None, raise (caller should ask via dialog)
+        """
+        sample_name = clean_sample_name(sample_name)
+
+        if exp_name not in experiment_projects or sample_name not in experiment_projects[exp_name]["samples"]:
+            raise ValueError(f"Unknown sample: {exp_name}/{sample_name}")
+
+        sample = experiment_projects[exp_name]["samples"][sample_name]
+
+        # Build v1 payload on demand if cache missing
+        v1 = sample.get("_method_v1_cache")
+        if not isinstance(v1, dict):
+            # Build from current tree links (strict checks inside)
+            v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=kind)
+            sample["_method_v1_cache"] = v1
+
+        # Update required headers/timestamps
+        v1["json_type"] = "glycomsp.method"
+        v1["schema_version"] = "1.0.0"
+        v1["updated_utc"] = _utc_now_iso()
+
+        # Decide output path
+        if out_path is None:
+            if not auto:
+                raise ValueError("out_path is required when auto=False")
+
+            base_dir = sample_method_folder or (
+                os.path.dirname(sample["csv"]) if sample.get("csv") else os.getcwd()
+            )
+            today = datetime.now().strftime("%Y%m%d")
+            out_name = f"{sample_name}.{kind}.method.v1_{today}.json"
+            out_path = os.path.join(base_dir, out_name)
+
+        # Write
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(v1, f, indent=2, ensure_ascii=False)
+
+        # Link method path into the sample dict (Tree shows it as "Method")
+        sample["json"] = out_path
+        refresh_tree()
+
+        return out_path
+    #20260202 for fixing CGA not creating method json after action
+    def _save_method_v1_now(exp_name: str, sample_name: str, family: str):
+        files = experiment_projects[exp_name]["samples"][sample_name]
+
+        # ensure method list exists
+        _ensure_method_stub(files, family=family, sample_name=sample_name)
+
+        # build v1 dict from current tree/files (your existing builder)
+        v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=family)  # see note below
+        files["_method_v1_cache"] = v1
+
+        # decide output path
+        if sample_method_folder:
+            os.makedirs(sample_method_folder, exist_ok=True)
+            out_name = f"{sample_name}.{family}.method.v1_{datetime.now().strftime('%Y%m%d')}.json"
+            out_path = os.path.join(sample_method_folder, out_name)
+        else:
+            out_path = filedialog.asksaveasfilename(
+                title="Save Method v1 JSON",
+                defaultextension=".json",
+                initialfile=f"{sample_name}.{family}.method.v1.json",
+                filetypes=[("JSON files", "*.json")]
+            )
+            if not out_path:
+                return None
+
+        save_method_v1_for_sample(exp_name, sample_name, out_path, auto=True)
+
+        # update method record
+        methods = files.get("_methods", [])
+        for m in methods:
+            if (m.get("family") or "").upper() == family.upper():
+                m["path"] = out_path
+                m["method_name"] = os.path.basename(out_path)
+                m["status"] = "unknown"
+                break
+
+        # backward compatibility (lots of old logic still reads files["json"])
+        files["json"] = out_path
+
+        refresh_tree()
+        return out_path
+
     def write_method_file(exp_name, auto=False):
         method = {
             "experiment": exp_name,
@@ -4483,7 +5308,18 @@ def open_prepare_dataset_window():
 
         update_status_display(exp_name)
 
-    # --- load method file ---
+    #patch in 20260127 to apply new data structure of method json
+    import os
+    import re
+    import uuid
+    from datetime import datetime
+
+    JSON_TYPE_METHOD = "glycomsp.method"   # keep consistent with your constants
+    SCHEMA_V1 = "1.0.0"
+
+    def _utc_now_iso():
+        # RFC3339-ish without microseconds
+        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
     # --- safe loader ---
     def safe_get_field(d, key, fallback="(not linked)"):
@@ -4511,6 +5347,302 @@ def open_prepare_dataset_window():
 
         return os.path.normpath(os.path.join(base, p))
 
+    def normalize_method_json(method_obj: dict, method_path: str, base_dir: str = None):
+        """
+        Normalize ANY accepted method-json family into:
+        (exp_name, sample_name, tree_entry_dict, v1_method_dict)
+
+        - tree_entry_dict matches your TreeView keys:
+            csv, excel, metadata, json, ionlist_path, insilico_csv, pseudolabel_csv, (optional) trainable_csv
+        - v1_method_dict matches the v1 schema you approved (json_type/schema_version + method/sample/inputs/artifacts/parameters)
+        """
+        if not isinstance(method_obj, dict):
+            raise ValueError("method_obj must be a dict")
+
+        base = base_dir or os.path.dirname(method_path)
+
+        # ----------------------------
+        # A) Detect method family
+        # ----------------------------
+        jt = method_obj.get("json_type")
+        # New v1 schema (preferred)
+        is_v1 = (jt == JSON_TYPE_METHOD) and isinstance(method_obj.get("inputs"), dict)
+
+        # Legacy MAS schema (experiment + samples dict)
+        is_legacy_mas = (not is_v1) and isinstance(method_obj.get("samples"), dict) and bool(method_obj.get("samples"))
+
+        # Legacy CGA/pseudolabel schema (dataset_type/parents)
+        is_legacy_cga = (not is_v1) and (
+            method_obj.get("dataset_type") == "pseudolabel" or isinstance(method_obj.get("parents"), dict)
+        )
+
+        if not (is_v1 or is_legacy_mas or is_legacy_cga):
+            raise ValueError("Unrecognized method JSON structure (normalize_method_json)")
+
+        # ----------------------------
+        # B) Extract exp_name / sample_name + paths into a unified internal record
+        # ----------------------------
+        if is_v1:
+            exp_name = (
+                (method_obj.get("sample") or {}).get("experiment_title")
+                or (method_obj.get("method") or {}).get("name")
+                or "Recovered"
+            )
+            sample_name = ((method_obj.get("sample") or {}).get("sample_name")
+                        or "RecoveredSample")
+
+            inputs = method_obj.get("inputs") or {}
+            artifacts = method_obj.get("artifacts") or {}
+
+            csv_path = _resolve_path(base, (inputs.get("converted_csv") or {}).get("path"))
+            meta_path = _resolve_path(base, (inputs.get("metadata_json") or {}).get("path"))
+            excel_path = _resolve_path(base, (inputs.get("annotation_excel") or {}).get("path"))
+
+            ion_path = _resolve_path(base, (inputs.get("ion_list") or {}).get("path"))
+            insilico_path = _resolve_path(base, (inputs.get("insilico_glycan_list") or {}).get("path"))
+
+            pl_path = _resolve_path(base, (artifacts.get("pseudolabels_tsv") or {}).get("path"))
+            train_path = _resolve_path(base, (artifacts.get("trainable_csv") or {}).get("path"))
+
+            method_family = (method_obj.get("method") or {}).get("family") or ("CGA" if ion_path or insilico_path else "MAS")
+
+        elif is_legacy_mas:
+            exp_name = method_obj.get("experiment") or "Recovered"
+            # legacy may contain multiple samples; import them one-by-one upstream
+            # here we normalize ONLY the first sample (caller can loop externally if desired)
+            sample_name = next(iter(method_obj["samples"].keys()))
+            files = method_obj["samples"][sample_name] or {}
+
+            csv_path = _resolve_path(base, files.get("csv"))
+            excel_path = _resolve_path(base, files.get("excel"))
+            meta_path = _resolve_path(base, files.get("metadata"))
+
+            ion_path = _resolve_path(base, files.get("ionlist_path"))
+            insilico_path = _resolve_path(base, files.get("insilico_csv"))
+            pl_path = _resolve_path(base, files.get("pseudolabel_csv"))
+            train_path = _resolve_path(base, files.get("trainable_csv"))
+
+            method_family = "MAS"  # legacy MAS method files represent MAS by default
+
+        else:  # legacy CGA/pseudolabel
+            exp_name = method_obj.get("experiment_title") or "Recovered"
+            sample_name = method_obj.get("sample_name") or os.path.splitext(os.path.basename(method_path))[0]
+            parents = method_obj.get("parents") or {}
+            ionlist = method_obj.get("ionlist") or {}
+
+            csv_path = _resolve_path(base, parents.get("converted_csv"))
+            meta_path = _resolve_path(base, parents.get("metadata_json"))
+            excel_path = _resolve_path(base, parents.get("annotation_excel"))  # usually absent
+            ion_path = _resolve_path(base, ionlist.get("path"))
+            insilico_path = _resolve_path(base, parents.get("insilico_csv"))
+            pl_path = _resolve_path(base, parents.get("pseudolabels_tsv") or parents.get("pseudolabel_csv"))
+            train_path = _resolve_path(base, parents.get("trainable_csv"))
+
+            method_family = "CGA"
+
+        # normalize sample name the same way GUI expects
+        sample_name = clean_sample_name(sample_name)
+
+        # ----------------------------
+        # C) Produce TreeView entry (your internal representation)
+        # ----------------------------
+        tree_entry = {
+            "json": method_path,   # method file path belongs here
+            "csv": csv_path,
+            "excel": excel_path,
+            "metadata": meta_path,
+            "ionlist_path": ion_path,
+            "insilico_csv": insilico_path,
+            "pseudolabel_csv": pl_path,
+            "trainable_csv": train_path,
+        }
+        # drop empty
+        tree_entry = {k: v for k, v in tree_entry.items() if v}
+
+        # ----------------------------
+        # D) Produce canonical v1 method dict (in-memory)
+        # ----------------------------
+        if is_v1:
+            v1 = method_obj
+            # Ensure headers exist (enforced)
+            v1["json_type"] = JSON_TYPE_METHOD
+            v1["schema_version"] = v1.get("schema_version") or SCHEMA_V1
+            # Ensure timestamps
+            v1.setdefault("created_utc", _utc_now_iso())
+            v1["updated_utc"] = _utc_now_iso()
+            v1.setdefault("uid", str(uuid.uuid4()))
+            return exp_name, sample_name, tree_entry, v1
+
+        # Build v1 from legacy shapes
+        v1 = {
+            "json_type": JSON_TYPE_METHOD,
+            "schema_version": SCHEMA_V1,
+            "uid": str(uuid.uuid4()),
+            "created_utc": _utc_now_iso(),
+            "updated_utc": _utc_now_iso(),
+            "method": {
+                "family": method_family,
+                "name": f"{exp_name}:{sample_name}:{method_family}",
+                "description": "",
+                "tags": []
+            },
+            "sample": {
+                "sample_name": sample_name,
+                "experiment_title": exp_name
+            },
+            "inputs": {
+                "converted_csv": {"path": csv_path} if csv_path else None,
+                "metadata_json": {"path": meta_path} if meta_path else None,
+                "annotation_excel": {"path": excel_path} if excel_path else None,
+                "ion_list": {"path": ion_path} if ion_path else None,
+                "insilico_glycan_list": {"path": insilico_path} if insilico_path else None
+            },
+            "parameters": {
+                "mas": {},
+                "cga": {},
+                "scoring": {},
+                "ml": {}
+            },
+            "artifacts": {
+                "pseudolabels_tsv": {"path": pl_path} if pl_path else None,
+                "trainable_csv": {"path": train_path} if train_path else None,
+                "unlabeled_csv": None,
+                "reports": []
+            },
+            "validation": {
+                "status": "unknown",
+                "checked_utc": None,
+                "items": []
+            },
+            "software": {
+                "glycomsp": {"version": "", "commit": ""},
+                "extractor": {"name": "", "version": ""}
+            },
+            "operator": {"name": "", "note": ""}
+        }
+
+        # remove nulls in inputs/artifacts for cleanliness
+        v1["inputs"] = {k: v for k, v in v1["inputs"].items() if v is not None}
+        v1["artifacts"] = {k: v for k, v in v1["artifacts"].items() if v is not None}
+
+        return exp_name, sample_name, tree_entry, v1
+
+    #new, GPT said it's UI independent
+    def build_method_v1_from_tree(exp_name: str, sample_name: str, *, force_family: str = None) -> dict:
+        """
+        Build a Method v1 dict from the current experiment_projects tree entry.
+        force_family: None | "MAS" | "CGA"
+        """
+        if exp_name not in experiment_projects:
+            raise ValueError(f"Unknown experiment: {exp_name}")
+        if sample_name not in experiment_projects[exp_name]["samples"]:
+            raise ValueError(f"Unknown sample: {sample_name}")
+
+        s = experiment_projects[exp_name]["samples"][sample_name]
+
+        csv_path = s.get("csv")
+        meta_path = s.get("metadata")
+        excel_path = s.get("excel")
+
+        ion_path = s.get("ionlist_path")
+        insilico_path = s.get("insilico_csv")
+        pl_path = s.get("pseudolabel_csv")
+        train_path = s.get("trainable_csv")
+        unlabeled_path = s.get("unlabeled_csv")
+
+        if not csv_path:
+            raise ValueError("Missing converted CSV (csv).")
+
+        # Decide family
+        if force_family in ("MAS", "CGA"):
+            family = force_family
+        else:
+            # auto: MAS if excel exists; CGA if ion/insilico exists
+            family = "MAS" if excel_path else ("CGA" if (ion_path or insilico_path or pl_path) else "MAS")
+
+        # Enforce required inputs per family (for v1 standard)
+        if not meta_path:
+            raise ValueError("Missing metadata JSON (metadata). Link or generate metadata first.")
+
+        if family == "MAS":
+            if not excel_path:
+                raise ValueError("MAS method requires annotation Excel (excel).")
+        elif family == "CGA":
+            if not ion_path:
+                raise ValueError("CGA method requires ion list (ionlist_path).")
+            if not insilico_path:
+                raise ValueError("CGA method requires in-silico glycan list (insilico_csv).")
+        else:
+            raise ValueError(f"Unknown family: {family}")
+
+        # Build v1 dict (minimal but compliant)
+        v1 = {
+            "json_type": "glycomsp.method",
+            "schema_version": "1.0.0",
+            "uid": str(uuid.uuid4()),
+            "created_utc": _utc_now_iso() if "_utc_now_iso" in globals() else datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "updated_utc": _utc_now_iso() if "_utc_now_iso" in globals() else datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+
+            "method": {
+                "family": family,
+                "name": f"{exp_name}:{sample_name}:{family}",
+                "description": "",
+                "tags": []
+            },
+
+            "sample": {
+                "sample_name": sample_name,
+                "experiment_title": exp_name
+            },
+
+            "inputs": {
+                "converted_csv": {"path": os.path.normpath(csv_path)},
+                "metadata_json": {"path": os.path.normpath(meta_path)}
+            },
+
+            "parameters": {
+                "mas": {},
+                "cga": {},
+                "scoring": {},
+                "ml": {}
+            },
+
+            "artifacts": {
+                "reports": []
+            },
+
+            "validation": {
+                "status": "unknown",
+                "checked_utc": None,
+                "items": []
+            },
+
+            "software": {
+                "glycomsp": {"version": "", "commit": ""},
+                "extractor": {"name": "", "version": ""}
+            },
+
+            "operator": {"name": "", "note": ""}
+        }
+
+        # Conditional inputs
+        if family == "MAS":
+            v1["inputs"]["annotation_excel"] = {"path": os.path.normpath(excel_path)}
+        else:
+            v1["inputs"]["ion_list"] = {"path": os.path.normpath(ion_path)}
+            v1["inputs"]["insilico_glycan_list"] = {"path": os.path.normpath(insilico_path)}
+
+        # Optional artifacts
+        if pl_path:
+            v1["artifacts"]["pseudolabels_tsv"] = {"path": os.path.normpath(pl_path)}
+        if train_path:
+            v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
+        if unlabeled_path:
+            v1["artifacts"]["unlabeled_csv"] = {"path": os.path.normpath(unlabeled_path)}
+
+        return v1
+
+
     def load_method_file(paths=None):
         if not paths:
             paths = filedialog.askopenfilenames(
@@ -4524,82 +5656,37 @@ def open_prepare_dataset_window():
         skipped = 0
         for path in paths:
             try:
-                #with open(path, "r") as f:
-                #    method = json.load(f)
                 method = load_typed_json(
-                                            path,
-                                            expected_type=JSON_TYPE_METHOD,
-                                            allow_legacy=True,
-                                            context="[Method Import] "
-                                        )
+                    path,
+                    expected_type=JSON_TYPE_METHOD,
+                    allow_legacy=True,
+                    context="[Method Import] "
+                )
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load method file:\n{path}\n{e}")
                 continue
 
-            # Accept both legacy MAS method schema and newer CGA/pseudolabel schema
-            exp_name = (
-                method.get("experiment")
-                or method.get("experiment_title")
-                or "Recovered"
-            )
-            samples = method.get("samples", None)
-            # If this is a pseudolabel/CGA style method file, normalize it into a 1-sample "samples" dict
-            if not samples:
-                if method.get("dataset_type") == "pseudolabel" or isinstance(method.get("parents"), dict):
-                    sname = clean_sample_name(
-                        method.get("sample_name")
-                        or method.get("sample")
-                        or os.path.splitext(os.path.basename(path))[0]
-                    )
-                    parents = method.get("parents") or {}
-                    ionlist = method.get("ionlist") or {}
+            try:
+                exp_name, sample_name, tree_entry, v1_obj = normalize_method_json(method, path)
+            except Exception as e:
+                skipped += 1
+                logger.log(f"[Method Import] skipped {path}: {e}")
+                continue
 
-                    samples = {
-                        sname: {
-                            "csv": parents.get("converted_csv"),
-                            "excel": parents.get("annotation_excel"),      # optional / future
-                            "metadata": parents.get("metadata_json"),      # optional / future
-                            "insilico_csv": parents.get("insilico_csv"),   # optional / future
-                            "ionlist_path": ionlist.get("path"),
-                            "pseudolabel_csv": parents.get("pseudolabels_tsv") or parents.get("pseudolabel_csv"),
-                            "validated": False,
-                        }
-                    }
-                else:
-                    skipped += 1
-                    continue
             if exp_name not in experiment_projects:
                 experiment_projects[exp_name] = {"samples": {}}
 
-            for sample_name, files in samples.items():
-                sample_name = clean_sample_name(sample_name)  # Normalize sample name
+            # If already exists, skip (or you can decide overwrite policy later)
+            if sample_name in experiment_projects[exp_name]["samples"]:
+                skipped += 1
+                continue
 
-                if sample_name in experiment_projects[exp_name]["samples"]:
-                    skipped += 1
-                    continue
+            experiment_projects[exp_name]["samples"][sample_name] = tree_entry
 
-                base = os.path.dirname(path)
+            # optional: store the normalized v1 object for later “Save method v1”
+            experiment_projects[exp_name]["samples"][sample_name]["_method_v1_cache"] = v1_obj
 
-                # Method path should always be stored under key "json" (TreeView displays this as "Method")
-                files_resolved = {
-                    "json": path,
-                    "csv": _resolve_path(base, files.get("csv")),
-                    "excel": _resolve_path(base, files.get("excel")),
-                    "metadata": _resolve_path(base, files.get("metadata")),
-                    "insilico_csv": _resolve_path(base, files.get("insilico_csv")),
-                    "ionlist_path": _resolve_path(base, files.get("ionlist_path")),
-                    "pseudolabel_csv": _resolve_path(base, files.get("pseudolabel_csv")),
-                }
-
-                # Drop empty keys to keep dict clean
-                files_resolved = {k: v for k, v in files_resolved.items() if v}
-
-                experiment_projects[exp_name]["samples"][sample_name] = files_resolved
-
-                if files.get("validated"):
-                    linked_validated_samples.add((exp_name, sample_name))
-                    
-                loaded += 1
+            loaded += 1
 
         refresh_tree()
         msg = f"Imported {loaded} sample(s) successfully.\nSkipped: {skipped}"
@@ -4696,31 +5783,13 @@ def open_prepare_dataset_window():
     def launch_pseudo_labeling():
         #import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
         from datetime import datetime
-
-        sel = tree.selection()
-        if not sel:
-            messagebox.showwarning("No Selection", "Select a sample in the tree first.")
+        exp_name, sample_name, method_path = _get_selected_context()
+        if not exp_name or not sample_name:
+            messagebox.showwarning("No Selection", "Select a sample or method in the tree first.")
             return
-
-        node = sel[0]
-        text = tree.item(node, "text")
-
-        # If user clicked a file row like "CSV: ..." or "Metadata: ...", go up to the sample row
-        if ":" in text:
-            node = tree.parent(node)
-
-        sample_name = clean_sample_name(tree.item(node, "text"))
-        exp_node = tree.parent(node)
-        if not exp_node:
-            messagebox.showerror("Invalid Selection", "Please select a sample under an experiment.")
-            return
-
-        exp_text = tree.item(exp_node, "text")
-        exp_name = exp_text.replace("Experiment: ", "").split(" (")[0].strip()
-
-        files = experiment_projects.get(exp_name, {}).get("samples", {}).get(sample_name, {})
+        files = experiment_projects[exp_name]["samples"][sample_name]
         csv_path = files.get("csv")
-        meta_path = files.get("json")
+        meta_path = files.get("metadata")
 
         if not csv_path or not meta_path:
             messagebox.showerror("Missing Files", "This sample must have both CSV and Metadata (.json) linked.")
@@ -4814,6 +5883,8 @@ def open_prepare_dataset_window():
                     return None
 
                 files["insilico_csv"] = outpath
+                #20260204
+                _ensure_method_stub(files, family="CGA", sample_name=sample_name)
                 append_runlog(files, {
                     "ts": datetime.now().isoformat(timespec="seconds"),
                     "action": "insilico_generate",
@@ -4845,6 +5916,8 @@ def open_prepare_dataset_window():
 
         def on_link_existing(path):
             files["insilico_csv"] = path
+             #20260204
+            _ensure_method_stub(files, family="CGA", sample_name=sample_name)
             append_runlog(files, {
                 "ts": datetime.now().isoformat(timespec="seconds"),
                 "action": "insilico_link_existing",
@@ -4854,17 +5927,63 @@ def open_prepare_dataset_window():
             refresh_tree()
 
         def on_attach_ionlist(path):
+            #20260204
             files["ionlist_path"] = path
+            #20260204
+            _ensure_method_stub(files, family="CGA", sample_name=sample_name)
+            append_runlog(files, {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "action": "add_ion_list",
+                "sample": sample_name,
+                "output": {"ionlist_path": path},
+            })            
             refresh_tree()
 
         def on_start(payload):
-            # Use linked paths & run the wrapper
-            run_pseudolabeling(
+            out_tsv = run_pseudolabeling(
                 sample_name=sample_name,
                 files=files,
                 meta_overrides=payload.get("metadata", {}),
                 parent=root
             )
+
+            if not out_tsv:
+                # if wrapper stores it instead of returning
+                out_tsv = files.get("pseudolabel_csv")
+
+            if out_tsv:
+                files["pseudolabel_csv"] = out_tsv
+
+            # Always refresh file links first (so builder sees latest insilico/ion/tsv)
+            refresh_tree()
+
+            # If run failed / cancelled, stop here
+            if not out_tsv:
+                return
+
+            try:
+                # (1) Build v1 dict and keep it in memory (so Export buttons can work even before autosave)
+                v1 = build_method_v1_from_tree(exp_name, sample_name, force_family="CGA")
+                files["_method_v1_cache"] = v1
+
+                # (2) If user configured a folder, autosave + register into _methods + set active json
+                if sample_method_folder:
+                    stamp = datetime.now().strftime("%Y%m%d")
+                    out_name = f"{sample_name}.CGA.method.v1_{stamp}.json"
+                    out_path = os.path.join(sample_method_folder, out_name)
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        json.dump(v1, f, indent=2, ensure_ascii=False)
+
+                    _register_or_update_method_ref(files, out_path, family="CGA")
+
+            except Exception:
+                traceback.print_exc()
+                messagebox.showwarning(
+                    "Method v1",
+                    "CGA finished, but method JSON was not generated.\nSee console for details."
+                )
+
+            refresh_tree()
 
         # Open the setup window with the resolved metadata
         PseudoLabelingSetupWindow(
@@ -5045,8 +6164,16 @@ def open_prepare_dataset_window():
                 messagebox.showerror("Failed", str(e))
 
         ttk.Button(frm, text="Build Trainable CSV", command=run_once).grid(row=row+2, column=1, pady=8)
-
     def try_pl_to_trainable():
+        exp_name, sample_name, method_path = _get_selected_context()
+        if not exp_name or not sample_name:
+            messagebox.showerror("No Selection", "Please select a sample or method first.")
+            return
+
+        files = experiment_projects[exp_name]["samples"][sample_name]
+        open_pl_to_trainable_modal(root, sample_name, files, logger)
+
+    def try_pl_to_trainable_old():
         sel = tree.selection()
         if not sel:
             messagebox.showerror("No Selection", "Please select a sample first.")
@@ -5065,7 +6192,8 @@ def open_prepare_dataset_window():
 
     tk.Button(button_frame, text="Add MS2 CSV(s)", command=lambda: select_files_generic("csv", True, handle_csv_selection)).grid(row=0, column=0, padx=5)
     tk.Button(button_frame, text="Add Excels (ion list/man annotation)", command=lambda: select_files_generic("excel", True, handle_excel_selection)).grid(row=0, column=1, padx=5)
-    tk.Button(button_frame, text="Add Sample using metadata", command=lambda: select_files_generic("json", True, handle_json_selection)).grid(row=0, column=2, padx=5)
+    #tk.Button(button_frame, text="Add Sample using metadata", command=lambda: select_files_generic("json", True, handle_json_selection)).grid(row=0, column=2, padx=5)
+    tk.Button(button_frame, text="Add Sample using metadata", command=lambda: select_files_generic("json", True, handle_metadata_selection)).grid(row=0, column=2, padx=5)
     tk.Button(button_frame, text="Add Sample", command=add_sample).grid(row=1, column=0, padx=5)
     tk.Button(button_frame, text="Clean up empty unassigned sample tags", command=clean_unassigned_samples).grid(row=1, column=1, padx=5)
     link_button = tk.Button(button_frame, text="Link Sample", state="disabled", command=lambda: try_link_selected_sample())
@@ -5106,7 +6234,8 @@ def open_prepare_dataset_window():
     #bottom place for "global" exp method file
     tk.Button(btn_frame, text="Load .exp.json", command=load_experiment_method_file).pack(side=tk.LEFT, padx=10)
     tk.Button(btn_frame, text="Save .exp.json", command=save_current_experiment_method).pack(side=tk.LEFT)
-
+    ttk.Button(btn_frame, text="Export Method v1 (MAS)", command=lambda: _export_method_v1("MAS")).pack(side="left", padx=4)
+    ttk.Button(btn_frame, text="Export Method v1 (CGA)", command=lambda: _export_method_v1("CGA")).pack(side="left", padx=4)
 
     # --- Right-click bind ---
     #tree.bind("<Button-3>", on_right_click)
@@ -5754,16 +6883,7 @@ def open_ml_analysis_window():
             _ml_state["source_files"] = []  # paths you load/merge from
 
         return _ml_state
-
-    def file_sha256(path: str) -> Optional[str]:
-        try:
-            h = hashlib.sha256()
-            with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(1024*1024), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-        except Exception:
-            return None
+    #move sha256 to top
 
     def collect_versions() -> Dict[str, str]:
         v = {
@@ -8839,7 +9959,7 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.0 Build 20260116 core v1.000")
+root.title("GlycoMSP File Manager GUI v1.0 Build 20260202 core v1.012")
 root.geometry("800x480")
 root.minsize(800, 480)
 

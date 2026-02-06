@@ -1,5 +1,5 @@
-version = "1.06"
-last_update = 20251015
+version = "1.07"
+last_update = 20260206
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -34,6 +34,9 @@ last_update = 20251015
 #version changelog:
 #v1.2 (future): add O-man and fix hybrid NG generation logic
 #v1.1 (future): finished version for publication
+#v1.07: fix fucrange tuple syntax in NGcore() (critical); fix compcheck() return type handling                                      
+#       in NGlaunch()/OGlaunch() (critical); fix arm3 tuple length for OG core type 0 (critical);                                   
+#       fix HexA loop variable shadowing in terminal_NG() (medium); add allowHexA to NG_flags    
 #v1.06: add OG sulphation (no phosphate right...? right?)
 #v1.053: fix NG with adding 2 PO3H/SO3
 #v1.052: fix NG with adding 1 PO3H/SO3
@@ -152,6 +155,7 @@ NG_flags = {
          "allowfuc":        True,
          "allowpsa":        0,
          "allowldnf":       False,
+         "allowHexA":       False,
         #iteration logic flags
          "arm_count":       2,
          "internal_minrep": 0,
@@ -555,9 +559,10 @@ def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5a
         for neu5ac, neu5gc, kdn, hexa in product(neu5ac_no, neu5gc_no, kdn_no, hexa_no):
             if neu5ac + neu5gc + kdn + hexa <=1:
                 sia_triples.append((neu5ac, neu5gc, kdn))
-            if hexa != 0:
-                hexa_addition.append((neu5ac, neu5gc, kdn, hexa)) #actually we only need hexa I think? others are always zero
-                print(f"[dev check if sia triples useless]: the hexa!=0 comp {hexa_addition} ")
+            #20260206 fix1, suppose HexA is exclusive with All SA
+                if hexa != 0:
+                    hexa_addition.append((neu5ac, neu5gc, kdn, hexa)) #actually we only need hexa I think? others are always zero
+                    print(f"[dev check if sia triples useless]: the hexa!=0 comp {hexa_addition} ")
         #overall rule check 
         for hex, hexnac in hn_pairs:
             for neu5ac, neu5gc, kdn in sia_triples:
@@ -565,9 +570,11 @@ def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5a
                     if (neu5ac + neu5gc + kdn + fuc <= 2) and (hex + hexnac + neu5ac + neu5gc + kdn + fuc <= 5) and ((neu5ac + neu5gc + kdn + fuc) <= (hex + hexnac)):
                         composition.append((hex, hexnac, neu5ac, neu5gc, kdn, fuc))
             if allowHexA == True:
-                for hex, hexnac in hn_pairs:
+                for neu5ac, neu5gc, kdn, hexa in hexa_addition:
+                #for hex, hexnac in hn_pairs:
                     #composition.append((hex+1, hexnac, neu5ac, neu5gc, kdn, fuc))
                     extra_comp.append((hex, hexnac, neu5ac, neu5gc, kdn, fuc, hexa))
+                    print(f"[debug20260206]: if sialic acids are always 0 {extra_comp}")
 
     #psa exceptions?
     elif isinstance(allowpsa, int):
@@ -627,7 +634,7 @@ def terminal_NG(alphagal_like=False, allowldnc=False, allowleby = False, allow5a
     """
     out = []
     if allowHexA:
-        print(f"[debug][terminal_NG] allowHexA active; HexA_range=not defined")#{flags.get('HexA_range')}")
+        print(f"[debug][terminal_NG] allowHexA active")
         #use my old method first, here unwind the 7-elements tuple back to 6 + 1 HexA
         out = composition
         for comps in extra_comp:
@@ -811,7 +818,7 @@ def NGcore(corefuc = True, bicorefuc = False, highman = True, perman = False, hy
         elif bicorefuc:
             fucrange = (0, 3)  # 0~2
         else:
-            fucrange = (0)
+            fucrange = 0 #(0) -> 0 to avoid fucrange=0 never reached.
         for h in range(*hexrange):
             if fucrange == 0:
                 extraNG.append((h, hexnac, 0, 0, 0, 0))
@@ -1092,7 +1099,7 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
     if flags["compcheck"]:
         if flags["debug"]:
             print("[debug] Allow composition check by sugar unit numbers")
-            print(f'Ranges H, N, Ac, Gc, KDN, Fuc = '
+            print(f'Ranges H, N, Ac, Gc, KDN, Fuc, HexA = '
             f'{tuple(flags["Hex_range"])}, {tuple(flags["HexNAc_range"])}, '
             f'{tuple(flags["Neu5Ac_range"])}, {tuple(flags["Neu5Gc_range"])}, '
             f'{tuple(flags["KDN_range"])}, {tuple(flags["Fucose_range"])}, '
@@ -1109,12 +1116,14 @@ def NGlaunch(user_flags=None, filename=None, debug = False):
                         flags["Neu5Ac_range"], flags["Neu5Gc_range"],
                         flags["KDN_range"],  flags["Fucose_range"],flags["HexA_range"],
                         debug=flags["debug"])
-        passed = res[0] #if flags["debug"] else res
+        
         if flags["debug"]:
+            passed = res[0] #if flags["debug"] else res
             print(f"[debug] passed={len(passed)}  failed={len(res[1])}")
         #save_glycan_pseudocomp_to_csv(passed, filename=filename,
         #                            include_header=True, derivatization=deri, reduced=reduced)
-
+        else:
+            passed = res #warning: this is not passed. Just the whole raw composition
         #add extra parameters for mode, so3, po3h
         rows = []
         for comp, hexA in passed:
@@ -1510,8 +1519,8 @@ def OGcorev2(coretype=None, keep_topology=False, debug=False, OGflags=None, test
         ###Tn antigen GalNAc-(alpha 1)S/T
         if debug:
             print("[debug] Core type 0 is selected, which is Tn-antigen core")
-        arm3 = (False, False)
-        arm6 = (True, False)
+        arm3 = (False, False, None)
+        arm6 = (True, False, None)
         core = (0,1,0,0,0,0)  #Tn antigen core
         #combine with armadditionOG
         armscomb = [] #init before adding, need to do this at every core type, since these are independent
@@ -1651,7 +1660,11 @@ def OGlaunch(user_flags=None, coretype=None,keep_topology=False, debug=False, fl
                         flags["Neu5Ac_range"], flags["Neu5Gc_range"],
                         flags["KDN_range"],  flags["Fucose_range"],flags["HexA_range"],
                         debug=flags["debug"])
-        passed = res[0] #if flags["debug"] else res
+        if flags["debug"]:
+
+            passed = res[0] #if flags["debug"] else res
+        else:
+            passed = res
         #save_glycan_pseudocomp_to_csv(passed, filename=filename,
         #                            include_header=True, derivatization=deri, reduced=reduced)        
         rows = []

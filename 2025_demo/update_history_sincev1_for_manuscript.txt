@@ -1,0 +1,4 @@
+20260126: fixed part of GlycoMSP GUI confusing experiment/method/metadata json in some cases
+20260127: fixed method & metadata generation under MAS workflow. CGA doesn't have a cutpoint to do this now
+20260205: rebuild the json structure (now the method, experiment, metadata) json is completely clean. Multiple method (attempt) is still not supported
+20260206: fixed HexA generation logic 
