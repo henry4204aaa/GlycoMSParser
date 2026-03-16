@@ -1,6 +1,6 @@
 import os
-version = "1.0121"
-last_update = 20260204
+version = "1.01"
+last_update = 20260316
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -260,7 +260,11 @@ except Exception:
     class SuggestParams:  # fallback stub
         def __init__(self, **kw): pass
 """
-# v1.1? (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
+# v1.5 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
+# v1.3 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
+# v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
+# v1.1 (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
+# v1.05: fixed json file relationship definition and support legacy json file load (v11). 
 # v1.02: json fix B (now metadata, method, and experiment json should have proper relationship)
 # v1.01: json fix A (compatible with legacy, previous mixed json file)
 # v1.00: Able to write manuscript although some bug persists.
@@ -1440,10 +1444,12 @@ class MetadataEditorWindow:
 
         # save metadata json
         output_json_path = os.path.join(self.output_dir, savename + ".json")
-        #danger, force and static, alreadly implemented in mzmlreader and masprawextractor #20260126
+        # fixed 20260305 P1-C: msprawextractor.savemetadata() does NOT stamp headers, so we must do it here
+        # Verified: msprawextractor.savemetadata() and mzmlreader.savemetadata() both do plain json.dump with no key injection.
+        # The prior comment claiming "already implemented in mzmlreader and masprawextractor" was incorrect.
         # enforce typed metadata json header (overwrite if wrong / missing)
-        #self.metadata["json_type"] = "glycomsp.metadata"
-        #self.metadata["schema_version"] = "1.0.0"
+        self.metadata["json_type"] = "glycomsp.metadata"
+        self.metadata["schema_version"] = "1.0.0"
         jsonfile = mspext.savemetadata(self.metadata, output_json_path)
         logger.log(f"Metadata saved to {jsonfile}")
         self.last_metadata = self.metadata.copy()
@@ -2254,6 +2260,14 @@ def open_prepare_dataset_window():
     experiment_method_paths = {}  # Store .exp.json path per experiment
     sample_method_folder = None  # Global path for saving per-sample method.json files
     experiment_status_labels = {}  # GUI labels for status display, indexed by experiment
+    # fixed 20260305 P1-B: uuid import and _utc_now_iso must be at top of outer function, not after inner function definitions that use them
+    import re
+    import uuid
+
+    def _utc_now_iso():
+        # RFC3339-ish without microseconds
+        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
     #20250917 start fixing json issues
     # --- BEGIN: exp.json save/load helpers (generic; PL-ready) ---
     from pathlib import Path
@@ -2380,14 +2394,10 @@ def open_prepare_dataset_window():
                         kind=kind,
                         auto=True
                     )
-                    files["_methods"].append({
-                        "method_id": str(uuid.uuid4()),
-                        "method_name": os.path.basename(out_path),
-                        "family": kind,
-                        "path": out_path,
-                        "status": "unknown",
-                        "notes": "auto-generated from legacy links"
-                    })
+                    #fixed 20260312 Test-B B4: prevent duplicate method entries
+                    # save_method_v1_for_sample now calls _register_or_update_method_ref internally,
+                    # which already appended the correct entry to files["_methods"].
+                    # The manual append that was here created a duplicate — removed.
                 except Exception as e:
                     logger.log(f"[EXP v1][UPGRADE] Failed to auto-generate {kind} method for {exp_title}/{sample_name}: {e}")
 
@@ -2484,10 +2494,7 @@ def open_prepare_dataset_window():
                     }
                 })
 
-            payload["samples"].append({
-                "sample_name": sname,
-                "methods": out_methods
-            })
+            # fixed 20260305 P1-A bug: placeholder must be set before appending to payload
             if not out_methods:
                     # Create a non-destructive placeholder so v1 exp.json never drops the sample completely
                 out_methods = [{
@@ -2504,6 +2511,12 @@ def open_prepare_dataset_window():
                         "notes": "No method JSON available yet (missing required inputs to auto-generate)."
                     }
                 }]
+            #fixed 20260306 Test-A: persist validation status in exp.json
+            payload["samples"].append({
+                "sample_name": sname,
+                "validated": (exp_title, sname) in linked_validated_samples,
+                "methods": out_methods
+            })
 
         # prune None recursively (so hash=None doesn't clutter JSON)
         def _prune_none(x):
@@ -2531,7 +2544,7 @@ def open_prepare_dataset_window():
         data = load_typed_json(
             in_path,
             expected_type=JSON_TYPE_EXPERIMENT,
-            allow_legacy=True,              # rejects “unknown legacy”, accepts confidently-classified legacy
+            allow_legacy=True,              # rejects "unknown legacy", accepts confidently-classified legacy
             context="[EXP] "
         )
 
@@ -2630,6 +2643,10 @@ def open_prepare_dataset_window():
                 # store list for future UI ("Sample -> Methods")
                 files["_methods"] = norm_methods
 
+                #fixed 20260306 Test-A: restore validation status from exp.json into linked_validated_samples set
+                if s.get("validated"):
+                    linked_validated_samples.add((exp_title, sname))
+
                 # choose an active method (first existing); fallback to first path even if missing
                 if active_method_path is None and norm_methods:
                     active_method_path = norm_methods[0]["path"]
@@ -2664,6 +2681,38 @@ def open_prepare_dataset_window():
                     except Exception as e:
                         logger.log(f"[EXP v1] Failed to load method for sample={sname}: {e}")
 
+                #fixed 20260313 LEGACY-1: detect family for v1 samples with no registered methods
+                # Safety net: v1-format file has empty methods array but has CGA/MAS artifacts.
+                if not files.get("_methods"):
+                    _fam_auto = _detect_legacy_family(files)
+                    if _fam_auto:
+                        logger.log(f"[LEGACY] {sname}: no methods in v1 JSON → auto-detecting {_fam_auto}")
+                        print(f"[LEGACY DEBUG v1] {sname}: family={_fam_auto}, "
+                              f"insilico={bool(files.get('insilico_csv'))}, "
+                              f"ionlist={bool(files.get('ionlist_path'))}, "
+                              f"excel={bool(files.get('excel'))}")
+                        _ensure_method_stub(files, family=_fam_auto, sample_name=sname)
+                        try:
+                            _leg_path = save_method_v1_for_sample(exp_name=exp_title, sample_name=sname, kind=_fam_auto, auto=True)
+                            logger.log(f"[LEGACY] Created: {_leg_path}")
+                        except Exception as e_leg:
+                            logger.log(f"[LEGACY] Conversion failed for {sname}: {e_leg}")
+
+                # [ML-1 DEBUG] temporary trace for Issue-2 diagnosis
+                print(f"[ML-1 DEBUG] {sname}: s.validated={s.get('validated')}, "
+                      f"files.excel={bool(files.get('excel'))}, "
+                      f"_methods={files.get('_methods')}")
+
+                #fixed 20260313 ML-1: auto-create MAS method for legacy v11 samples
+                # Validated samples loaded from v11 JSON may lack a MAS method entry.
+                # Pre-register stub and attempt auto-save so the tree shows a MAS node.
+                if s.get("validated") and files.get("excel"):
+                    _ensure_method_stub(files, family="MAS", sample_name=sname)
+                    try:
+                        save_method_v1_for_sample(exp_name=exp_title, sample_name=sname, kind="MAS", auto=True)
+                    except Exception as e_ml1:
+                        logger.log(f"[ML-1] auto-create MAS failed for {sname}: {e_ml1}")
+
             experiment_method_paths[exp_title] = in_path
             logger.log(f"[EXP v1] Loaded ← {in_path}")
             refresh_tree()
@@ -2677,6 +2726,22 @@ def open_prepare_dataset_window():
                 files = sample_blob or {}
             resolved = {k: _abs(_from_posix(v), base) for k, v in files.items() if isinstance(v, str) and v.strip()}
             dst[sname] = resolved
+
+            #fixed 20260313 LEGACY-1: auto-detect family and create method for old-format samples
+            # Old deployed format has no _methods array; detect from artifact key patterns.
+            _fam_auto = _detect_legacy_family(dst[sname])
+            if _fam_auto:
+                logger.log(f"[LEGACY] {sname}: old format detected → {_fam_auto}")
+                print(f"[LEGACY DEBUG] {sname}: family={_fam_auto}, "
+                      f"insilico_csv={bool(dst[sname].get('insilico_csv'))}, "
+                      f"ionlist={bool(dst[sname].get('ionlist_path'))}, "
+                      f"excel={bool(dst[sname].get('excel'))}")
+                _ensure_method_stub(dst[sname], family=_fam_auto, sample_name=sname)
+                try:
+                    _leg_path = save_method_v1_for_sample(exp_name=exp_title, sample_name=sname, kind=_fam_auto, auto=True)
+                    logger.log(f"[LEGACY] Created: {_leg_path}")
+                except Exception as e_leg:
+                    logger.log(f"[LEGACY] Conversion failed for {sname}: {e_leg}")
 
         experiment_method_paths[exp_title] = in_path
         logger.log(f"[EXP legacy] Loaded ← {in_path}")
@@ -2833,6 +2898,20 @@ def open_prepare_dataset_window():
             "notes": ""
         })
 
+
+    def _detect_legacy_family(files: dict):
+        """Auto-detect method family from artifact patterns in a legacy exp.json sample.
+        Returns 'CGA', 'MAS', or None.
+        CGA: has insilico_csv or ionlist_path (constraint-based annotation artifacts)
+        MAS: has excel (manual annotation spreadsheet)
+        """
+        if not isinstance(files, dict):
+            return None
+        if files.get("insilico_csv") or files.get("ionlist_path"):
+            return "CGA"  # Has CGA-specific artifacts
+        if files.get("excel"):
+            return "MAS"  # Has manual annotation spreadsheet
+        return None
 
     def _register_or_update_method_ref(files: dict, out_path: str, family: str):
         """Attach a saved method JSON path to the right method entry and keep legacy 'json' in sync."""
@@ -3021,8 +3100,9 @@ def open_prepare_dataset_window():
         else:
             link_button.config(state="disabled")
             merge_button.config(state="normal" if has_merge_inputs else "disabled")
+        # fixed 20260306 Test-A: removed circular binding from handler (was inside else block, never triggered at init)
 
-            tree.bind("<<TreeviewSelect>>", on_tree_select)
+    tree.bind("<<TreeviewSelect>>", on_tree_select)  # fixed 20260306 Test-A: added TreeviewSelect binding to setup
 
     def try_link_selected_sample():
         sel = tree.selection()
@@ -3090,7 +3170,7 @@ def open_prepare_dataset_window():
                 sample_node = tree.insert(exp_node, "end", text=sample_display, open=True)
                 #20260202 update 1
                 # ---- (A) Show sample-level anchors under Sample ----
-                # These are “sample identity” / shared inputs
+                # These are "sample identity" / shared inputs
                 for ftype in ["csv", "excel", "metadata"]:
                     if files.get(ftype):
                         if ftype == "metadata":
@@ -3129,8 +3209,13 @@ def open_prepare_dataset_window():
                         if mpath:
                             tree.insert(method_node, "end", text=f"Method JSON: {os.path.basename(mpath)}")
 
-                        # Current code still stores method-specific artifacts in the flat "files" dict.
-                        # Until we implement per-method file separation, show active artifacts under the first method node.
+                        # fixed 20260305 P2-B: TODO Phase 1.5 — per-method artifact display
+                        # Currently shows active artifacts under first method node only.
+                        # Full fix requires per-method artifact storage in files["_methods"] entries (Phase 1.5 Step 2).
+                        # Each method entry (m) already carries m.get("path"), but the artifact keys
+                        # ("insilico_csv", "ionlist_path", "pseudolabel_csv") are stored flat in the
+                        # outer "files" dict and are not yet separated per-method.
+                        # Keeping idx == 1 guard until per-method artifact storage is implemented.
                         if idx == 1:
                             for ftype in ["insilico_csv", "ionlist_path", "pseudolabel_csv"]:
                                 if files.get(ftype):
@@ -3143,6 +3228,28 @@ def open_prepare_dataset_window():
                                     else:
                                         label = ftype.upper()
                                     tree.insert(method_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
+
+                        #fixed 20260316: MAS artifact display — load inputs from method JSON for per-method parity
+                        # Reads converted_csv / annotation_excel / metadata_json from the saved method file.
+                        # Unlike CGA (which reads from the flat files dict due to Phase 1.5 limitation),
+                        # MAS reads directly from the method JSON so multi-method display is correct:
+                        # each saved method has its own inputs dict, no idx==1 guard needed.
+                        if fam == "MAS" and mpath and os.path.exists(mpath):
+                            try:
+                                with open(mpath, "r", encoding="utf-8") as _mf:
+                                    _md = json.load(_mf)
+                                _inputs = _md.get("inputs", {})
+                                for _key, _label in [
+                                    ("converted_csv",    "Converted CSV"),
+                                    ("annotation_excel", "Annotation Excel"),
+                                    ("metadata_json",    "Metadata"),
+                                ]:
+                                    _entry = _inputs.get(_key)
+                                    if isinstance(_entry, dict) and _entry.get("path"):
+                                        tree.insert(method_node, "end",
+                                                     text=f"{_label}: {os.path.basename(_entry['path'])}")
+                            except Exception:
+                                pass  # silently skip if method JSON is missing or malformed
                 """
                 for ftype in ["csv", "excel", "json", "metadata", "insilico_csv", "ionlist_path", "pseudolabel_csv"]:
                     if files.get(ftype):
@@ -3655,9 +3762,18 @@ def open_prepare_dataset_window():
         exp_name = tree.item(exp_node, "text").replace("Experiment: ", "").split(" (")[0].strip()
         """
         files = experiment_projects[exp_name]["samples"][sample_name]
-        if not all([files.get("csv"), files.get("excel"), files.get("json")]):
+        #fixed 20260309 Test-A Secondary: metadata key with backward compatibility
+        # v12 samples store metadata under "metadata"; old v11 legacy stored it under "json"
+        if not all([files.get("csv"), files.get("excel"),
+                    files.get("metadata") or files.get("json")]):
             messagebox.showerror("Error", "Sample is missing required files.")
             return
+
+        #fixed 20260313 ML-2: ensure MAS method exists before merge
+        # Legacy samples may not have a MAS method node; create one now so merge can proceed.
+        if not files.get("_methods") or not any(m.get("family") == "MAS" for m in files.get("_methods", [])):
+            _ensure_method_stub(files, family="MAS", sample_name=sample_name)
+            save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="MAS", auto=True)
 
         # Ask user for output folder
         outdir = filedialog.askdirectory(title="Select output folder to save merged dataset")
@@ -3768,6 +3884,12 @@ def open_prepare_dataset_window():
 
             mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
+            #fixed 20260313 ML-2: update method after merge completes
+            try:
+                save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="MAS", auto=True)
+                refresh_tree()
+            except Exception as e_method:
+                logger.log(f"[ML-2] post-merge method update failed: {e_method}")
         except Exception as e:
             messagebox.showerror("Merge Failed", f"Error:\n{str(e)}")
 
@@ -5195,12 +5317,19 @@ def open_prepare_dataset_window():
 
         sample = experiment_projects[exp_name]["samples"][sample_name]
 
-        # Build v1 payload on demand if cache missing
-        v1 = sample.get("_method_v1_cache")
+        #fixed 20260313 Test-2: pre-register stub so MAS is visible in tree even if write fails
+        # Mirrors CGA behavior: CGA calls _ensure_method_stub before writing (lines 5951/5984/5997);
+        # MAS had no fallback, causing CGA→MAS ordering to hide MAS node in tree.
+        _ensure_method_stub(sample, family=kind, sample_name=sample_name)
+
+        #fixed 20260312 Test-B B1.2: split cache by family, prevents cross-contamination
+        # Cache is keyed by family so MAS and CGA never share the same slot.
+        _cache_key = f"_method_v1_cache_{kind.upper()}"
+        v1 = sample.get(_cache_key)
         if not isinstance(v1, dict):
             # Build from current tree links (strict checks inside)
             v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=kind)
-            sample["_method_v1_cache"] = v1
+            sample[_cache_key] = v1
 
         # Update required headers/timestamps
         v1["json_type"] = "glycomsp.method"
@@ -5220,11 +5349,16 @@ def open_prepare_dataset_window():
             out_path = os.path.join(base_dir, out_name)
 
         # Write
+        #fixed 20260313 Test-2: ensure parent directory exists (sample_method_folder may not exist yet)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(v1, f, indent=2, ensure_ascii=False)
 
-        # Link method path into the sample dict (Tree shows it as "Method")
-        sample["json"] = out_path
+        #fixed 20260312 Test-B B4: register in _methods so MAS survives exp.json save/reload
+        # Previously only sample["json"] was set, leaving _methods with a path=None stub.
+        # _register_or_update_method_ref also sets files["json"] for legacy compat (redundant
+        # sample["json"] = out_path line removed).
+        _register_or_update_method_ref(sample, out_path, family=kind)
         refresh_tree()
 
         return out_path
@@ -5237,7 +5371,7 @@ def open_prepare_dataset_window():
 
         # build v1 dict from current tree/files (your existing builder)
         v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=family)  # see note below
-        files["_method_v1_cache"] = v1
+        files[f"_method_v1_cache_{family.upper()}"] = v1  #fixed 20260312 Test-B B1.2: family-keyed cache
 
         # decide output path
         if sample_method_folder:
@@ -5345,17 +5479,12 @@ def open_prepare_dataset_window():
         update_status_display(exp_name)
 
     #patch in 20260127 to apply new data structure of method json
+    # fixed 20260305 P1-B: import re, import uuid, and def _utc_now_iso() were moved to top of open_prepare_dataset_window()
     import os
-    import re
-    import uuid
     from datetime import datetime
 
     JSON_TYPE_METHOD = "glycomsp.method"   # keep consistent with your constants
     SCHEMA_V1 = "1.0.0"
-
-    def _utc_now_iso():
-        # RFC3339-ish without microseconds
-        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
     # --- safe loader ---
     def safe_get_field(d, key, fallback="(not linked)"):
@@ -5668,13 +5797,17 @@ def open_prepare_dataset_window():
             v1["inputs"]["ion_list"] = {"path": os.path.normpath(ion_path)}
             v1["inputs"]["insilico_glycan_list"] = {"path": os.path.normpath(insilico_path)}
 
-        # Optional artifacts
-        if pl_path:
-            v1["artifacts"]["pseudolabels_tsv"] = {"path": os.path.normpath(pl_path)}
-        if train_path:
-            v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
-        if unlabeled_path:
-            v1["artifacts"]["unlabeled_csv"] = {"path": os.path.normpath(unlabeled_path)}
+        #fixed 20260312 Test-B B1.1: gate all CGA artifacts/inputs, prevents cross-contamination
+        # ion_list/insilico_glycan_list already gated above (in conditional inputs block).
+        # pseudolabels_tsv, trainable_csv, unlabeled_csv are CGA pipeline outputs only;
+        # MAS produces no pseudolabeling artifacts, so never include them in a MAS method.
+        if family == "CGA":
+            if pl_path:
+                v1["artifacts"]["pseudolabels_tsv"] = {"path": os.path.normpath(pl_path)}
+            if train_path:
+                v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
+            if unlabeled_path:
+                v1["artifacts"]["unlabeled_csv"] = {"path": os.path.normpath(unlabeled_path)}
 
         return v1
 
@@ -5719,8 +5852,10 @@ def open_prepare_dataset_window():
 
             experiment_projects[exp_name]["samples"][sample_name] = tree_entry
 
-            # optional: store the normalized v1 object for later “Save method v1”
-            experiment_projects[exp_name]["samples"][sample_name]["_method_v1_cache"] = v1_obj
+            # optional: store the normalized v1 object for later "Save method v1"
+            #fixed 20260312 Test-B B1.2: family-keyed cache; family derived from the loaded v1 object
+            _loaded_family = ((v1_obj or {}).get("method") or {}).get("family") or "UNKNOWN"
+            experiment_projects[exp_name]["samples"][sample_name][f"_method_v1_cache_{_loaded_family.upper()}"] = v1_obj
 
             loaded += 1
 
@@ -5998,19 +6133,26 @@ def open_prepare_dataset_window():
                 return
 
             try:
-                # (1) Build v1 dict and keep it in memory (so Export buttons can work even before autosave)
+                #fixed 20260312 Test-B B2: CGA auto-save with CSV-folder fallback (mirrors MAS logic)
+                # (1) Build v1 dict and keep in memory so Export buttons work before autosave
                 v1 = build_method_v1_from_tree(exp_name, sample_name, force_family="CGA")
-                files["_method_v1_cache"] = v1
+                files["_method_v1_cache_CGA"] = v1  #fixed 20260312 Test-B B1.2: family-keyed cache
 
-                # (2) If user configured a folder, autosave + register into _methods + set active json
-                if sample_method_folder:
+                # (2) Autosave: prefer sample_method_folder, fall back to CSV directory (like MAS)
+                base_dir = sample_method_folder or (
+                    os.path.dirname(files["csv"]) if files.get("csv") else None
+                )
+                if base_dir:
                     stamp = datetime.now().strftime("%Y%m%d")
                     out_name = f"{sample_name}.CGA.method.v1_{stamp}.json"
-                    out_path = os.path.join(sample_method_folder, out_name)
+                    out_path = os.path.join(base_dir, out_name)
+                    #fixed 20260313 Test-2: ensure parent directory exists
+                    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
                     with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(v1, f, indent=2, ensure_ascii=False)
-
                     _register_or_update_method_ref(files, out_path, family="CGA")
+                else:
+                    logger.log("[CGA] No method folder and no CSV path — CGA method JSON not auto-saved.")
 
             except Exception:
                 traceback.print_exc()
@@ -6970,180 +7112,6 @@ def open_ml_analysis_window():
         _safe_write_json(out, payload)
         return out
 
-    # ==================================
-    # TK PANEL: ML Parameter Editor Pane
-    # ==================================
-    def build_ml_params_panel(parent,
-                            get_current_context,
-                            on_effective_params_ready):
-        import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
-        from tkinter.scrolledtext import ScrolledText
-
-        ctx = get_current_context() or {}
-        exp_json_path = ctx.get("exp_json")
-        method_json_path = ctx.get("method_json")
-        working_params = ctx.get("current_params") or {}
-
-        frm = ttk.LabelFrame(parent, text="ML Parameters", padding=8)
-        frm.grid_columnconfigure(0, weight=1)
-        frm.grid_columnconfigure(1, weight=1)
-        frm.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-
-        # Editable JSON text
-        ttk.Label(frm, text="Editable (this panel's params):").grid(row=0, column=0, sticky="w")
-        edit_box = ScrolledText(frm, height=14, wrap="none")
-        edit_box.grid(row=1, column=0, sticky="nsew", padx=(0,4))
-        # Effective (preview after merge)
-        ttk.Label(frm, text="Effective (Builtins ← Exp ← Method):").grid(row=0, column=1, sticky="w")
-        eff_box = ScrolledText(frm, height=14, wrap="none", state="disabled")
-        eff_box.grid(row=1, column=1, sticky="nsew")
-
-        def _set_edit_box_from_dict(d):
-            edit_box.delete("1.0", "end")
-            edit_box.insert("1.0", json.dumps(d or {}, indent=2, ensure_ascii=False))
-
-        def _set_eff_box_from_dict(d):
-            eff_box.configure(state="normal")
-            eff_box.delete("1.0", "end")
-            eff_box.insert("1.0", json.dumps(d or {}, indent=2, ensure_ascii=False))
-            eff_box.configure(state="disabled")
-
-        def _current_edit_dict():
-            try:
-                return json.loads(edit_box.get("1.0", "end").strip() or "{}")
-            except Exception as e:
-                messagebox.showerror("Invalid JSON", f"Could not parse parameters:\n{e}")
-                return None
-
-        def _refresh_effective_preview():
-            exp_def = read_ml_defaults_from_exp(exp_json_path) if exp_json_path else None
-            meth_ov = read_ml_overrides_from_method(method_json_path) if method_json_path else None
-            # The editor holds the *active layer* user is editing. Choose which layer?
-            # By default, we treat editor content as what will be *applied* somewhere later.
-            # For preview, just show how it would look if applied at the method level:
-            try:
-                edited = _current_edit_dict() or {}
-            except Exception:
-                edited = {}
-            effective = merge_ml_params(BUILTIN_ML, exp_def, edited if meth_ov is None else _deep_merge(meth_ov, edited))
-            _set_eff_box_from_dict(effective)
-
-        # Initialize editor with either method overrides, else exp defaults, else builtins
-        initial = read_ml_overrides_from_method(method_json_path) if method_json_path else None
-        if initial is None:
-            initial = read_ml_defaults_from_exp(exp_json_path) if exp_json_path else None
-        if initial is None:
-            initial = working_params or BUILTIN_ML
-        _set_edit_box_from_dict(initial)
-        _refresh_effective_preview()
-
-        # ---- Buttons row
-        btns = ttk.Frame(frm); btns.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6,0))
-        for i in range(6): btns.grid_columnconfigure(i, weight=1)
-
-        def _load_from_file():
-            path = filedialog.askopenfilename(title="Load ML params JSON",
-                                            filetypes=[("JSON", "*.json"), ("All files","*.*")])
-            if not path: return
-            d = load_ml_params_from_json(path)
-            if d is None:
-                messagebox.showerror("Load failed", "Could not read JSON parameters.")
-                return
-            _set_edit_box_from_dict(d); _refresh_effective_preview()
-
-        def _save_to_file():
-            path = filedialog.asksaveasfilename(title="Save ML params JSON",
-                                                defaultextension=".json",
-                                                filetypes=[("JSON", "*.json"), ("All files","*.*")])
-            if not path: return
-            d = _current_edit_dict()
-            if d is None: return
-            ok = save_ml_params_to_json(path, d)
-            if not ok:
-                messagebox.showerror("Save failed", "Could not save JSON parameters.")
-            else:
-                messagebox.showinfo("Saved", f"Saved parameters to:\n{path}")
-
-        def _pull_from_exp():
-            if not exp_json_path:
-                messagebox.showwarning("No experiment file", "No .exp.json is active.")
-                return
-            d = read_ml_defaults_from_exp(exp_json_path)
-            if d is None:
-                messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
-                return
-            _set_edit_box_from_dict(d); _refresh_effective_preview()
-
-        def _pull_from_method():
-            if not method_json_path:
-                messagebox.showwarning("No method file", "No .method.json is active.")
-                return
-            d = read_ml_overrides_from_method(method_json_path)
-            if d is None:
-                messagebox.showinfo("No overrides", "This sample has no ml_overrides yet.")
-                return
-            _set_edit_box_from_dict(d); _refresh_effective_preview()
-
-        def _apply_to_exp():
-            if not exp_json_path:
-                messagebox.showwarning("No experiment file", "No .exp.json is active.")
-                return
-            d = _current_edit_dict()
-            if d is None: return
-            if write_ml_defaults_to_exp(exp_json_path, d):
-                messagebox.showinfo("Applied", f"Updated ml_defaults in:\n{exp_json_path}")
-            else:
-                messagebox.showerror("Failed", "Could not write to experiment JSON.")
-            _refresh_effective_preview()
-
-        def _apply_to_method():
-            if not method_json_path:
-                messagebox.showwarning("No method file", "No .method.json is active.")
-                return
-            d = _current_edit_dict()
-            if d is None: return
-            if write_ml_overrides_to_method(method_json_path, d):
-                messagebox.showinfo("Applied", f"Updated ml_overrides in:\n{method_json_path}")
-            else:
-                messagebox.showerror("Failed", "Could not write to method JSON.")
-            _refresh_effective_preview()
-
-        def _reset_builtins():
-            _set_edit_box_from_dict(BUILTIN_ML); _refresh_effective_preview()
-
-        def _validate_and_use():
-            d = _current_edit_dict()
-            if d is None: return
-            # Merge for runtime (method layer gets editor content if a method exists)
-            exp_def = read_ml_defaults_from_exp(exp_json_path) if exp_json_path else None
-            meth_ov = read_ml_overrides_from_method(method_json_path) if method_json_path else None
-            effective = merge_ml_params(BUILTIN_ML, exp_def, _deep_merge(meth_ov or {}, d))
-            on_effective_params_ready(effective)
-            messagebox.showinfo("Parameters ready", "Effective ML parameters are validated and ready to use.")
-            _set_eff_box_from_dict(effective)
-
-
-
-        ttk.Button(btns, text="Load…", command=_load_from_file).grid(row=0, column=0, sticky="ew", padx=2)
-        ttk.Button(btns, text="Save…", command=_save_to_file).grid(row=0, column=1, sticky="ew", padx=2)
-        ttk.Button(btns, text="Pull from Experiment", command=_pull_from_exp).grid(row=0, column=2, sticky="ew", padx=2)
-        ttk.Button(btns, text="Pull from Sample", command=_pull_from_method).grid(row=0, column=3, sticky="ew", padx=2)
-        ttk.Button(btns, text="Apply to Experiment", command=_apply_to_exp).grid(row=0, column=4, sticky="ew", padx=2)
-        ttk.Button(btns, text="Apply to Sample", command=_apply_to_method).grid(row=0, column=5, sticky="ew", padx=2)
-
-        btns2 = ttk.Frame(frm); btns2.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6,0))
-        btns2.grid_columnconfigure(0, weight=1); btns2.grid_columnconfigure(1, weight=1)
-        ttk.Button(btns2, text="Reset to Built-ins", command=_reset_builtins).grid(row=0, column=0, sticky="ew", padx=2)
-        ttk.Button(btns2, text="Validate & Use", command=_validate_and_use).grid(row=0, column=1, sticky="ew", padx=2)
-
-        # Recompute preview on edits
-        def _on_edit(*_):
-            _refresh_effective_preview()
-        edit_box.bind("<<Modified>>", lambda e: (edit_box.edit_modified(False), _on_edit()))
-
-        return frm  # in case you want to pack/place/grid differently from caller
-
     predict_input_path = None
     train_csv_path = None
     linked_exp_json = None
@@ -7187,6 +7155,7 @@ def open_ml_analysis_window():
                     out[k] = v
         return out
 
+    # active implementation — fixed 20260305 P2-C: duplicate removed
     def build_ml_params_panel(parent, get_current_context, on_effective_params_ready):
         box = ttk.LabelFrame(parent, text="ML Parameters"); box.grid_columnconfigure(0, weight=1); box.grid_columnconfigure(1, weight=1)
 
@@ -7887,7 +7856,7 @@ def open_ml_analysis_window():
             nonlocal effective_ml_params
             eff_local = _merge_ml(BUILTIN_ML, snapshot_train_vars())
             # Don’t overwrite global effective here; we only show a summary hint.
-            # The real commit is done by ML Parameters → “Validate & Use”.
+            # The real commit is done by ML Parameters → "Validate & Use".
             _update_ml_summary()
             settings.destroy()
 
@@ -8354,7 +8323,7 @@ def open_ml_analysis_window():
         # --- end glycan-only report ---
 
         # notify
-        # build a robust “cap” line that works for both modes
+        # build a robust "cap" line that works for both modes
         cap_applied_to = info.get("majority_cap_applied_to") or info.get("train_majority_cap_applied_to")
         cap_value      = info.get("majority_cap") or info.get("train_majority_cap")
         cap_prefix     = "Capped training " if info.get("mode") == "cap_training_only" else "Capped "
@@ -9027,7 +8996,7 @@ def open_ml_analysis_window():
                             try:    return _canon_comp(x)
                             except: return str(x).strip()
 
-                        # build a quick “masses found?” map
+                        # build a quick "masses found?" map
                         # If you created comp2masses above, reuse it; otherwise reconstruct it here:
                         # comp2masses = {...}  # already built earlier
 
@@ -9512,7 +9481,7 @@ def open_ml_analysis_window():
                 if np.any(mask):
                     feature_row[str(target)] = float(np.log10(np.max(intensity_array[mask])) + 1.0) #fixed 20260122
                 else:
-                    feature_row[str(target)] = 1.0  # keep “1.0” default you were using
+                    feature_row[str(target)] = 1.0  # keep "1.0" default you were using
 
             out_rows.append(feature_row)
 
@@ -9995,7 +9964,7 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.0 Build 20260202 core v1.012")
+root.title("GlycoMSP File Manager GUI v1.1 Build 20260316 core v1.1")
 root.geometry("800x480")
 root.minsize(800, 480)
 
