@@ -1,52 +1,22 @@
 from __future__ import annotations
-
+version = "0.6"
+#202603231826(GMT+9) - Latest timestamp
+#202603231800(GMT+9) 
 #20260322 validation finished
 #20260322 biological intents check 
-#20260322-23 adjust the score
+#20260323 adjust the score - start from v3
 #20260323-24 binding current workflow
 #20260324-26 add into GUI
 #will move the code to msp_CGA_structscore.py when we start implementing CGA score B
 
-"""
-Score B skeleton for GlycoMSP CGA motif-based scoring.
-
-Purpose
--------
-This file is a structured starting point for implementing the Excel-driven
-Score B engine discussed in the design session.
-
-Current scope
--------------
-Phase 1
-    - workbook loading
-    - sheet/column validation
-    - dataclass construction
-    - TargetHierarchy compilation
-
-Phase 2
-    - Pass-1 evaluation (direct evidence)
-
-Phase 3
-    - Pass-2 evaluation (gated / derived evidence)
-
-Placeholders are intentionally kept for:
-    - MotifPolicy handling
-    - CompositionConsistency penalties
-    - UnexpectedEvidencePenalty
-    - candidate-level final Score B aggregation
-
-Notes
------
-1. parent_target_id is treated as a context gate, not hierarchy inheritance.
-2. TargetHierarchy is only used for group expansion / gate resolution / penalties.
-3. interpretation_v2 contains positive support rules only.
-4. Non-MS3 targets should be explicitly defined in Excel; no implicit inheritance.
-"""
+#20260329 score B GUI integration
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+import ast
+import re
 import pandas as pd
 
 
@@ -237,10 +207,12 @@ class TargetEvidence:
     # Runtime rows that positively contributed score in this run.
     supported_rule_rows: list[int] = field(default_factory=list)
 
-    # Optional future debug/count fields
-    # rule_count_total: int = 0
-    # rule_count_active: int = 0
-    # rule_count_supported: int = 0
+    # Phase 5A runtime summary fields
+    logic_mode: str = "OR"
+    partial_score: float = 0.0
+    logic_satisfied: bool = False
+    active_rule_count: int = 0
+    supported_rule_count: int = 0
 
     @property
     def total_raw_score(self) -> float:
@@ -274,6 +246,41 @@ class ScoreBResult:
     target_evidence: dict[str, TargetEvidence]
     applied_comp_rules: list[dict[str, Any]] = field(default_factory=list)
     applied_unexpected_rules: list[dict[str, Any]] = field(default_factory=list)
+
+    # Phase 5A debug payloads
+    candidate_mask_trace: Optional[CandidateTargetMaskTrace] = None
+    scoring_units: list[ScoringUnit] = field(default_factory=list)
+    aggregation_debug: dict[str, float] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class MotifPolicyMatch:
+    row_idx: int
+    flag_id: str
+    target_id: str
+    activation_mode: str
+    include_descendants: bool
+    flag_value: Optional[bool]
+    is_active: bool
+    expanded_targets: list[str]
+
+
+@dataclass
+class CandidateTargetMaskTrace:
+    input_flags: dict[str, bool]
+    matched_policy_rows: list[MotifPolicyMatch] = field(default_factory=list)
+    selected_root_targets: list[str] = field(default_factory=list)
+    selected_concrete_targets: list[str] = field(default_factory=list)
+    unmatched_flags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ScoringUnit:
+    unit_id: str
+    source_target_ids: list[str]
+    score: float
+    logic_satisfied: bool
+    weight: float = 1.0
+    unit_kind: str = "leaf"
 
 
 # ---------------------------------------------------------------------------
@@ -928,8 +935,8 @@ class ScoreBEngine:
             target_evidence=target_evidence,
             pass_name="pass2",
         )
-
-        self._finalize_support_flags(target_evidence)
+        self._finalize_target_evidence_logic(target_evidence)
+        #self._finalize_support_flags(target_evidence)
 
         return GlobalEvidenceResult(
             target_evidence=target_evidence,
@@ -1094,21 +1101,48 @@ class ScoreBEngine:
         if is_supported:
             te.supported_rule_rows.append(rule.row_idx)
 
-    def _finalize_support_flags(self, target_evidence: dict[str, TargetEvidence]) -> None:
-        """
-        Current simple support definition:
-            supported if total_raw_score > 0
+    def _resolve_target_logic_mode(self, target_id: str) -> str:
+        rules = self.config.rules_by_target_id.get(target_id, [])
+        if not rules:
+            return "OR"
 
-        Later, if target-level AND / OR logic requires stricter aggregation,
-        this should be replaced by target-wise logic evaluation using the stored
-        per-rule results.
-        """
-        for te in target_evidence.values():
-            te.supported = te.total_raw_score > 0
+        logics = {str(r.logic).strip().upper() for r in rules}
+        if len(logics) > 1:
+            raise WorkbookValidationError(
+                f"target_id {target_id!r} mixes multiple logic modes at runtime: {sorted(logics)}"
+            )
+        return next(iter(logics)) if logics else "OR"
 
+    def _finalize_target_evidence_logic(
+        self,
+        target_evidence: dict[str, TargetEvidence],
+    ) -> None:
+        """
+        Phase 5A target-level finalization.
+
+        - partial_score keeps the continuous evidence strength
+        - logic_satisfied enforces target-level AND / OR semantics
+        - supported is aligned to logic_satisfied
+        """
+        for target_id, te in target_evidence.items():
             te.contributing_rule_rows = sorted(set(te.contributing_rule_rows))
             te.active_rule_rows = sorted(set(te.active_rule_rows))
             te.supported_rule_rows = sorted(set(te.supported_rule_rows))
+
+            te.logic_mode = self._resolve_target_logic_mode(target_id)
+            te.partial_score = te.normalized_score
+            te.active_rule_count = len(te.active_rule_rows)
+            te.supported_rule_count = len(te.supported_rule_rows)
+
+            if te.logic_mode == "AND":
+                te.logic_satisfied = (
+                    te.active_rule_count > 0
+                    and te.supported_rule_count == te.active_rule_count
+                )
+            else:
+                te.logic_satisfied = te.supported_rule_count > 0
+
+            te.supported = te.logic_satisfied
 
 
 # ---------------------------------------------------------------------------
@@ -1138,19 +1172,30 @@ class CandidateScoreBScorer:
         candidate_flags: Optional[dict[str, bool]] = None,
     ) -> ScoreBResult:
         """
-        Placeholder for later phases.
-
-        Planned flow:
-            1. Apply MotifPolicy / candidate target mask.
-            2. Compute motif support score from target evidence.
-            3. Apply CompositionConsistency penalties.
-            4. Apply UnexpectedEvidencePenalty.
-            5. Clamp final score to [0, 1].
+        Phase 5A flow:
+            1. Resolve MotifPolicy candidate mask trace.
+            2. Build policy-selected scoring units.
+            3. Compute default motif support.
+            4. Apply CompositionConsistency penalties.
+            5. Apply UnexpectedEvidencePenalty.
+            6. Clamp final score to [0, 1].
         """
-        motif_support = self._compute_motif_support_score(
+        candidate_mask_trace = self.build_candidate_target_mask_trace(candidate_flags)
+        scoring_units = self._build_scoring_units_from_mask(
             global_evidence.target_evidence,
-            candidate_flags=candidate_flags,
+            candidate_mask_trace,
         )
+
+        if scoring_units:
+            motif_support = self._compute_motif_support_score_default(scoring_units)
+        else:
+            motif_support = self._compute_motif_support_score(
+                global_evidence.target_evidence,
+                candidate_flags=candidate_flags,
+            )
+
+        aggregation_debug = self._compute_strength_coverage_summary(scoring_units)
+
         composition_penalty, applied_comp_rules = self._compute_composition_penalty(
             target_evidence=global_evidence.target_evidence,
             candidate_composition=candidate_composition,
@@ -1160,7 +1205,10 @@ class CandidateScoreBScorer:
             candidate_flags=candidate_flags,
         )
 
-        final_score = max(0.0, min(1.0, motif_support - composition_penalty - unexpected_penalty))
+        final_score = max(
+            0.0,
+            min(1.0, motif_support - composition_penalty - unexpected_penalty),
+        )
         return ScoreBResult(
             candidate_composition=candidate_composition,
             motif_support_score=motif_support,
@@ -1170,7 +1218,193 @@ class CandidateScoreBScorer:
             target_evidence=global_evidence.target_evidence,
             applied_comp_rules=applied_comp_rules,
             applied_unexpected_rules=applied_unexpected_rules,
+            candidate_mask_trace=candidate_mask_trace,
+            scoring_units=scoring_units,
+            aggregation_debug=aggregation_debug,
         )
+
+    def _normalize_candidate_flags(
+        self,
+        candidate_flags: Optional[dict[str, bool]] = None,
+    ) -> dict[str, bool]:
+        if not candidate_flags:
+            return {}
+        return {str(k): bool(v) for k, v in candidate_flags.items()}
+
+    def _is_policy_rule_active(
+        self,
+        rule: MotifPolicyRule,
+        candidate_flags: dict[str, bool],
+    ) -> tuple[Optional[bool], bool]:
+        mode = str(rule.activation_mode).strip().lower()
+        flag_value = candidate_flags.get(rule.flag_id)
+
+        if mode in {"always"}:
+            return flag_value, True
+        if mode in {"when_true", "true", "if_true", "enable"}: #currently in sheet, it is enable when flags are selected
+            return flag_value, bool(flag_value) is True
+        if mode in {"when_false", "false", "if_false", "disable"}:
+            return flag_value, (flag_value is False)
+
+        raise WorkbookValidationError(
+            f"Unsupported MotifPolicy activation_mode {rule.activation_mode!r} "
+            f"at row {rule.row_idx}"
+        )
+
+    def build_candidate_target_mask_trace(
+        self,
+        candidate_flags: Optional[dict[str, bool]] = None,
+    ) -> CandidateTargetMaskTrace:
+        flags = self._normalize_candidate_flags(candidate_flags)
+
+        matched_policy_rows: list[MotifPolicyMatch] = []
+        selected_root_targets: set[str] = set()
+        selected_concrete_targets: set[str] = set()
+
+        for rule in sorted(self.config.motif_policy_rules, key=lambda r: r.row_idx):
+            flag_value, is_active = self._is_policy_rule_active(rule, flags)
+
+            expanded_targets: list[str] = []
+            if is_active:
+                selected_root_targets.add(rule.target_id)
+                if rule.include_descendants:
+                    expanded = self.config.hierarchy_index.expand_target(rule.target_id)
+                    expanded_targets = sorted(expanded) if expanded else [rule.target_id]
+                else:
+                    expanded_targets = [rule.target_id]
+
+                for target_id in expanded_targets:
+                    selected_concrete_targets.add(target_id)
+
+            matched_policy_rows.append(
+                MotifPolicyMatch(
+                    row_idx=rule.row_idx,
+                    flag_id=rule.flag_id,
+                    target_id=rule.target_id,
+                    activation_mode=rule.activation_mode,
+                    include_descendants=rule.include_descendants,
+                    flag_value=flag_value,
+                    is_active=is_active,
+                    expanded_targets=expanded_targets,
+                )
+            )
+
+        known_flag_ids = {r.flag_id for r in self.config.motif_policy_rules}
+        unmatched_flags = sorted(set(flags) - known_flag_ids)
+
+        return CandidateTargetMaskTrace(
+            input_flags=flags,
+            matched_policy_rows=matched_policy_rows,
+            selected_root_targets=sorted(selected_root_targets),
+            selected_concrete_targets=sorted(selected_concrete_targets),
+            unmatched_flags=unmatched_flags,
+        )
+
+    def _get_selected_targets_from_trace(
+        self,
+        trace: CandidateTargetMaskTrace,
+    ) -> list[str]:
+        return list(trace.selected_concrete_targets)
+
+    def _build_scoring_units_from_mask(
+        self,
+        target_evidence: dict[str, TargetEvidence],
+        trace: CandidateTargetMaskTrace,
+    ) -> list[ScoringUnit]:
+        units: list[ScoringUnit] = []
+
+        for match in trace.matched_policy_rows:
+            if not match.is_active:
+                continue
+
+            source_target_ids = list(match.expanded_targets)
+            if not source_target_ids:
+                continue
+
+            if len(source_target_ids) == 1:
+                target_id = source_target_ids[0]
+                te = target_evidence.get(target_id)
+                score = te.partial_score if te is not None else 0.0
+                logic_satisfied = te.logic_satisfied if te is not None else False
+                unit_kind = "leaf"
+            else:
+                tes = [target_evidence.get(tid) for tid in source_target_ids]
+                valid_tes = [te for te in tes if te is not None]
+
+                if valid_tes:
+                    score = max(te.partial_score for te in valid_tes)
+                    logic_satisfied = any(te.logic_satisfied for te in valid_tes)
+                else:
+                    score = 0.0
+                    logic_satisfied = False
+                unit_kind = "group"
+
+            units.append(
+                ScoringUnit(
+                    unit_id=f"policy_row_{match.row_idx}:{match.target_id}",
+                    source_target_ids=source_target_ids,
+                    score=score,
+                    logic_satisfied=logic_satisfied,
+                    weight=1.0,
+                    unit_kind=unit_kind,
+                )
+            )
+
+        return units
+
+    def _compute_motif_support_score_default(
+        self,
+        scoring_units: list[ScoringUnit],
+    ) -> float:
+        if not scoring_units:
+            return 0.0
+
+        total_weight = sum(unit.weight for unit in scoring_units)
+        if total_weight <= 0:
+            return 0.0
+
+        return sum(unit.score * unit.weight for unit in scoring_units) / total_weight
+
+    def _compute_motif_support_score_experimental(
+        self,
+        scoring_units: list[ScoringUnit],
+    ) -> float:
+        # Placeholder hook for future comparison designs.
+        return self._compute_motif_support_score_default(scoring_units)
+
+    def _compute_strength_coverage_summary(
+        self,
+        scoring_units: list[ScoringUnit],
+    ) -> dict[str, float]:
+        if not scoring_units:
+            return {
+                "strength_mean": 0.0,
+                "coverage_mean": 0.0,
+                "hybrid_score": 0.0,
+            }
+
+        total_weight = sum(unit.weight for unit in scoring_units)
+        if total_weight <= 0:
+            return {
+                "strength_mean": 0.0,
+                "coverage_mean": 0.0,
+                "hybrid_score": 0.0,
+            }
+
+        strength_mean = (
+            sum(unit.score * unit.weight for unit in scoring_units) / total_weight
+        )
+        coverage_mean = (
+            sum((1.0 if unit.logic_satisfied else 0.0) * unit.weight for unit in scoring_units)
+            / total_weight
+        )
+        hybrid_score = 0.7 * strength_mean + 0.3 * coverage_mean
+
+        return {
+            "strength_mean": strength_mean,
+            "coverage_mean": coverage_mean,
+            "hybrid_score": hybrid_score,
+        }
 
     def _compute_motif_support_score(
         self,
@@ -1179,17 +1413,26 @@ class CandidateScoreBScorer:
         candidate_flags: Optional[dict[str, bool]] = None,
     ) -> float:
         """
-        Temporary default implementation.
+        Phase 5A default implementation.
 
-        Current behavior:
-            - average normalized score across all concrete targets
-
-        Replace later with policy-aware target masking / weighting.
+        Behavior:
+            - resolve candidate-relevant policy rows
+            - expand to concrete targets
+            - collapse descendants per active MotifPolicy row
+            - average policy-selected scoring units
         """
         if not target_evidence:
             return 0.0
-        vals = [te.normalized_score for te in target_evidence.values()]
-        return sum(vals) / len(vals)
+
+        trace = self.build_candidate_target_mask_trace(candidate_flags)
+        scoring_units = self._build_scoring_units_from_mask(target_evidence, trace)
+
+        if scoring_units:
+            return self._compute_motif_support_score_default(scoring_units)
+
+        # Fallback for cases where no MotifPolicy row is active:
+        vals = [te.partial_score for te in target_evidence.values()]
+        return sum(vals) / len(vals) if vals else 0.0
 
     def _compute_composition_penalty(
         self,
@@ -1440,14 +1683,15 @@ def summarize_target_evidence(evidence: GlobalEvidenceResult) -> pd.DataFrame:
                 "total_raw_score": s.total_raw_score,
                 "total_max_score": s.total_max_score,
                 "normalized_score": s.normalized_score,
+                "partial_score": s.partial_score,
+                "logic_mode": s.logic_mode,
+                "active_rule_count": s.active_rule_count,
+                "supported_rule_count": s.supported_rule_count,
+                "logic_satisfied": s.logic_satisfied,
                 "supported": s.supported,
                 "contributing_rule_rows": ",".join(map(str, s.contributing_rule_rows)),
                 "active_rule_rows": ",".join(map(str, s.active_rule_rows)),
                 "supported_rule_rows": ",".join(map(str, s.supported_rule_rows)),
-                # Optional future count fields
-                # "rule_count_total": s.rule_count_total,
-                # "rule_count_active": s.rule_count_active,
-                # "rule_count_supported": s.rule_count_supported,
             }
         )
 
@@ -1474,6 +1718,39 @@ def summarize_rule_evaluations(evaluations: Iterable[RuleEvaluation]) -> pd.Data
                 "supported": ev.supported,
                 "row_score": ev.row_score,
                 "status": ev.status,
+            }
+        )
+    return pd.DataFrame(rows)
+
+def summarize_candidate_mask_trace(trace: CandidateTargetMaskTrace) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for match in trace.matched_policy_rows:
+        rows.append(
+            {
+                "row_idx": match.row_idx,
+                "flag_id": match.flag_id,
+                "flag_value": match.flag_value,
+                "activation_mode": match.activation_mode,
+                "is_active": match.is_active,
+                "target_id": match.target_id,
+                "include_descendants": match.include_descendants,
+                "expanded_targets": ",".join(match.expanded_targets),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def summarize_scoring_units(scoring_units: list[ScoringUnit]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for unit in scoring_units:
+        rows.append(
+            {
+                "unit_id": unit.unit_id,
+                "unit_kind": unit.unit_kind,
+                "source_target_ids": ",".join(unit.source_target_ids),
+                "score": unit.score,
+                "logic_satisfied": unit.logic_satisfied,
+                "weight": unit.weight,
             }
         )
     return pd.DataFrame(rows)
@@ -1515,6 +1792,435 @@ def evaluate_candidate_score_b(
         candidate_flags=candidate_flags,
     )
 
+############################################################
+# ---------------------------------------------------------------------------
+# Runtime TSV enrichment helpers for CGA integration
+# ---------------------------------------------------------------------------
+
+_COMP_PAT = re.compile(r"(KDN|F|H|N|S|G)(\d+)", re.IGNORECASE)
+
+
+def parse_compact_composition_label(label: str) -> tuple[int, int, int, int, int, int]:
+    """
+    Parse compact composition labels into internal tuple order:
+    (H, N, S, G, KDN, F)
+
+    Examples
+    --------
+    F1H3N3KDN1 -> (3, 3, 0, 0, 1, 1)
+    H5N4S1     -> (5, 4, 1, 0, 0, 0)
+    """
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError(f"Invalid composition label: {label!r}")
+
+    matches = _COMP_PAT.findall(label)
+    if not matches:
+        raise ValueError(f"Composition label contains no recognized tokens: {label!r}")
+
+    counts = {"F": 0, "H": 0, "N": 0, "S": 0, "G": 0, "KDN": 0}
+    for token, value in matches:
+        token = "KDN" if token.upper() == "KDN" else token.upper()
+        counts[token] = counts.get(token, 0) + int(value)
+
+    return (
+        counts.get("H", 0),
+        counts.get("N", 0),
+        counts.get("S", 0),
+        counts.get("G", 0),
+        counts.get("KDN", 0),
+        counts.get("F", 0),
+    )
+
+
+def parse_numeric_tuple_string(text: Any) -> list[float]:
+    if text is None or (isinstance(text, float) and pd.isna(text)):
+        return []
+    if isinstance(text, (list, tuple)):
+        return [float(x) for x in text]
+    if not isinstance(text, str):
+        raise ValueError(f"Expected tuple-style numeric string, got {type(text).__name__}: {text!r}")
+
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    try:
+        value = ast.literal_eval(stripped)
+    except Exception as exc:
+        raise ValueError(f"Could not parse tuple-style numeric string: {text!r}") from exc
+
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"Parsed value is not list/tuple-like: {value!r}")
+    return [float(x) for x in value]
+
+
+def build_peak_pairs_from_row(row: pd.Series) -> list[tuple[float, float]]:
+    mzs = parse_numeric_tuple_string(row.get("peaklist"))
+    intensities = parse_numeric_tuple_string(row.get("peakintensity"))
+
+    if len(mzs) != len(intensities):
+        raise ValueError(
+            f"peaklist / peakintensity length mismatch for MS2scan_no={row.get('MS2scan_no')}: "
+            f"{len(mzs)} != {len(intensities)}"
+        )
+    return list(zip(mzs, intensities))
+
+
+def ppm_error(observed_mz: float, theoretical_mz: float) -> float:
+    if theoretical_mz == 0:
+        raise ZeroDivisionError("theoretical_mz cannot be zero")
+    return (observed_mz - theoretical_mz) / theoretical_mz * 1_000_000.0
+
+
+def extract_observed_ion_hits_from_peaks(
+    peak_pairs: list[tuple[float, float]],
+    cfg: ScoreBConfig,
+    ppm_tolerance: float = 20.0,
+) -> list[ObservedIonHit]:
+    """
+    Match raw peak pairs against workbook ion definitions.
+
+    Current behavior:
+      - at most one best peak is kept per ion_struct_id
+      - best is defined by smallest absolute ppm error within tolerance
+    """
+    observed_hits: list[ObservedIonHit] = []
+
+    for ion_struct_id, ion_def in cfg.ions_by_struct_id.items():
+        best: Optional[tuple[float, float, float]] = None  # mz, intensity, ppm
+        for obs_mz, obs_intensity in peak_pairs:
+            err = ppm_error(obs_mz, ion_def.fragmentation_mass)
+            if abs(err) <= ppm_tolerance:
+                if best is None or abs(err) < abs(best[2]):
+                    best = (obs_mz, obs_intensity, err)
+        if best is not None:
+            obs_mz, obs_intensity, err = best
+            observed_hits.append(
+                ObservedIonHit(
+                    ion_struct_id=ion_struct_id,
+                    mz=obs_mz,
+                    intensity=obs_intensity,
+                    ppm_error=err,
+                )
+            )
+
+    return observed_hits
+
+
+def _normalize_runtime_mode(value: Any, *, kind: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "any"
+
+    up = text.upper()
+
+    if kind == "charge":
+        if up in {"POS", "POSITIVE", "+"}:
+            return "POS"
+        if up in {"NEG", "NEGATIVE", "-"}:
+            return "NEG"
+        if up in {"ANY", "ALL", "*"}:
+            return "any"
+        return up
+
+    if kind == "derivatization":
+        # adjust these aliases later if your workbook standard becomes stricter
+        if up in {"PERME", "PERMETHYLATED", "PERMETHYLATION", "PERMETHYL"}:
+            return "PERME"
+        if up in {"ANY", "ALL", "*", "NONE", "NATIVE"}:
+            return "any" if up in {"ANY", "ALL", "*"} else up
+        return up
+
+    return up
+
+
+def _build_score_b_motif_summary(result: ScoreBResult) -> str:
+    """
+    Slightly richer human-readable motif summary for TSV export.
+
+    Example:
+        "LeX(+); H1(+); LeA(-)"
+    """
+    supported_targets = sorted(
+        target_id
+        for target_id, te in result.target_evidence.items()
+        if getattr(te, "supported", False)
+    )
+
+    negative_targets: set[str] = set()
+
+    for rule in result.applied_comp_rules or []:
+        tgt = rule.get("trigger_target_id")
+        if tgt:
+            negative_targets.add(str(tgt))
+
+    for rule in result.applied_unexpected_rules or []:
+        tgt = rule.get("trigger_target_id")
+        if tgt:
+            negative_targets.add(str(tgt))
+
+    # avoid duplicating the same motif as both (+) and (-) in the same summary
+    negative_targets = {t for t in negative_targets if t not in supported_targets}
+
+    parts: list[str] = []
+    parts.extend(f"{t}(+)" for t in supported_targets)
+    parts.extend(f"{t}(-)" for t in sorted(negative_targets))
+
+    return "; ".join(parts)
+
+
+def enrich_cga_tsv_with_score_b(
+    pseudolabel_tsv_path: str | Path,
+    workbook_path: str | Path,
+    *,
+    candidate_flags: Optional[dict[str, bool]] = None,
+    ppm_tolerance: float = 20.0,
+    charge_mode: str = "any",
+    derivatization: str = "any",
+) -> str:
+    """
+    Enrich an existing CGA pseudolabel TSV in place with Score B columns.
+
+    Writes back to the same TSV path and returns that same path.
+    """
+    pseudolabel_tsv_path = str(pseudolabel_tsv_path)
+    workbook_path = str(workbook_path)
+
+    df = pd.read_csv(pseudolabel_tsv_path, sep="\t")
+    cfg = load_scoreb_workbook(workbook_path)
+
+    charge_mode = _normalize_runtime_mode(charge_mode, kind="charge")
+    derivatization = _normalize_runtime_mode(derivatization, kind="derivatization")
+
+    ## debug prints##
+    total_rows = len(df)
+    total_scans = df["MS2scan_no"].nunique() if "MS2scan_no" in df.columns else 0
+    rows_scored = 0
+    rows_skipped_empty_comp = 0
+    rows_skipped_invalid_comp = 0
+    ## debug prints ends##
+
+
+    # initialize output columns
+    df["score_b"] = pd.NA
+    df["score_b_rank"] = pd.NA
+    df["score_b_selected"] = False
+    df["score_b_support_score"] = pd.NA
+    df["score_b_composition_penalty"] = pd.NA
+    df["score_b_unexpected_penalty"] = pd.NA
+    df["score_b_motif_summary"] = ""
+    df["selection_source"] = df.get("selection_source", pd.Series([""] * len(df), index=df.index))
+    df["selected_composition"] = df.get("selected_composition", pd.Series([""] * len(df), index=df.index))
+
+    if "MS2scan_no" not in df.columns:
+        raise KeyError("CGA TSV does not contain required column 'MS2scan_no'")
+    if "composition" not in df.columns:
+        raise KeyError("CGA TSV does not contain required column 'composition'")
+    if "peaklist" not in df.columns or "peakintensity" not in df.columns:
+        raise KeyError("CGA TSV does not contain required columns 'peaklist' and 'peakintensity'")
+
+    for ms2scan_no, grp in df.groupby("MS2scan_no", sort=False):
+        row_results: list[tuple[int, ScoreBResult, str]] = []
+
+        for idx, row in grp.iterrows():
+            comp_value = row.get("composition", "")
+            if pd.isna(comp_value):
+                rows_skipped_empty_comp += 1
+                continue
+
+            comp_label = str(comp_value).strip()
+            if not comp_label or comp_label.lower() in {"nan", "none", "null"}:
+                rows_skipped_empty_comp += 1
+                continue
+
+            try:
+                candidate_composition = parse_compact_composition_label(comp_label)
+            except Exception:
+                rows_skipped_invalid_comp += 1
+                continue
+
+            peak_pairs = build_peak_pairs_from_row(row)
+            observed_hits = extract_observed_ion_hits_from_peaks(
+                peak_pairs,
+                cfg,
+                ppm_tolerance=ppm_tolerance,
+            )
+
+            spectrum = SpectrumEvidence(
+                observed_hits=observed_hits,
+                charge_mode=charge_mode,
+                derivatization=derivatization,
+            )
+            global_evidence = evaluate_global_motif_evidence(cfg, spectrum)
+            result = evaluate_candidate_score_b(
+                cfg,
+                global_evidence,
+                candidate_composition=candidate_composition,
+                candidate_flags=candidate_flags,
+            )
+
+            motif_summary = _build_score_b_motif_summary(result)
+            row_results.append((idx, result, motif_summary))
+            rows_scored += 1
+
+        if not row_results:
+            continue
+
+        row_results.sort(
+            key=lambda x: (
+                float(x[1].final_score_b),
+                float(x[1].motif_support_score),
+                -float(x[1].composition_penalty),
+                -float(x[1].unexpected_penalty),
+            ),
+            reverse=True,
+        )
+
+        selected_comp = str(df.at[row_results[0][0], "composition"]).strip()
+
+        for rank, (idx, result, motif_summary) in enumerate(row_results, start=1):
+            df.at[idx, "score_b"] = result.final_score_b
+            df.at[idx, "score_b_rank"] = rank
+            df.at[idx, "score_b_selected"] = (rank == 1)
+            df.at[idx, "score_b_support_score"] = result.motif_support_score
+            df.at[idx, "score_b_composition_penalty"] = result.composition_penalty
+            df.at[idx, "score_b_unexpected_penalty"] = result.unexpected_penalty
+            df.at[idx, "score_b_motif_summary"] = motif_summary
+            df.at[idx, "selection_source"] = "score_b"
+            df.at[idx, "selected_composition"] = selected_comp
+
+    #debug prints#
+    selected_rows = int(df["score_b_selected"].fillna(False).astype(bool).sum())
+    print(f"[score_b] workbook: {workbook_path}")
+    print(f"[score_b] tsv: {pseudolabel_tsv_path}")
+    print(f"[score_b] total rows: {total_rows}")
+    print(f"[score_b] total scans: {total_scans}")
+    print(f"[score_b] rows scored: {rows_scored}")
+    print(f"[score_b] rows skipped (empty composition): {rows_skipped_empty_comp}")
+    print(f"[score_b] rows skipped (invalid composition): {rows_skipped_invalid_comp}")
+    print(f"[score_b] selected rows: {selected_rows}")
+    #debug prints end#
+
+    df.to_csv(pseudolabel_tsv_path, sep="\t", index=False)
+    return pseudolabel_tsv_path
+
+
+
+
+# ---------------------------------------------------------------------------
+# Smoke Test/ QA function
+# ---------------------------------------------------------------------------
+#def run_gate_case(cfg: ScoreBConfig, case_name: str, observed_hits: list[ObservedIonHit]) -> None:
+def run_gate_case(
+    cfg: ScoreBConfig,
+    case_name: str,
+    observed_hits: list[ObservedIonHit],
+    focus_target_ids: Optional[list[str]] = None,
+    focus_row_indices: Optional[list[int]] = None,
+) -> GlobalEvidenceResult:
+    spectrum = SpectrumEvidence(
+        observed_hits=observed_hits,
+        charge_mode="any",
+        derivatization="any",
+    )
+    evidence = evaluate_global_motif_evidence(cfg, spectrum)
+
+    focus_target_ids = focus_target_ids or []
+    focus_row_indices = focus_row_indices or []
+
+    print(f"\n=== {case_name} : target evidence ===")
+    target_df = summarize_target_evidence(evidence)
+    if focus_target_ids:
+        target_df = target_df[target_df["target_id"].isin(focus_target_ids)]
+    print(target_df.to_string(index=False) if not target_df.empty else "(no matching target rows)")
+
+    print(f"\n=== {case_name} : pass1 evals ===")
+    pass1_df = summarize_rule_evaluations(evidence.pass1_rule_evaluations)
+    if focus_row_indices:
+        pass1_df = pass1_df[pass1_df["row_idx"].isin(focus_row_indices)]
+    print(pass1_df.to_string(index=False) if not pass1_df.empty else "(no matching pass1 rows)")
+
+    print(f"\n=== {case_name} : pass2 evals ===")
+    pass2_df = summarize_rule_evaluations(evidence.pass2_rule_evaluations)
+    if focus_row_indices:
+        pass2_df = pass2_df[pass2_df["row_idx"].isin(focus_row_indices)]
+    print(pass2_df.to_string(index=False) if not pass2_df.empty else "(no matching pass2 rows)")
+
+    return evidence
+
+#def run_candidate_case(cfg: ScoreBConfig, case_name: str, observed_hits: list[ObservedIonHit], candidate_composition: tuple[int, int, int, int, int, int], candidate_flags: dict[str, bool]) -> None:
+def run_candidate_case(
+    cfg: ScoreBConfig,
+    case_name: str,
+    observed_hits: list[ObservedIonHit],
+    candidate_composition: tuple[int, int, int, int, int, int],
+    candidate_flags: dict[str, bool],
+    focus_target_ids: Optional[list[str]] = None,
+    focus_row_indices: Optional[list[int]] = None,
+) -> ScoreBResult:
+    spectrum = SpectrumEvidence(
+        observed_hits=observed_hits,
+        charge_mode="any",
+        derivatization="any",
+    )
+    evidence = evaluate_global_motif_evidence(cfg, spectrum)
+    result = evaluate_candidate_score_b(
+        cfg,
+        evidence,
+        candidate_composition=candidate_composition,
+        candidate_flags=candidate_flags,
+    )
+
+    print(f"\n=== {case_name} : pass1 evals ===")
+    print(summarize_rule_evaluations(evidence.pass1_rule_evaluations).to_string(index=False))
+
+    print(f"\n=== {case_name} : pass2 evals ===")
+    print(summarize_rule_evaluations(evidence.pass2_rule_evaluations).to_string(index=False))
+
+    print(f"\n=== {case_name} : target evidence ===")
+    print(summarize_target_evidence(evidence).to_string(index=False))
+
+    print_candidate_debug(result)
+
+
+def print_candidate_debug(result: ScoreBResult) -> None:
+    print("\n=== Candidate target mask trace ===")
+    if result.candidate_mask_trace is None:
+        print("(no trace)")
+    else:
+        print("input_flags:", result.candidate_mask_trace.input_flags)
+        print("selected_root_targets:", result.candidate_mask_trace.selected_root_targets)
+        print("selected_concrete_targets:", result.candidate_mask_trace.selected_concrete_targets)
+        print("unmatched_flags:", result.candidate_mask_trace.unmatched_flags)
+        trace_df = summarize_candidate_mask_trace(result.candidate_mask_trace)
+        if not trace_df.empty:
+            print(trace_df.to_string(index=False))
+
+    print("\n=== Scoring units ===")
+    units_df = summarize_scoring_units(result.scoring_units)
+    if units_df.empty:
+        print("(no scoring units)")
+    else:
+        print(units_df.to_string(index=False))
+
+    print("\n=== Aggregation debug ===")
+    print(result.aggregation_debug)
+
+    print("\n=== Candidate score B ===")
+    print("motif_support_score:", result.motif_support_score)
+    print("composition_penalty:", result.composition_penalty)
+    print("unexpected_penalty:", result.unexpected_penalty)
+    print("final_score_b:", result.final_score_b)
+
+    if result.applied_comp_rules:
+        print("\n=== Applied CompositionConsistency rules ===")
+        print(pd.DataFrame(result.applied_comp_rules).to_string(index=False))
+
+    if result.applied_unexpected_rules:
+        print("\n=== Applied UnexpectedEvidencePenalty rules ===")
+        print(pd.DataFrame(result.applied_unexpected_rules).to_string(index=False))
 
 # ---------------------------------------------------------------------------
 # Minimal smoke-test block
@@ -1524,48 +2230,125 @@ def evaluate_candidate_score_b(
 if __name__ == "__main__":
     # Example manual smoke test.
     # Replace the path and sample hits with your real development case.
-    workbook = Path(r"G:\其他電腦\My Computer\GlycoMSParser\2025_demo\GlycoMSP_scoring_update_example_v5.xlsx")
-
+    #workbook = Path(r"G:\其他電腦\My Computer\GlycoMSParser\2025_demo\GlycoMSP_scoring_update_example_v5.xlsx")
+    workbook = Path("GlycoMSP_scoring_update_example_v6.xlsx")
     if workbook.exists():
         cfg = load_scoreb_workbook(workbook)
+        OPEN_GATE_ION = "Neu5Ac(a2-6)GalNAc(b1-4)GlcNAc-"
+        CHILD_ION = "Neu5Ac(a2-6)GalNAc(b1-4)-"
+        #Test T07
+        run_candidate_case(
+    cfg,
+    "T07_integrated_candidate_score",
+    [
+        ObservedIonHit("Neu5Ac-", mz=0.0, intensity=700000.0, ppm_error=0.0),
+        ObservedIonHit("Neu5Ac[dCH3OH]-", mz=0.0, intensity=650000.0, ppm_error=0.0),
+        ObservedIonHit("Neu5AcGal(b1-4)GlcNAc-", mz=0.0, intensity=800000.0, ppm_error=0.0),
+    ],
+    candidate_composition=(3, 3, 1, 0, 0, 0),
+    candidate_flags={
+        "Allow5Ac": True,
+        "AllowLewis": False,
+        "Allow5Gc": False,
+        "AllowLDNC": False,
+        "AllowBG": False,
+        "AllowFuc": False,
+        "Forbid5Gc": False,
+        "Forbid5Ac": False,
+        "LeA_penalize_LeX": False,
+        "LeX_penalize_LeA": False,
+        "LeY_penalize_LeB": False,
+        "LeB_penalize_LeY": False,
+    },
+    focus_target_ids=[
+        "Neu5Ac",
+        "SialylAcLacNAc",
+        "SialylAcLDNC",
+        "LeA",
+        "LeX",
+        "Neu5Gc",
+    ],
+)
+    else:
+        print("Workbook not found for smoke test. Adjust __main__ path before testing.")
+"""
+        #Test T01
+        CHILD_ION = "Neu5Ac(a2-6)GalNAc(b1-4)-"
+        run_gate_case(
+            cfg,
+            "T01_gate_child_only",
+            [
+                ObservedIonHit("Neu5Ac(a2-6)GalNAc(b1-4)-", mz=0.0, intensity=900000.0, ppm_error=0.0),
+            ],
+            focus_target_ids=["SialylAcLDNC", "SialylAcGalNAc"],
+            focus_row_indices=[23, 26],
+        )
+        #Test T02
+        run_gate_case(
+    cfg,
+    "T02_gate_parent_only",
+    [
+        ObservedIonHit("Neu5Ac(a2-6)GalNAc(b1-4)GlcNAc-", mz=0.0, intensity=900000.0, ppm_error=0.0),
+    ],
+    focus_target_ids=["SialylAcLDNC", "SialylAcGalNAc"],
+    focus_row_indices=[23, 26],
+)
+        #Test T03  
+        run_gate_case(
+            cfg,
+            "T03_gate_parent_plus_child",
+            [
+                ObservedIonHit("Neu5Ac(a2-6)GalNAc(b1-4)GlcNAc-", mz=0.0, intensity=900000.0, ppm_error=0.0),
+                ObservedIonHit("Neu5Ac(a2-6)GalNAc(b1-4)-", mz=0.0, intensity=700000.0, ppm_error=0.0),
+            ],
+            focus_target_ids=["SialylAcLDNC", "SialylAcGalNAc"],
+            focus_row_indices=[23, 26],
+        )
+
+        #Test T04
+        run_gate_case(
+            cfg,
+            "T04_and_partial_neu5ac",
+            [
+                ObservedIonHit("Neu5Ac-", mz=0.0, intensity=500000.0, ppm_error=0.0),
+            ],
+            focus_target_ids=["Neu5Ac"],
+            focus_row_indices=[19, 20],
+        )
 
 
-        # ------------------------------
-        # Gate smoke test for row 23
-        # ------------------------------
-        # Goal:
-        #   Compare row-23 behavior with and without parent-gate evidence.
-        #
-        # Edit these two strings to match your workbook:
+        #Test T05
+        run_candidate_case(
+            cfg,
+            "T05_policy_trace_lewis",
+            [],
+            candidate_composition=(3, 3, 0, 0, 0, 1),
+            candidate_flags={
+                "AllowLewis": True,
+            },
+        )
+
+        #Test T06
+        run_candidate_case(
+    cfg,
+    "T06_policy_trace_lewis_5ac",
+    [],
+    candidate_composition=(3, 3, 1, 0, 0, 1),
+    candidate_flags={
+        "AllowLewis": True,
+        "Allow5Ac": True,
+    },
+)
+
+"""
+
+
+"""
+
         OPEN_GATE_ION = "Neu5Ac(a2-6)GalNAc(b1-4)GlcNAc-"
         CHILD_ION = "Neu5Ac(a2-6)GalNAc(b1-4)-"   # row 23 ion
-
-        def run_gate_case(case_name: str, observed_hits: list[ObservedIonHit]) -> None:
-            spectrum = SpectrumEvidence(
-                observed_hits=observed_hits,
-                charge_mode="any",
-                derivatization="any",
-            )
-            evidence = evaluate_global_motif_evidence(cfg, spectrum)
-
-            print(f"\n=== {case_name} : target evidence ===")
-            print(summarize_target_evidence(evidence).to_string(index=False))
-
-            print(f"\n=== {case_name} : pass1 evals ===")
-            pass1_df = summarize_rule_evaluations(evidence.pass1_rule_evaluations)
-            print(pass1_df[
-                pass1_df["target_id"].isin(["SialylAcLDNC", "SialylAcGalNAc"])
-            ].to_string(index=False))
-
-            print(f"\n=== {case_name} : pass2 evals ===")
-            pass2_df = summarize_rule_evaluations(evidence.pass2_rule_evaluations)
-            print(pass2_df[
-                (pass2_df["target_id"] == "SialylAcGalNAc")
-                | (pass2_df["ion_struct_id"] == CHILD_ION)
-            ].to_string(index=False))
-
         # Case A: child ion only -> expected blocked_by_gate
-        run_gate_case(
+        run_gate_case(cfg,
             "CASE_A_child_only",
             [
                 ObservedIonHit(
@@ -1576,45 +2359,12 @@ if __name__ == "__main__":
                 ),
             ],
         )
-
-        # Case B: parent-gate ion + child ion -> expected gate_open=True
-        run_gate_case(
-            "CASE_B_gate_opened",
-            [
-                ObservedIonHit(
-                    OPEN_GATE_ION,
-                    mz=0.0,
-                    intensity=500000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    CHILD_ION,
-                    mz=0.0,
-                    intensity=900000.0,
-                    ppm_error=0.0,
-                ),
-            ],
-        )
-        """
-        #below are all tests for score b skeleton
         spectrum = SpectrumEvidence(
             observed_hits=[
                 ObservedIonHit(
-                    "Neu5Ac-",
-                    mz=0.0,
-                    intensity=100000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Ac[dCH3OH]-",
-                    mz=0.0,
-                    intensity=600000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
                     "Neu5AcGal-",
                     mz=0.0,
-                    intensity=900000.0,
+                    intensity=1000.0,
                     ppm_error=0.0,
                 ),
             ],
@@ -1648,327 +2398,6 @@ if __name__ == "__main__":
             },
         )
 
-
-        print("\n=== Candidate score B ===")
-        print("motif_support_score:", result.motif_support_score)
-        print("composition_penalty:", result.composition_penalty)
-        print("unexpected_penalty:", result.unexpected_penalty)
-        print("final_score_b:", result.final_score_b)
-        print(pd.DataFrame(result.applied_comp_rules).to_string(index=False))
-        print(pd.DataFrame(result.applied_unexpected_rules).to_string(index=False))
-
-        
-        #test 4B-C (no S evidence but has composition)
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                # intentionally no sialyl-ac motif evidence
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-
-        evidence = evaluate_global_motif_evidence(cfg, spectrum)
-
-        print("=== Target evidence ===")
         print(summarize_target_evidence(evidence).to_string(index=False))
-
-        result = evaluate_candidate_score_b(
-            cfg,
-            evidence,
-            candidate_composition=(3, 3, 1, 0, 0, 0),   # S>=1
-            candidate_flags={
-                "Forbid5Gc": False,
-                "Forbid5Ac": False,
-                "LeA_penalize_LeX": False,
-                "LeX_penalize_LeA": False,
-                "LeY_penalize_LeB": False,
-                "LeB_penalize_LeY": False,
-            },
-        )
-        #test 4B-B (having G evidence without G)
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                ObservedIonHit(
-                    "Neu5Gc-",
-                    mz=0.0,
-                    intensity=30000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Gc(a2-6)GalNAc(b1-4)-",
-                    mz=0.0,
-                    intensity=50000.0,
-                    ppm_error=0.0,
-                ),
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-
-        evidence = evaluate_global_motif_evidence(cfg, spectrum)
-
-        print("=== Target evidence ===")
-        print(summarize_target_evidence(evidence).to_string(index=False))
-
-        result = evaluate_candidate_score_b(
-            cfg,
-            evidence,
-            candidate_composition=(3, 3, 1, 0, 0, 0),   # G=0
-            candidate_flags={
-                "Forbid5Gc": False,
-                "Forbid5Ac": False,
-                "LeA_penalize_LeX": False,
-                "LeX_penalize_LeA": False,
-                "LeY_penalize_LeB": False,
-                "LeB_penalize_LeY": False,
-            },
-        )
-        #test 4B-A (having S evidence without S)
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                ObservedIonHit(
-                    "Neu5Ac-",
-                    mz=0.0,
-                    intensity=100000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Ac[dCH3OH]-",
-                    mz=0.0,
-                    intensity=600000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Ac(a2-6)GalNAc(b1-4)-",
-                    mz=0.0,
-                    intensity=900000.0,
-                    ppm_error=0.0,
-                ),
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-
-        evidence = evaluate_global_motif_evidence(cfg, spectrum)
-
-        print("=== Target evidence ===")
-        print(summarize_target_evidence(evidence).to_string(index=False))
-
-        result = evaluate_candidate_score_b(
-            cfg,
-            evidence,
-            candidate_composition=(3, 3, 0, 0, 0, 0),   # H,N,S,G,K,F  -> S=0
-            candidate_flags={
-                "Forbid5Gc": False,
-                "Forbid5Ac": False,
-                "LeA_penalize_LeX": False,
-                "LeX_penalize_LeA": False,
-                "LeY_penalize_LeB": False,
-                "LeB_penalize_LeY": False,
-            },
-        )
-        
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                #test 3B - include_descendants = True (Neu5Ac/Gc)
-                ObservedIonHit(
-                    "Neu5Ac-",
-                    mz=0.0,
-                    intensity=100000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Ac[dCH3OH]-",
-                    mz=0.0,
-                    intensity=600000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Ac(a2-6)GalNAc(b1-4)-",
-                    mz=0.0,
-                    intensity=900000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5AcGal-",
-                    mz=0.0,
-                    intensity=5000.0,
-                    ppm_error=5.0,
-                ),
-
-                ObservedIonHit(
-                    "Neu5Gc-",
-                    mz=0.0,
-                    intensity=30000.0,
-                    ppm_error=0.0,
-                ),                
-                ObservedIonHit(
-                    "Neu5Gc(a2-6)GalNAc(b1-4)-",
-                    mz=0.0,
-                    intensity=50000.0,
-                    ppm_error=0.0,
-                ),   
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-
-        #test 1
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                ObservedIonHit(
-                    "GalNAc(b1-4)GlcNAc-",
-                    mz=0.0,              # placeholder for now
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-        #test for any entry violating the criteria
-        
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                ObservedIonHit("EXAMPLE_ION_A", mz=366.14, intensity=1000, ppm_error=2.1),
-                ObservedIonHit("EXAMPLE_ION_B", mz=528.19, intensity=800, ppm_error=1.5),
-            ],
-            charge_mode="POS",
-            derivatization="PERMETHYL",
-        )
-        #test 2A — child hit only, gate should stay closed
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                ObservedIonHit(
-                    "Neu5AcGal-",
-                    mz=0.0,
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-        #test 2B — parent + child hit, gate should open
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-                ObservedIonHit(
-                    "Neu5AcGal(b1-4)GlcNAc-",
-                    mz=0.0,
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-        #test 2C — parent + child hit, gate should open
-                        ObservedIonHit(
-                    "Neu5Ac-",
-                    mz=0.0,
-                    intensity=5000.0,
-                    ppm_error=0.0,
-                ),
-        #test 2D - LeX only
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-
-                ObservedIonHit(
-                    "Gal(b1-4)[Fuc(a1-3)]GlcNAc-",
-                    mz=0.0,
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-
-            ],
-            charge_mode="any",
-            derivatization="any",
-        )
-        #test 2E  -  sLeX parent evidence + one LeX BY ion
-        Test 2-F Direct LeX + sLeX + LeX BY ion
-        spectrum = SpectrumEvidence(
-            observed_hits=[
-
-                ObservedIonHit(
-                    "Gal(b1-4)[Fuc(a1-3)]GlcNAc-",
-                    mz=0.0,
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "Neu5Ac(a2-3)Gal(b1-4)[Fuca(1-3)]GlcNAc-",
-                    mz=0.0,
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-                ObservedIonHit(
-                    "-Gal(b1-4)[Fuc(a1-3)]GlcNAc-",
-                    mz=0.0,
-                    intensity=1000.0,
-                    ppm_error=0.0,
-                ),
-        
-        # test 3A - Penalty test
-        ObservedIonHit(
-            "Fuc(a1-2)Gal(b1-4)[Fuc(a1-3)]GlcNAc-",
-            mz=0.0,
-            intensity=1000.0,
-            ppm_error=0.0,
-        ),
-        ObservedIonHit(
-            "-Gal(b1-4)[Fuc(a1-3)]GlcNAc-",
-            mz=0.0,
-            intensity=1000.0,
-            ppm_error=0.0,
-        ),
-        ObservedIonHit(
-            "[Fuc(a1-4)][-dCH3OH]GlcNAc-", #LeB_MS3 for testing penalty
-            mz=0.0,
-            intensity=100.0,
-            ppm_error=0.0,
-        ),            
-        ObservedIonHit(
-            "Fuc(a1-2)Gal(b1-4)[-dCH3OH]GlcNAc-", #BGH2_LeY_MS3
-            mz=0.0,
-            intensity=500.0,
-            ppm_error=0.0,
-        ),      
-
-        evidence = evaluate_global_motif_evidence(cfg, spectrum)
-        print("=== Pass 1 ===")
-        #print(summarize_rule_evaluations(evidence.pass1_rule_evaluations).to_string(index=False))
-        print("=== Pass 2 ===")
-        #print(summarize_rule_evaluations(evidence.pass2_rule_evaluations).to_string(index=False))
-        print("=== Target evidence ===")
-        #print(summarize_target_evidence(evidence).to_string(index=False))
-
-        engine = ScoreBEngine(cfg)
-
-        # Step 1: compute global evidence
-        evidence = engine.evaluate_global_motif_evidence(spectrum)
-        print(type(evidence))
-        print("=== Target evidence ===")
-        print(summarize_target_evidence(evidence).to_string(index=False))
-        result = evaluate_candidate_score_b(
-            cfg,
-            evidence,
-            candidate_composition=(3, 3, 0, 0, 0, 2),
-            candidate_flags={
-                "LeB_penalize_LeY": True,
-                "LeY_penalize_LeB": False,
-                "LeA_penalize_LeX": False,
-                "LeX_penalize_LeA": False,
-                "Forbid5Ac": False,
-                "Forbid5Gc": True,
-            }
-        )
-
-        print("\n=== Candidate score B ===")
-        print("motif_support_score:", result.motif_support_score)
-        print("composition_penalty:", result.composition_penalty)
-        print("unexpected_penalty:", result.unexpected_penalty)
-        print("final_score_b:", result.final_score_b)
-        print(pd.DataFrame(result.applied_unexpected_rules).to_string(index=False))
-        """
-    else:
-        print("Workbook not found for smoke test. Adjust __main__ path before testing.")
+        print_candidate_debug(result)
+"""
