@@ -1,6 +1,6 @@
 import os
-version = "1.09"
-last_update = 20260330
+version = "1.09i"
+last_update = 20260407
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -1945,7 +1945,7 @@ def launch_metadata_batch():
             "pymzml is not installed.\n"
             "If this package is not served in Python 3.13, please run the conversion in lower version of python."
         )
-        return        
+        return
 
     if not mspext.pymsreader:
         logger.log("[ERROR] Raw file conversion is not available — pymsfilereader missing.")
@@ -6755,6 +6755,16 @@ def open_prepare_dataset_window():
     #ttk.Button(button_frame, text="Build trainable CSV from pseudolabeled TSV",
     #       command=lambda: open_pl_to_trainable_modal(root, sample_name, files, logger)).pack(pady=6)
 
+    def _open_curated_library():
+        try:
+            from msp_curated_library_ui import CuratedLibraryWindow
+            CuratedLibraryWindow(root)
+        except Exception as e:
+            messagebox.showerror("Curated Library", f"Could not launch:\n{e}")
+
+    ttk.Button(button_frame, text="Curated Library",
+               command=_open_curated_library).grid(row=3, column=2, padx=5)
+
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
 
     #status label
@@ -10327,7 +10337,7 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     root.iconphoto(True, icon_img)
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.09 Build 20260330 core v1.1")
+root.title("GlycoMSP File Manager GUI v1.09i Build 20260407 core v1.1 with database")
 root.geometry("800x480")
 root.minsize(800, 480)
 

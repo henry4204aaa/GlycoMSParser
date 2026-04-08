@@ -1,7 +1,7 @@
 import os
 import numpy as np
 version = 0.5
-last_update = 20260116
+last_update = 20260401
 #data-loading and saving
 import glob
 import os
@@ -12,8 +12,11 @@ import pathlib
 import tempfile
 import time
 import json
-
-import pymzml
+try:
+    import pymzml
+    mzmlavailable = True
+except:
+    mzmlavailable = False
 
 #changelog:
 #v0.5 functional mzmlreader (proto) - may not be flexible on different parameters during extraction
@@ -237,7 +240,7 @@ def save_to_csv(csvname, data, debug=False):
 #############################
 #########end of copy#########
 
-def extract_mzML(mzmlfilepath=None, outdir=None, round=False, debug = False):
+def extract_mzML(mzmlfilepath=None, outdir=None, round=False, mzmlavailable=False, debug = False):
     if debug:
         print("[debug] need to create debug logs when debug is set to True.")
         print("[debug] Also need a readable log that records needed information and the operation can be reproduced when loading that record.")
@@ -433,6 +436,9 @@ print("testing run itself")
 spectrum = next(run)
 print(dir(spectrum))
 '''
-print(f"Testing mzml reader finished")
+if mzmlavailable:
+    print(f"mzml support confirmed")
+elif not mzmlavailable:
+    print(f"mzml not installed")
 
 #docs are summarized by GPT4o (20241104) I can't find clear instructions on internet 
