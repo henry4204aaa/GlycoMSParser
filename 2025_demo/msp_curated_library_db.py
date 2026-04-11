@@ -1,7 +1,3 @@
-version = "1.00"
-last_update = 20260408
-# I decided the spec and needed components from GlycoMSP, then let the Claude Code (opus4.6) do the vibe coding
-# QA and user tests are performed manually beside cli tests, and the code review has been done by author to confirm the behaviors as expected
 
 """
 msp_curated_library_db.py — Database manager for GlycoMSP Curated Spectrum Library.
@@ -12,6 +8,10 @@ No GUI code — no tkinter imports.
 """
 
 from __future__ import annotations
+version = "1.00"
+last_update = 20260408
+# I decided the spec and needed components from GlycoMSP, then let the Claude Code (opus4.6) do the vibe coding
+# QA and user tests are performed manually beside cli tests, and the code review has been done by author to confirm the behaviors as expected
 
 import csv
 import os

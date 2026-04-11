@@ -1,6 +1,6 @@
 import os
-version = "1.09"
-last_update = 20260330
+version = "1.09.1"
+last_update = 20260411
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -251,19 +251,12 @@ else:
     export_ion_suggestions_csv = None
     class SuggestParams: pass
 
-"""
-try:
-    from msp_ion_mining import export_ion_suggestions_csv, SuggestParams
-    print("[dev] loaded msp_ion_mining")
-except Exception:
-    export_ion_suggestions_csv = None
-    class SuggestParams:  # fallback stub
-        def __init__(self, **kw): pass
-"""
+
 # v1.5 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
 # v1.3 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
 # v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
 # v1.1 (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
+# v1.09.1 dead code cleanup
 # v1.09 (manuscript version): CGA score b implemented
 # v1.07: CGA extra score b prepared.
 # v1.05: fixed json file relationship definition and support legacy json file load (v11). 
@@ -355,8 +348,6 @@ def _to_posix(p):
 def _from_posix(p):
     return None if not p else os.path.normpath(p.replace('/', os.sep))
 
-def _norm_for_display(p):
-    return os.path.normpath(p) if p else p
 
 #20250907 preventing key error in GUI #need real test to see behavior changes
 FILETYPE_TO_KEY = {
@@ -433,8 +424,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         super().__init__(master)
         self.title("Constraint-based Glycan Annotation Setup")
-        #self.geometry("620x640")
-        #self.geometry("760x880")
         self.geometry("840x720")
         self.minsize(840, 720)
         self.resizable(True, True)
@@ -625,8 +614,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         left = ttk.Frame(flags_frame)
         right = ttk.Frame(flags_frame)
-        #left.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=8)
-        #right.pack(side="left", fill="both", expand=True, padx=(5, 10), pady=8)
+
         advanced_frame = ttk.LabelFrame(flags_frame, text="Advanced options")
 
         def _coerce_int_like(val, default=0):
@@ -668,12 +656,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         #move OG core panel here to avoid called before assignment exceptions
         # --- O-glycan core types (multi-select) ---
-        #core_frame = ttk.LabelFrame(self, text="O-glycan core types (select 1–4)")
-        #core_frame.pack(fill="x", padx=12, pady=(0, 6))
-        # Now a sub-frame inside "In-Silico Generation Flags"
-        #core_frame = ttk.LabelFrame(flags_frame, text="O-glycan core types (select 1–4)")
-        #core_frame = ttk.LabelFrame(right, text="O-glycan core types (select 1–4)")
-        # placed inside the right column by _toggle_og_core_panel()
         self.og_core_vars = {i: tk.BooleanVar(value=False) for i in (0, 1, 2, 3, 4)}
         def _selected_coretypes():
             sel = [i for i, v in self.og_core_vars.items() if v.get()]
@@ -906,9 +888,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             wraplength=760
         ).grid(row=2, column=1, sticky="we", padx=8, pady=4)
 
-        # --- Footer buttons
-        #btns = ttk.Frame(self)
-        #btns.pack(fill="x", padx=12, pady=(6, 12))
+
         # --- Footer buttons (top row: preparation) ---
         btns_top = ttk.Frame(self)
         btns_top.pack(fill="x", padx=8, pady=(6, 2))
@@ -2042,7 +2022,7 @@ def _score_metadata_candidate(meta: dict, sample_name: str, csv_path: str | None
             score += 1
     return score
 
-
+#20260411 code review: is this not active?
 def _choose_metadata_dialog(parent, candidates):
     """
     candidates: list of tuples (path, meta_dict, score)
@@ -4815,10 +4795,6 @@ def open_prepare_dataset_window():
         
         final_df = final_df[["MS2scan_no","Structure"] + feature_cols]
 
-        #do we need this really?
-        #if not include_mass_feature:
-        #    final_df.drop(columns=["protonatedmass","delta_ppm","ppm_precursor","precursor_gate_comp"],
-        #                errors="ignore", inplace=True)
 
         final_df.to_csv(output_path, index=False)
         log(f"[PL→Train] saved: {output_path}")
@@ -5214,10 +5190,7 @@ def open_prepare_dataset_window():
                     ion_scoring_status = "failed"
 
         # 6) Merge back onto the original converted file (one row per composition match)
-        #enrich_cols = ["MS2scan_no","composition","theoretical_mass","ppm_error","observed_mass"]
-        #for extra in ("ion score","ion hit count","ion hits m/z"):
-        #    if extra in matched.columns: enrich_cols.append(extra)
-        #out = df.merge(matched[enrich_cols], left_on=scan_col, right_on="MS2scan_no", how="left")
+
         scan_right = "MS2scan_no"
         if scan_right not in matched.columns:
             for alt in ("MS2scan_no_x", "MS2scan_no_y", "ScanNum", "scan", "Scan", "unique_ID"):
@@ -6243,21 +6216,6 @@ def open_prepare_dataset_window():
         else:
             return None
 
-        # Reuse the metadata stored in TreeView tags or descriptions
-        #item_info = tree.item(selected_item)
-        #values = item_info.get("values", [])
-        
-        # Sample: ["File", "Unassigned", "Sample_XYZ", "csv"]
-        #if len(values) >= 4:
-        #    node_type = values[0].lower()
-        #    exp = values[1]
-        #    sample = values[2]
-        #    filetype = values[3].lower()
-        #    
-        #    if node_type in ("sample", "file") and filetype == "csv":
-        #        return experiment_projects[exp]["samples"][sample].get("csv")
-
-        return None
 
     # -- pseudo labeling --
     def launch_pseudo_labeling():
@@ -6752,8 +6710,7 @@ def open_prepare_dataset_window():
     #GPT said without () it only passes the function, and work only if clicked
     tk.Button(button_frame, text="CGA → Trainable",
           command=try_pl_to_trainable).grid(row=3, column=1, padx=5)
-    #ttk.Button(button_frame, text="Build trainable CSV from pseudolabeled TSV",
-    #       command=lambda: open_pl_to_trainable_modal(root, sample_name, files, logger)).pack(pady=6)
+
 
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
 
@@ -8172,22 +8129,6 @@ def open_ml_analysis_window():
             messagebox.showinfo("Saved", f"ML parameters written to:\n{os.path.basename(path)}")
 
         # ===== Step 4 (existing controls) =====
-    # ... your Step 4 labels/entries ...
-
-    # summary (read-only) shows what will be used if set
-    #ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
-    #def _update_ml_summary():
-    #    try:
-    #        m = effective_ml_params.get("model", {})
-    ###        ml_summary_var.set(
-    #            f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
-    #            f'max_depth={m.get("max_depth", None)}, '
-    #            f'min_split={m.get("min_samples_split", 2)}, '
-    #            f'min_leaf={m.get("min_samples_leaf", 1)}, '
-    #            f'class_weight={m.get("class_weight", "balanced")}'
-    #        )
-    #    except Exception:
-    #        ml_summary_var.set("Params: (using built-ins)")    
 
 
     # ---------- UPDATED: parameters window ----------
@@ -8401,19 +8342,6 @@ def open_ml_analysis_window():
 
         tk.Button(settings, text="Close", command=settings.destroy).pack(pady=8)
 
-    #extra train settings save/load
-    #row4 = train_tab.grid_size()[1]
-    #step4_container = ttk.Frame(train_tab)
-    ##step4_container.grid(row=row4, column=0, columnspan=3,
-    #                    sticky="ew", padx=10, pady=(6, 0))
-
-    #step4_bar = tk.Frame(step4_container); step4_bar.pack(fill="x")
-    #tk.Button(step4_bar, text="Train/Test Parameters…",
-    #        command=open_train_settings).pack(side="left")
-    #tk.Button(step4_bar, text="Edit ML Parameters…",
-    #        command=open_ml_params_window).pack(side="left", padx=6)
-    #tk.Label(step4_bar, textvariable=ml_summary_var).pack(side="left", padx=12)
-    # -----------------------------------------------
 
     def train_model():
         try:
@@ -10167,44 +10095,8 @@ def open_ml_analysis_window():
         on_effective_params_ready=_on_effective_params_ready,
     )
 
-    # place this right AFTER the classifier radio buttons, BEFORE "Step 4" label
-    #ml_frame = build_ml_params_panel(train_tab, _get_current_context, _on_effective_params_ready)
-    #ml_frame.grid_configure(row=6, column=0, columnspan=3, sticky="nsew", padx=10, pady=(6, 10))
-
-    # ---- Step 4: bar with 2 buttons + summary (Train tab) ----
-    # (place this where your Step 4 label/button currently lives)
-    # --- Step 4 bar (goes in open_ml_analysis_window, on the Train tab) ---
     ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
 
-    # a container that is gridded into train_tab
-    #step4_container = ttk.Frame(train_tab)
-    #step4_container.grid(row=row4, column=0, columnspan=3,
-    #                    sticky="ew", padx=10, pady=(6, 0))
-
-    # now INSIDE the container you can use pack freely
-    #step4_bar = tk.Frame(step4_container)
-    #step4_bar.pack(fill="x")
-
-    ##tk.Button(step4_bar, text="Train/Test Parameters…", command=open_train_settings)\
-    #.pack(side="left")
-
-    #tk.Button(step4_bar, text="Edit ML Parameters…", command=open_ml_params_window)\
-    #.pack(side="left", padx=6)
-
-
-
-    #tk.Label(step4_bar, textvariable=ml_summary_var)\
-    #.pack(side="left", padx=12)
-
-
-
-
-    # button to launch the modal
-    #ttk.Button(train_tab, text="Edit ML Parameters…", command=open_ml_params_window)\
-    #    .grid(row=STEP4_ROW, column=0, sticky="w", padx=10, pady=(4,0))  # set STEP4_ROW to match your layout
-
-    #ttk.Label(train_tab, textvariable=ml_summary_var)\
-    #    .grid(row=STEP4_ROW, column=1, columnspan=2, sticky="w")
 
     # then bump your existing "Step 4: Train/Test Parameters" and below down to start at row=7 or 8
     
@@ -10283,15 +10175,6 @@ def open_ml_analysis_window():
 
     close_button = tk.Button(subwin, text="Close", command=subwin.destroy)
     close_button.pack(pady=5)
-
-
-
-
-
-
-
-
-
 
 
 
@@ -10381,39 +10264,6 @@ tk.Button(analysis_frame, text="Prepare Dataset", command=open_prepare_dataset_w
 tk.Button(analysis_frame, text="Run ML Analysis", command=open_ml_analysis_window).pack(side="left", padx=5)
 
 
-# Run the GUI
-#root.mainloop()
-
 #import safe
 if __name__ == "__main__":
     root.mainloop()
-
-#20250915 import safe and no side effects by loading too many modules, consider activate it in future
-"""
-# --- at top of mspfileloaderv10.py ---
-root = None  # set up a module-global you can reference
-
-def build_gui():
-    global root
-    import tkinter as tk
-    from tkinter import ttk
-    root = tk.Tk()
-    root.title("GlycoMSParser v10")
-
-    # ... all your widget creation & menu wiring here ...
-    # e.g. TreeView, buttons, callbacks, etc.
-
-    return root
-
-# keep helpers importable for CLI/REPL
-__all__ = [
-    # your non-GUI helpers:
-    "read_fragment_masses_any",
-    "create_unlabeled_from_method",
-    # (add others you want to script against)
-]
-
-if __name__ == "__main__":
-    app = build_gui()
-    app.mainloop()
-"""

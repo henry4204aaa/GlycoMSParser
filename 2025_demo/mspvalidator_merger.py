@@ -1,5 +1,6 @@
-version = 0.93
-last_update = 20250922
+version = 0.94
+last_update = 20260411
+#v0.94 code review 1. Need deep analysis
 #v0.93 add negative label (non-glycans) back to manual annotation workflow
 #v0.9 workable file and awaiting to be merged to main workflow. Validation prototype built and tested.
 #v0.8 workable file (w/o validation)
@@ -626,34 +627,6 @@ def directassign_files(annotation_file, raw_csv, derivatizationtags, debug = Fal
     iondfindex = extract_ionmasslist(ion_df)
     return pre_df, iondfindex, ion_df
 
-#xls = pd.ExcelFile(excel_file)
-#print(xls.sheet_names)
-#for checking annotation file data integrity. Write another function for it
-#df = pd.read_excel(xls, sheet_name="MSlist")
-
-#adding_protonated_and_observed_mass(df)  if we did not return df, we can use this
-#df = adding_protonated_and_observed_mass(df)
-
-
-#df2 = pd.read_csv(csv_file, sep='\t')
-#print(df2.head())
-#merged_df = extractannotation(df, df2, debug = True)
-#pre_df = slice_combined_df(merged_df)
-
-#print(pre_df.head())
-#print(pre_df.info())
-#print("Load ion filter and convert the df to proper shape and then export it. Do it.")
-#read same excel file. Need to consider when the ion list is in another file
-#ion_df = pd.read_excel(xls, sheet_name="ionlist")
-#ion_df = ion_df[["mass"]]
-
-
-#pre_df.loc[:, 'peaklist'] = pre_df['peaklist'].apply(lambda x: literal_eval(x.strip('()')))
-#pre_df.loc[:, 'peakintensity'] = pre_df['peakintensity'].apply(lambda x: literal_eval(x.strip('()')))
-
-#iondfindex = extract_ionmasslist(ion_df)
-
-#pre_df = expandpeaklist(pre_df)
 
 #20250905 added by GPT
 #to read ion list feature counts before proceeding to merge
@@ -841,102 +814,6 @@ def sample_real_negatives(
     return neg
 
 
-#added 20250905 old version of adding negative label (but rely on score - which is not presented in manual anno workflow)
-"""
-def sample_real_negatives(
-    raw_tsv_path: str,
-    annotated_scans,                  # iterable of MS2scan_no already in pre_df
-    *,
-    scan_col: str = "MS2scan_no",
-    precursor_col: str = "precursor_mz",
-    frag_mz_col: str = "fragment_mz",
-    frag_int_col: str = "fragment_intensity",
-    score_col: str = "score",         # set to None if you don't have one
-    score_thr: float = 0.05,          # keep scans with max(score) < score_thr
-    marker_cols: list[str] | None = None,  # e.g., ["core_marker_b", "core_marker_y"]
-    marker_min: int = 1,              # require < marker_min markers to keep (0 or 1)
-    max_neg_ratio: float = 3.0,       # cap negatives to ratio × positives
-    random_state: int = 42
-):
-    """
-"""
-    Build Non-glycan rows from raw TSV scans that are NOT annotated.
-    Gating:
-      - if score_col present: keep scans with max(score) < score_thr
-      - if marker_cols present: keep scans with sum(marker_flags) < marker_min
-    Returns a DataFrame aligned to pre_df's expected columns:
-      MS2scan_no, protonatedmass, peaklist, peakintensity, Structure, IUPACname(optional), Glycanannotation2
-"""
-"""
-    import numpy as np, pandas as pd
-
-    raw = pd.read_csv(raw_tsv_path, sep="\t")
-    if scan_col not in raw.columns:
-        raise ValueError(f"'{scan_col}' not found in {raw_tsv_path}")
-    raw = raw.copy()
-    raw[scan_col] = raw[scan_col].astype(int)
-    annotated_set = set(map(int, annotated_scans))
-
-    # 1) candidate scans = not annotated
-    all_scans = set(raw[scan_col].unique())
-    cand_scans = all_scans - annotated_set
-    if not cand_scans:
-        return pd.DataFrame(columns=[
-            "MS2scan_no", "protonatedmass", "peaklist", "peakintensity",
-            "Structure", "IUPACname(optional)", "Glycanannotation2"
-        ])
-
-    # 2) score gate
-    if score_col and score_col in raw.columns:
-        per_scan_score = raw.groupby(scan_col)[score_col].max()
-        cand_scans &= set(per_scan_score.index[per_scan_score < score_thr])
-
-    # 3) marker-ion absence gate (optional)
-    if marker_cols:
-        missing = [c for c in marker_cols if c not in raw.columns]
-        if missing:
-            print(f"[mspval] marker columns missing in raw TSV, skipping: {missing}")
-        else:
-            flags = raw.groupby(scan_col)[marker_cols].max()  # assumes 0/1
-            allowed = flags.index[(flags.sum(axis=1) < marker_min)]
-            cand_scans &= set(allowed)
-
-    if not cand_scans:
-        return pd.DataFrame(columns=[
-            "MS2scan_no", "protonatedmass", "peaklist", "peakintensity",
-            "Structure", "IUPACname(optional)", "Glycanannotation2"
-        ])
-
-    # 4) build one row per scan
-    df = raw[raw[scan_col].isin(cand_scans)].copy()
-    if frag_mz_col not in df.columns or frag_int_col not in df.columns:
-        raise ValueError(f"'{frag_mz_col}'/'{frag_int_col}' not found in raw TSV")
-
-    g = df.groupby(scan_col)
-
-    def _one_scan(gdf):
-        pmass = float(gdf[precursor_col].iloc[0]) if precursor_col in gdf.columns else float("nan")
-        plist = gdf[frag_mz_col].astype(float).to_list()
-        pint  = gdf[frag_int_col].astype(float).to_list()
-        return pd.Series({
-            "MS2scan_no": int(gdf.name),
-            "protonatedmass": pmass,
-            "peaklist": plist,
-            "peakintensity": pint,
-            "Structure": "Non-glycan",
-            "IUPACname(optional)": "",
-            "Glycanannotation2": ""
-        })
-
-    neg = g.apply(_one_scan).reset_index(drop=True)
-
-    # 5) cap by ratio
-    n_pos = max(1, len(annotated_set))
-    n_keep = min(len(neg), int(max_neg_ratio * n_pos))
-    neg = neg.sample(n=n_keep, random_state=random_state) if len(neg) > n_keep else neg
-
-    return neg
-"""
 
 #autofilled by copilot. Need manual validation
 def createnormailzedionlistcsv(ionindex, converted_df, ion_df, filename):
@@ -973,29 +850,6 @@ def typeselection(type):
         return 'reduced'
 
 
-#very primitive way:
-#type = typeselection("OG")#("NG")#("OG")
-#excel_file = R"G:\其他電腦\My Computer\GlycoMSParser\src\OG_int_online_annotation_revised_2024_glycan_zf_OG.xlsx"  #test validation
-#excel_file = R"G:\其他電腦\My Computer\GlycoMSParser\src\20240922_temp_zf_intestine_1.xlsx"
-#R"G:\其他電腦\My Computer\GlycoMSParser\src\202401012_fixed_temp_zf_ovary.xlsx"
-#R"G:\其他電腦\My Computer\GlycoMSParser\src\zf_NG_brain_annotation_20240922.xlsx"
-#R"C:\Users\Sakazuki\Documents\online_annotation_revised_2024_glycan_zf_OG_brain_20240817temp.xlsx"
-#"G:\其他電腦\My Computer\GlycoMSParser\src\OG_int_online_annotation_revised_2024_glycan_zf_OG.xlsx"
-#R"G:\其他電腦\My Computer\GlycoMSParser\src\zf_OG_ovary_annotation_202410.xlsx"
-#"/Users/hnstseng/Downloads/online_annotation_revised_2024_glycan_zf_OG.xlsx"#
-#R"C:\Users\Sakazuki\Documents\online_annotation_revised_2024_glycan_zf_OG_brain_20240817temp.xlsx" #0812temp is older one #R
-#csv_file = R"G:\其他電腦\My Computer\GlycoMSParser\ms2_zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.csv"
-#csv_file = R"G:\其他電腦\My Computer\GlycoMSParser\ms2_zebrafish_Yann_glycome_20240922_zf_sPerMeNG_intestine.raw.csv"
-#R"G:\其他電腦\My Computer\GlycoMSParser\ms2_zebrafish_Yann_glycome_20240922_20240922_zf_sPerMeNG_ovary.raw.csv"
-#R"G:\其他電腦\My Computer\GlycoMSParser\ms2_zebrafish_Yann_glycome_20240921_zf_sPerMeNG_brain_20240921_zf_sPerMeNG_brain.raw.csv" 
-#R"C:\Users\Sakazuki\Downloads\ms2_zebrafish_Yann_glycome_20240731_zf_PerMeOG_brain.raw.csv"
-#R"G:\其他電腦\My Computer\GlycoMSParser\ms2_zebrafish_Yann_glycome_20241008_zf_sPerMeOG_intestine.raw.csv"
-#R"/Users/hnstseng/Downloads/ms2_zebrafish_Yann_glycome_20240731_zf_PerMeOG_brain.raw.csv"#
-#R"C:\Users\Sakazuki\Downloads\ms2_zebrafish_Yann_glycome_20240731_zf_PerMeOG_brain.raw.csv" #R 
-#preprocessed_df, ionlist, ion_df = directassign_files(excel_file, csv_file, debug = False)
-
-#createnormailzedionlistcsv(ionlist, preprocessed_df,ion_df, R"G:\其他電腦\My Computer\GlycoMSParser\zfOG_int_passedvalidation.csv")
-
 
 def add_unique_id(csv, extname=None):
     basename, ext = os.path.splitext(csv)
@@ -1007,6 +861,3 @@ def add_unique_id(csv, extname=None):
     filename = basename + "_adduid" + ext
     tdf.to_csv(filename, index=False)
     return "adding temp id finished"
-
-#copy paste the csv in  "createnormailzedionlistcsv" and remember 21st of the September... don't forget to change extname or you will be locked in a shoebox. Crazy? I was crazy once."
-#add_unique_id(R"G:\其他電腦\My Computer\GlycoMSParser\zfOG_int_passedvalidation.csv", extname="intestine")

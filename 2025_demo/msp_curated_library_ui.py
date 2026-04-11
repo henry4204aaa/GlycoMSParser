@@ -1,9 +1,4 @@
-version = "1.02"
-last_update = 20260409
-# I decided the spec and needed components from GlycoMSP, then let the Claude Code (opus4.6) do the vibe coding
-# QA and user tests are performed manually beside cli tests, and the code review has been done by author to confirm the behaviors as expected
-# Fixed several issues - overflow full peaklists in man add (clipboard_decoder) and reading csv not parsing properly issue
-# Can be called from mspfileloaderv14db.py
+
 
 """
 msp_curated_library_ui.py — Tkinter UI for GlycoMSP Curated Spectrum Library.
@@ -14,6 +9,13 @@ All database operations go through CuratedLibraryDB — no direct sqlite3 usage.
 """
 
 from __future__ import annotations
+
+version = "1.02"
+last_update = 20260409
+# I decided the spec and needed components from GlycoMSP, then let the Claude Code (opus4.6) do the vibe coding
+# QA and user tests are performed manually beside cli tests, and the code review has been done by author to confirm the behaviors as expected
+# Fixed several issues - overflow full peaklists in man add (clipboard_decoder) and reading csv not parsing properly issue
+# Can be called from mspfileloaderv14db.py
 
 import configparser
 import csv

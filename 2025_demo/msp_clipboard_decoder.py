@@ -1,3 +1,6 @@
+
+from __future__ import annotations
+
 version = "1.00"
 last_update = 20260409
 # I decided the spec and needed components from GlycoMSP, then let the Claude Code (opus4.6) do the vibe coding
@@ -21,8 +24,6 @@ Usage::
     else:
         entry_dict = result["entry"]
 """
-
-from __future__ import annotations
 
 import re
 

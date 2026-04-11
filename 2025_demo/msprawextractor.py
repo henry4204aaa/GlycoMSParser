@@ -1,9 +1,9 @@
 ######version info#####
 
-version= "0.53"
-last_update = 20250927
-#import msprawextractor   -> msprawextractor.version 
-import versioninfo
+version= "0.55"
+last_update = 20260411
+
+#v0.55 code review 1. Remove unused blocks
 #v0.53 fix tmp file not found issue when directly click the v10 python file (cwd not specified -> fall to default)
 #v0.52 check and prepare for negative mode support
 #v0.51 failsafe in case the Thermo Library or foundation is missing
@@ -16,8 +16,7 @@ import versioninfo
 #combining trytolistoutheaders.py and comparepeaklist
 
 import configparser
-#importing modules
-#should be loaded somewhere for general data processing
+
 import pandas as pd
 import json
 
@@ -104,30 +103,12 @@ def generatefilename(rawfilepath):
     return savename
 
 
-    #save the metadata#
-#def savemetadata(metadata,savename):
-#    savename = f"{savename}.json"
-#    with open(savename, 'w') as f:
-#        json.dump(metadata, f, indent=4)
-#    return savename
 def savemetadata(metadata, filepath):
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=4)
     return filepath
 
 
-    #save the log file#
-#def save_log(savename, log_entries,debug_logs = None):
-#    logname = f"{savename}.log"
-#    with open(logname, 'w') as f:
-#        for entry in log_entries:
-#            f.write(f"{entry}\n")
-#        if debug_logs is not None:
-#            f.write(f"-----\ndebug enabled-----")
-#            for logs in debug_logs:
-#                f.write(f"{logs}\n")
-#            f.write(f"-----\ndebug log ends-----")
-#    return logname
 def save_log(filepath, log_entries, debug_logs=None):
     with open(filepath, 'w', encoding='utf-8') as f:
         for entry in log_entries:
@@ -178,21 +159,7 @@ def save_to_csv(csvname, data, debug=False):
         print(f"[debug] Time spent for extraction: {csvwritetime:.3f} seconds.")
     return exportcsv
 
-"""
-def save_to_csv(csvname,data,debug =False):
-    #export spectra file in csv format
-    exportcsv =  f"{csvname}.csv"
-    perf_esti2 = time.time()
-    with open(exportcsv, 'wt') as c:
-        print("writing to csv...")
-        for d in range(len(data)):
-            print('\t'.join(map(str, (data[d]))), file = c)
-    if debug:
-        csvwritetime = time.time() - perf_esti2
-        print(f"[debug]Finished exported {exportcsv} from raw data")
-        print(f"[debug]Time spent for extraction: {float(csvwritetime)} seconds.")
-    return exportcsv
-"""
+
 #work work 
 def save_to_arff():#(arffname, data, headers, attributes, debug=False):
     print("Waiting to be built...")
@@ -247,7 +214,6 @@ def peaklist_validation(peaklist, peakintensity, debug = False):
         return False, None
 
 #usage: peak_extractor(pathofrawfile, raw_file_examination(rawfile))
-#def peak_extractor(rawfileinput, auto = True, debug = False): #old version
 #def peak_extractor(rawfileinput, metadata=None, filename=None, auto=True, debug=False):
 def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extractor to 2 functions
     try:
@@ -297,9 +263,6 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
             if debug:
                 ms2list.append(j)
                 #trace back ms2 spectrum list
-            #GetLabelData(spectrum number) will return plenty of data
-            #GetLabelData(n)[0] will return lists (need validation) [peaklist], [peak intensity]
-            #peaklist = MS2peaklist((rawfile.GetLabelData(j)[0][0]), (rawfile.GetLabelData(j)[0][1]))  @oldmethod
             #Extract labeled data
             peaklist = rawfile.GetLabelData(j)[0][0]
             peakintensity = rawfile.GetLabelData(j)[0][1]
@@ -402,53 +365,12 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
         save_to_csv(ms2tmp_path[:-4], ms2data, debug=debug)
         save_to_csv(ms3tmp_path[:-4], ms3data, debug=debug)
         return {"ms2tmp": ms2tmp_path, "ms3tmp": ms3tmp_path}
-        #v0.52
-        #ms2tmp = f"ms2tmp_{rawstem}.csv"
-        #ms3tmp = f"ms3tmp_{rawstem}.csv"
-        #save_to_csv(ms2tmp.replace(".csv",""), ms2data, debug=debug)
-        #save_to_csv(ms3tmp.replace(".csv",""), ms3data, debug=debug)
-
-        # tmp_ms2 = Path(outdir) / f"ms2tmp_{rawstem}.csv"
-        #tmp_ms3 = Path(outdir) / f"ms3tmp_{rawstem}.csv"
-
-        # Ensure parent exists
-        #tmp_ms2.parent.mkdir(parents=True, exist_ok=True)
-        #tmp_ms3.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write temp CSVs (no finals here)
-        #save_to_csv(str(tmp_ms2).replace(".csv",""), ms2data, debug=debug)
-        #save_to_csv(str(tmp_ms3).replace(".csv",""), ms3data, debug=debug)
-
-        #if debug:
-        #    print(f"[extractor] temp CSVs written: {tmp_ms2.name}, {tmp_ms3.name}")
-
-        # Return the TEMP paths for the GUI to finalize.
-        # Return filename of the temp files
-        #return os.path.abspath(ms2tmp), os.path.abspath(ms3tmp)
-        #export to csv by default
-        #ms2done = save_to_csv(ms2output, ms2data, debug=debug)
-        #print(f"MS2 export {ms2done} has finished")
-        #ms3done = save_to_csv(ms3output, ms3data, debug=debug)
-        #print(f"MS3 export {ms3done} has finished")
     #export log files...
     versioninfo = ["extractor info", version, last_update]
     logs.append(versioninfo)
     print("Conversion finished from mspextractor.")
     return True
-    #save metada to json /added in 20240731
-    #savemetadata(metadata,filename)
 
-    #save logs and add debug logs only if debug=True
-    #if debug:
-    #    save_log(filename, logs, debug_logs = debug_logs)
-    #    print(f"[debug] Export debug logs...")
-    #    #info in logs: datetime, filename, file path, scan number, version of GlycoMSP and EACH components
-    #else:
-    #    save_log(filename, logs)
-    #print("Extraction finished")
-    #print("from version 0.4 the metadata part is separated for GUI UI/UX flow")
-
-    ############
 
 def finalize_extraction(rawfile, metadata, filename, debug=False):
     print(f"[Finalizing extraction] For: {filename}")
@@ -457,39 +379,13 @@ def finalize_extraction(rawfile, metadata, filename, debug=False):
     # Optional: log the fact that finalization completed
     if debug:
         print("[Debug] finalize_extraction called successfully")
-    #try:
-    #        # Just finalize logs and metadata
-    #        jsonfile = savemetadata(metadata, filename)
-    #        print(f"Metadata saved to: {jsonfile}")###
 
-    #        logs = [f"File processed: {rawfile}", f"Saved metadata: {jsonfile}"]
-    #        debug_logs = ["Debug mode ON"] if debug else []
-    #        logname = save_log(filename, logs, debug_logs)
-    #        print(f"Log saved to: {logname}")
 
-    #except Exception as e:
-    #    print(f"[ERROR] Finalization failed: {e}")
-#read file
-#rawfileinput = mspfileloader.fileloader('raw')  #filename.raw (str)
-#set scan number outside
-#run extractor function
-#peak_extractor(rawfileinput, auto = True, debug = True) #debug = True for testing
-##running code, save metadata and logs
-#filename = generatefilename(rawfilenameraw)
-#metadata = fillexpinfo(rawfilenameraw, loadfile=None, debug=False)
-#metajson = savemetadata(metadata,filename)
-
-#from loader v0.51 call from loader
 '''
 TODO list in future:
 0. support arff conversion after validating everything works and documentations are done (URGENT)
 1. read metadata from previous studies (another file) 
     and let it autofill when editing metadata <- this file
-2. support other formats (another file) and convert to same format (maybe another file too)
+2. support other formats (another file) and convert to same format (maybe another file too) - mzml prototype finished
 3. convert above things into GUI-based stuff <- this file?
-'''
-
-'''
-debug records:
-why I can't define scan number?
 '''

@@ -1,7 +1,7 @@
 import os
 import numpy as np
-version = 0.5
-last_update = 20260401
+version = 0.6
+last_update = 20260411
 #data-loading and saving
 import glob
 import os
@@ -19,78 +19,12 @@ except:
     mzmlavailable = False
 
 #changelog:
+#v0.6 code review 1.
 #v0.5 functional mzmlreader (proto) - may not be flexible on different parameters during extraction
 
 # Load an mzML file
 #run = pymzml.run.Reader(r"C:\Users\Sakazuki\Downloads\zf_sPerMeNG_brain.mzML")
 
-
-"""
-#for debug
-import pydoc
-doc = pydoc.render_doc(type(spectrum), "Help on %s")
-with open("spectrum_help.txt", "w", encoding="utf-8") as f:
-    f.write(doc)
-print("Wrote spectrum_help.txt")
-#help(spectrum)
-"""
-
-"""
-# Iterate through the spectra
-t = 0
-print("test function here")
-for spectrum in run:
-    if t > 0:
-        break
-    else:
-        if spectrum['ms level'] == 2:
-            continue
-            print("ID:", spectrum.ID)
-            #print("selected_precursors:", spectrum.selected_precursors)
-            id = spectrum.ID
-            precursor_list = spectrum.selected_precursors 
-
-            ms1mz = precursor_list['mz']
-            ms1intensity = precursor_list['i']
-            charge = precursor_list['charge']
-            ms1scan = precursor_list['precursor id']
-
-            empty_containerpeaks = []
-            empty_containerintensity = []
-            print(f"Getting peak list")
-            p_peaklist = spectrum.mz
-            p_intensity = spectrum.i
-            #print(f"type of peaklist is {type(p_peaklist)} and the output is {p_peaklist}")
-            for peaks in p_peaklist:
-                #print(f"peaks are in type of {type(peaks)} and the data inside is {peaks}")
-                #peaks are in type of <class 'numpy.float32'> and the data inside is 97.00896453857422
-                empty_containerpeaks.append(np.round(peaks, 4))
-            print(f"peaks after pre-processing rounding is {empty_containerpeaks}")
-            for intensities in p_intensity:
-                empty_containerintensity.append(np.round(intensities, 4))
-            print(f"intensity after pre-processing rounding is {empty_containerintensity}")
-
-
-            #peaklist = p_peaklist.split()
-            #intensiy = p_intensity.split()
-            #print(f"peaklist is {peaklist} and intensity is {intensiy}")
-            t += 1
-        elif spectrum['ms level'] == 3:
-            continue
-                #if spectrum.ms_level == 3:
-            print("=== MS3 spectrum found ===")
-            print("ID:", spectrum.ID)
-            print("index:", spectrum.index)
-            print(f"Getting peak list")
-            p_peaklist = spectrum.mz
-            p_intensity = spectrum.i
-            print("peak",p_peaklist)
-            print("intensity",p_intensity)
-            print("precursors",spectrum.selected_precursors)
-            break
-        #print("\n--- Public attributes / methods ---")
-        #print([n for n in dir(spectrum) if not n.startswith("_")])
-"""
 
 #####functional blocks imported from msprawrxtactor.py#####
 ###consider isolate the metadata function to another pyhton file###
@@ -410,32 +344,6 @@ def finalize_extraction(rawfile, metadata, filename, debug=False):
     if debug:
         print("[Debug] finalize_extraction called successfully")
 
-#testing line
-#extract_mzML(mzmlfilepath=r"C:\Users\Sakazuki\Downloads\zf_sPerMeNG_brain.mzML", round=False, debug = False)
-
-'''
-for spectrum in run:
-    if t > 3:
-        break
-    elif spectrum['ms level'] == 2:
-        print(f"type of this spectrum is {type(spectrum)}")
-        print(f"testing pymzml functionality")
-        print(f"Spectrum ID: {spectrum.ID}, {type(spectrum.ID)}")
-        print(f"MS Level: {spectrum.ms_level}, {type(spectrum.ms_level)}")
-        print(f"Retention Time: {spectrum.scan_time_in_minutes()} minutes, {type(spectrum.scan_time_in_minutes)}")
-        print(f"Precursor m/z: {spectrum.selected_precursors}, {type(spectrum.selected_precursors)}")
-        print(f"Polarity: {spectrum.get('scan polarity')}, {type(spectrum.get('scan polarity'))}")
-        print(f"Instrument Type: {spectrum.get('instrument model')}, {type(spectrum.get('instrument model'))}")
-        # Access other metadata as needed
-        print(spectrum.mz, spectrum.i, type(spectrum.mz), type(spectrum.i))  
-        t+=1
-#print("testing certain ms number")
-#spectrum_with_id_311 = run[ 311 ]
-#print(spectrum_with_id_311())
-print("testing run itself")
-spectrum = next(run)
-print(dir(spectrum))
-'''
 if mzmlavailable:
     print(f"mzml support confirmed")
 elif not mzmlavailable:
