@@ -1,6 +1,6 @@
 import os
-version = "1.09.1"
-last_update = 20260411
+version = "1.09.3"
+last_update = 20260421
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -13,6 +13,7 @@ import configparser #load config
 import json
 import tkinter.simpledialog as simpledialog
 from tkinter import filedialog
+from tkinter import messagebox
 import shutil
 import traceback
 import mspvalidator_merger as mspval
@@ -26,15 +27,15 @@ import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ 
 # 20250907 to solve ion suggest missing issue
 import importlib, sys, os, traceback
 from pathlib import Path
-from pathcanon import to_posix_str, to_native_path, ensure_dir
+import pathcanon
 from typing import Dict
-
-
-# ---- GlycoMSP startup diagnostics: put this block at line 1 ----
+import re
+import uuid
+# ---- GlycoMSP startup diagnostics ---- #
 import traceback, importlib.util
 
+# If user double-clicked on Windows, stdin often isn't a real TTY. Stop from closing to allow error print
 def _pause_if_no_tty():
-    # If user double-clicked on Windows, stdin often isn't a real TTY.
     try:
         if os.name == "nt" and not sys.stdin.isatty():
             input("\nPress Enter to close…")
@@ -99,16 +100,15 @@ if "--diag" in sys.argv or "--diag" in sys.argv:
     sys.exit(0)
 
 # ---- End diagnostics prelude ----
-
-#added 20260126 for json mixing issue
 # =========================
-# JSON type/schema enforcement (GlycoMSP v1)
 # =========================
+# =========================
+# =========================
+# ---- JSON type/schema enforcement (GlycoMSP v1) ----
 
 JSON_TYPE_METADATA  = "glycomsp.metadata"
 JSON_TYPE_METHOD    = "glycomsp.method"
 JSON_TYPE_EXPERIMENT= "glycomsp.experiment"
-
 SCHEMA_V1 = "1.0.0"
 import hashlib
 from typing import Optional
@@ -122,7 +122,6 @@ def file_sha256(path: str) -> Optional[str]:
         return h.hexdigest()
     except Exception:
         return None
-
 
 def _now_iso_utc():
     # ISO8601 UTC string with seconds
@@ -219,8 +218,11 @@ def load_typed_json(path: str, expected_type: str, *, allow_legacy: bool = True,
 
     raise ValueError(f"{context}Unrecognized legacy JSON; cannot safely classify (file={path})")
 
+# ---- json schema ends ---- #
+# ===========================
 
-
+# a fail guardsafe import of msp_ion_mining
+# For both MAS and CGA(supported now?)? It is called in dataset preparation workflow, do we really need early-assignment here?
 def _load_ion_module():
     try:
         return importlib.import_module("msp_ion_mining")
@@ -250,12 +252,15 @@ if _ionmod:
 else:
     export_ion_suggestions_csv = None
     class SuggestParams: pass
+# ===========================
 
-
+# Changelogs:
 # v1.5 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
 # v1.3 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
 # v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
 # v1.1 (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
+# v1.09.5 refactoring v1.09.23 fix conversion early fire issue. If conversion at Thermo COM level fails, need to close app to release. Marked for future fix.
+# v1.09.3 deep review and add comments for further refactor work (Claude Code involved)
 # v1.09.1 dead code cleanup
 # v1.09 (manuscript version): CGA score b implemented
 # v1.07: CGA extra score b prepared.
@@ -329,7 +334,9 @@ else:
 #mind that we plan to add GUI support in project managing, the tkinter detection may be moved to funtion: GUI in MSPinit.py in future
 # re-organized the code structure and readability using copilot and ChatGPT4-o
 # no sensitive contents were sent to the server for this part
+# ============================
 
+# tkinter-safe init
 try: 
     import tkinter as tk
     from tkinter import filedialog, messagebox
@@ -338,16 +345,8 @@ except ImportError:
 else:
     has_tkinter = True
 
+# raw/mzml file conversion init
 selected_files = {}  # Dictionary to keep track of selected files
-
-
-#probably same as pathcanon?
-def _to_posix(p):
-    return None if not p else Path(p).as_posix()
-
-def _from_posix(p):
-    return None if not p else os.path.normpath(p.replace('/', os.sep))
-
 
 #20250907 preventing key error in GUI #need real test to see behavior changes
 FILETYPE_TO_KEY = {
@@ -359,7 +358,8 @@ FILETYPE_TO_KEY = {
 }
 def normalize_ftype(ft: str) -> str:
     return FILETYPE_TO_KEY.get(ft.lower().strip(), ft.lower().strip())
-#
+
+# 20260413 Code review: This is Placeholder #
 # --- Integrity checker (optional) ---
 try:
     import mspprojintegritykeeper as mspik
@@ -372,9 +372,9 @@ except Exception:
         file_hashcheck=_noimpl,
         relocatemissingfile=_noimpl,
     )
+# =================
 
-
-#logger
+# App Logger block
 class AppLogger:
     def __init__(self):
         self.entries = []
@@ -404,11 +404,11 @@ class AppLogger:
         return filename
 
 logger = AppLogger()
+# =====================
 
 #20250822 replace composition window with pseudolabel window
-# --- Pseudo-Labeling Setup window (replaces the old GlycanCompositionWindow) ---
-
-class PseudoLabelingSetupWindow(tk.Toplevel):
+# --- Pseudo-Labeling Setup window (replaces with CGASetupWindow) ---
+class CGASetupWindow(tk.Toplevel):
     """
     Edit in-silico generation flags and preview essential metadata.
     - Defaults injected via `default_flags` (dict copied before editing)
@@ -424,7 +424,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         super().__init__(master)
         self.title("Constraint-based Glycan Annotation Setup")
-        self.geometry("840x720")
+        self.geometry("900x800")
         self.minsize(840, 720)
         self.resizable(True, True)
         self.meta_json_path = meta_json_path
@@ -442,7 +442,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         meta_frame = ttk.LabelFrame(self, text="Metadata (can override here)")
         meta_frame.pack(fill="x", padx=12, pady=(12, 6))
 
-        ## validator helper
+        ## score B validator helper
         def _validate_scoreb_workbook(path: str):
             """
             Part 1 UI validation only:
@@ -475,11 +475,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         self._validate_scoreb_workbook = _validate_scoreb_workbook
 
-        # choices (adjust if you have more)
-        GLYCAN_CHOICES = ["N", "O"]
-        CHARGE_CHOICES = ["+", "-"]
-        DERIV_CHOICES  = ["PerMe(Reduced)", "PerMe(Freeend)", "None"]
-
         # hold current + original for a Reset action
         self.meta_vars = {
             "Glycan Type": tk.StringVar(value=""),
@@ -496,7 +491,7 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         for k in self._meta_original:
             self._meta_original[k] = self.meta_vars[k].get()
 
-        # render editable controls
+        # render editable controls r= row
         r = 0
         ttk.Label(meta_frame, text="Glycan Type:").grid(row=r, column=0, sticky="w", padx=10, pady=4)
         ttk.Combobox(meta_frame, state="readonly", width=10,
@@ -651,8 +646,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         def _current_keys():
             gtype = self.meta_vars["Glycan Type"].get().strip().upper()
             return NG_KEYS if gtype == "N" else OG_KEYS
-
-
 
         #move OG core panel here to avoid called before assignment exceptions
         # --- O-glycan core types (multi-select) ---
@@ -827,8 +820,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             else:
                 advanced_frame.pack_forget()
 
-            # show/hide O-core panel according to glycan type
-            #_toggle_og_core_panel()
             # restore state
             _restore_flags(snap)
 
@@ -851,8 +842,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
 
         # Initial render
         _rebuild_flag_panel()
-
-        # --- BELOW your metadata + flags UI ---
 
         # Small panel to show current links (insilico / ion list)
         links_frame = ttk.LabelFrame(self, text="Files selected for CGA analysis")
@@ -887,7 +876,6 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
             justify="left",
             wraplength=760
         ).grid(row=2, column=1, sticky="we", padx=8, pady=4)
-
 
         # --- Footer buttons (top row: preparation) ---
         btns_top = ttk.Frame(self)
@@ -974,15 +962,13 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         ttk.Button(btns_top, text="Add Score B Workbook", command=_attach_scoreb_workbook).pack(side="left", padx=4)
         ttk.Button(btns_top, text="Validate Score B Workbook", command=_validate_scoreb_selected).pack(side="left", padx=4)
         ttk.Button(btns_top, text="Clear Score B Workbook", command=_clear_scoreb_workbook).pack(side="left", padx=4)
-
-
         ttk.Separator(btns_top, orient="vertical").pack(side="left", fill="y", padx=8)
 
         # --- Footer buttons (bottom row: execution) ---
         btns_bottom = ttk.Frame(self)
         btns_bottom.pack(fill="x", padx=8, pady=(2, 10))
 
-        # Start pseudolabeling (enabled if converted CSV + insilico present)
+        # Start CGA analysis (enabled if converted CSV + insilico present)
         #modified with score b
         def _start():
             scoreb_path = self.scoreb_workbook_path_var.get().strip()
@@ -1083,9 +1069,10 @@ class PseudoLabelingSetupWindow(tk.Toplevel):
         if self.on_submit:
             self.on_submit({"flags": flags, "metadata": meta})
         self.destroy()
+# Constraint-based Glycan Annotation Setup Window Ends
+# ===========================
 
-#metadata class 
-
+# Metadata Editor (Shows when conversion of raw/mzml is finished, or filling missing metadata in prepare dataset window) 
 class MetadataEditorWindow:
     def __init__(self, parent, raw_file_list, on_each_metadata_ready_callback, on_finish=None, output_dir=None, skip_conversion=False, input_kind=None):
         self.parent = parent
@@ -1120,10 +1107,6 @@ class MetadataEditorWindow:
         # Row 0: Status label placeholder (spans both columns)
         self.status_label = tk.Label(self.window, text="", fg="blue")
         self.status_label.grid(row=0, column=0, columnspan=2, pady=(10, 5))
-
-        if not self.skip_conversion:
-            self.load_file(self.raw_file_list[self.current_index])
-
         for i, field in enumerate(fields, start=1):
             label = tk.Label(self.window, text=field)
             label.grid(row=i, column=0, padx=10, pady=5, sticky="w")
@@ -1150,6 +1133,9 @@ class MetadataEditorWindow:
 
             entry.grid(row=i, column=1, padx=10, pady=5)
             self.entries[field] = entry
+        #20260414 some minor fixes 
+        if not self.skip_conversion:
+            self.load_file(self.raw_file_list[self.current_index])
 
         # Buttons
         button_frame = tk.Frame(self.window)
@@ -1160,7 +1146,6 @@ class MetadataEditorWindow:
         tk.Button(button_frame, text="Clear", command=self.clear_fields).grid(row=0, column=2, padx=5)
         tk.Button(button_frame, text="Generate Dataset", command=self.generate).grid(row=0, column=3, padx=5)
         tk.Button(button_frame, text="Cancel", command=self.window.destroy).grid(row=0, column=4, padx=5)
-
 
         label = tk.Label(self.window, text="Raw File (optional):")
         label.grid(row=button_row + 1, column=0, padx=10, pady=5, sticky="w")
@@ -1183,7 +1168,6 @@ class MetadataEditorWindow:
     def on_conversion_complete(self):
         # Status (your existing line)
         self._safe_set_status("Conversion complete. Ready for metadata.", fg="green")
-
         # Safely reflect current raw path into the (readonly) Entry if it still exists
         try:
             entry = getattr(self, "raw_file_entry", None)
@@ -1289,8 +1273,8 @@ class MetadataEditorWindow:
                 # Remember where the temps are for finalize()
                 self.files["ms2tmp"] = tmp_ms2
                 self.files["ms3tmp"] = tmp_ms3
-
-                logger.log(f"[convert] Temp CSVs: {tmp_ms2}, {tmp_ms3}")
+                logger.log(f"[convert] MS2 temp exists immediately after conversion: {os.path.exists(tmp_ms2) if tmp_ms2 else None}")
+                logger.log(f"[convert] MS3 temp exists immediately after conversion: {os.path.exists(tmp_ms3) if tmp_ms3 else None}")
 
                 self._convert_in_progress = False
                 self._safe_after(0, self.on_conversion_complete)
@@ -1368,6 +1352,7 @@ class MetadataEditorWindow:
         if self._widget_alive(host):
             host.after(ms, func, *args, **kwargs)
     #20250917
+    
     def _is_batch_active(self) -> bool:
         """
         True if a conversion thread is running OR more files remain in this batch.
@@ -1392,7 +1377,26 @@ class MetadataEditorWindow:
             except Exception:
                 pass
             return
+                                                                                
+        if self._is_batch_active():                                                   
+            if messagebox.askyesno(                                                   
+                "Conversion Running",                                                 
+                "Conversion is still in progress. Force close?\n\n"                   
+                "(The background thread will be abandoned. No files will be corrupted.)"):                                                    
+                self._convert_in_progress = False                                     
+                self._batch_halted = True                                             
+                try:
+                    self.window.destroy()                                             
+                except Exception:                                 
+                    pass
+                set_main_status("Idle (cancelled)", fg="orange")
+                return                                                                
+            else:
+                self._safe_set_status("Waiting for conversion to finish...",          
+        fg="orange")                                                                  
+                return        
         
+        """
         if self._is_batch_active():
             # main window status → batch still running
             set_main_status("Batch conversion running", fg="blue")
@@ -1408,6 +1412,7 @@ class MetadataEditorWindow:
             except Exception:
                 pass
             return  # block close
+        """
         # else: safe to close
         set_main_status("Idle", fg="blue")
         try:
@@ -1477,6 +1482,19 @@ class MetadataEditorWindow:
             set_main_status("Idle", fg="blue")
     #20250927
     def generate(self):
+        if not self.skip_conversion:
+            if self._convert_in_progress:
+                messagebox.showwarning("Please wait", "Conversion is still running.")
+                return
+
+            if not self.files.get("ms2tmp") or not self.files.get("ms3tmp"):
+                messagebox.showwarning(
+                    "Conversion not finished",
+                    "Temporary conversion files are not ready yet. Please wait until conversion completes."
+                )
+                logger.log("[generate] blocked: temp paths not ready yet")
+                return
+
         if self.output_dir is None:
             selected_dir = filedialog.askdirectory(
                 title="Select folder to save metadata and output files",
@@ -1488,11 +1506,12 @@ class MetadataEditorWindow:
             self.output_dir = selected_dir
             logger.log(f"[Metadata] Output will be saved to: {self.output_dir}")
 
+
         # collect metadata
         for field, entry in self.entries.items():
             self.metadata[field] = entry.get()
 
-        extractdate = time.strftime("%Y%m%d")
+        extractdate = time.strftime("%Y%m%d_%H%M%S")
         self.metadata["Parameters when GlycoMSP launched"] = ["Autofilled by GUI"]
         self.metadata["Date of file extracted from raw file"] = extractdate
 
@@ -1544,15 +1563,22 @@ class MetadataEditorWindow:
                 # prefer absolute paths captured during background_conversion
                 temp_ms2 = self.files.get("ms2tmp")
                 temp_ms3 = self.files.get("ms3tmp")
-
+                logger.log(f"[generate] project name = {mansavename}")
+                logger.log(f"[generate] savename = {savename}")
+                logger.log(f"[generate] final_ms2 = {final_ms2}")
+                logger.log(f"[generate] final_ms3 = {final_ms3}")
+                logger.log(f"[generate] temp_ms2 = {temp_ms2}")
+                logger.log(f"[generate] temp_ms3 = {temp_ms3}")
+                logger.log(f"[generate] ms2 exists before promote = {os.path.exists(temp_ms2) if temp_ms2 else None}")
+                logger.log(f"[generate] ms3 exists before promote = {os.path.exists(temp_ms3) if temp_ms3 else None}")
                 # fallback: construct likely locations
                 raw_stem = os.path.splitext(os.path.basename(raw_path))[0] if raw_path != "not linked" else "no_raw"
                 if not temp_ms2:
-                    cand = os.path.join(self.output_dir, f"ms2tmp_{raw_stem}.csv")
-                    temp_ms2 = cand if os.path.exists(cand) else os.path.abspath(f"ms2tmp_{raw_stem}.csv")
+                    temp_ms2 = os.path.join(self.output_dir, f"ms2tmp_{raw_stem}.csv") #cand->temp_ms2 avoid cwd guess for user clicking msp
+                    #temp_ms2 = cand if os.path.exists(cand) else os.path.abspath(f"ms2tmp_{raw_stem}.csv")
                 if not temp_ms3:
-                    cand = os.path.join(self.output_dir, f"ms3tmp_{raw_stem}.csv")
-                    temp_ms3 = cand if os.path.exists(cand) else os.path.abspath(f"ms3tmp_{raw_stem}.csv")
+                    temp_ms3 = os.path.join(self.output_dir, f"ms3tmp_{raw_stem}.csv") #same as ms2
+                    #temp_ms3 = cand if os.path.exists(cand) else os.path.abspath(f"ms3tmp_{raw_stem}.csv")
 
                 # promote temps → finals
                 try:
@@ -1604,20 +1630,26 @@ class MetadataEditorWindow:
                 print("[Exception happened when closing window after method data generation]20260126 GPT suggested fix on metadata/method writing close winodow fix. Not sure if it works")
                 pass
             return
-    #20250917 ends
+   
+# MetadataEditor Window Ends here
+# ==============================
 
-
+# Decouple of AppLogger from tkinter (intended, for future CLI support cases etc)
 def write_to_gui(message):
     text_widget.insert(tk.END, message + "\n")
     text_widget.see(tk.END)
 
 logger.gui_writer = write_to_gui
+# AppLogger calls using tkinter ends
+# ===============================
 
 #version info reader
 #will add same one in extractor but may depreciate after moving metadata editing part to GUI
-def get_version_info_for(module_name, manifest_path="project_version_manifest.ini"):
+#20260412 code-review: not active for now. About window carries the work. Considering CHANGE this to CLI or other clickable elements in about window in future)
+def get_version_info_for(module_name, manifest_path=r".\project_version_manifest.ini"):
     config = configparser.ConfigParser()
     config.read(manifest_path)
+    print(f"current path: {manifest_path}")
 
     if module_name in config:
         version = config[module_name].get("version", "N/A")
@@ -1625,13 +1657,14 @@ def get_version_info_for(module_name, manifest_path="project_version_manifest.in
         return version, last_update
     return None, None
 
+# Data Loading helpers : csv (globally) and ion list (for CGA score A and ...?)
 #newly added 20250824 for reading csv (is that essential?)
-def _robust_read_csv(path, prefer_tab=False):
+def robust_read_csv(path, prefer_tab=False):
     """
     Try several parsing strategies (TSV first if prefer_tab=True).
     Returns a pandas DataFrame or raises the last error.
     """
-    import pandas as pd, csv
+    import csv
 
     tries = []
 
@@ -1663,9 +1696,17 @@ def _robust_read_csv(path, prefer_tab=False):
             last_err = e
     raise last_err
 
+# 20260420 promoted to module-level utility
+#It strips whitespace and removes the Unicode BOM character (\ufeff) from all column headers
+def clean_cols(df):
+    if df is None or df.empty: 
+        return df
+    df = df.copy()
+    df.columns = [str(c).strip().replace("\ufeff","") for c in df.columns]
+    return df
+
 #fix in 20251001
 def _read_ion_df(path):
-    import pandas as pd
     if not path:
         return None
     p = str(path).lower()
@@ -1711,16 +1752,10 @@ def _read_ion_df(path):
                 df = df.rename(columns={col_map[key]: "mass"})
             break
     return df[["mass"]].dropna() if "mass" in df.columns else None
+# Data loading helper ends
+# =======================
 
-
-# Function to create and hide Tkinter root window
-# If future version supports GUI fully available, please reconstruct this part (not hiding main window, but think about what should be there)
-def create_tkinter_root():
-    root = tk.Tk()
-    root.withdraw() # hide main window
-    return root
-
-#about tab showing the version info
+# About Window showing the version info
 def open_about_window():
     about_win = tk.Toplevel(root)
     about_win.title("About GlycoMSP")
@@ -1740,8 +1775,7 @@ def open_about_window():
 
     # Load version info from manifest, mind the path issues (on demo folder now)
     config = configparser.ConfigParser()
-    config.read(".\\2025_demo\\project_version_manifest.ini")
-    #config.read("project_version_manifest.ini")
+    config.read(os.path.join(os.path.dirname(__file__),"project_version_manifest.ini"))
 
     if "version_check" in config:
         ts = config["version_check"].get("checked_on", "Unknown")
@@ -1756,10 +1790,11 @@ def open_about_window():
     about_text.config(state=tk.DISABLED)
 
     tk.Label(about_win, text="Component version listed above", font=("Arial", 10)).pack(pady=5)
-
     tk.Button(about_win, text="Close", command=about_win.destroy).pack(pady=10)
+# About Window Ends
+# ===================
 
-# Function to validate file path
+# Function to validate file path, called when selecting raw/mzml
 def validate_file_path(file_path):
     if not os.path.exists(file_path):
         print(f"Error: The file {file_path} does not exist.")
@@ -1769,13 +1804,13 @@ def validate_file_path(file_path):
         return False
     return True
 
+# Main GUI-related action
 def update_display():
     text_widget.delete(1.0, tk.END)
     for ftype, path in selected_files.items():
         text_widget.insert(tk.END, f"{ftype}: {path}\n")
 
 def clear_files():
-    # Placeholder for your implementation
     selected_files.clear()
     update_display()
 
@@ -1783,94 +1818,61 @@ def reset_main_status():
     status_var.set("Idle")
     progress.stop()
     convert_button.config(state="normal")
+# Main GUI-related action ends
+# ========================
 
-
-def on_metadata_ready(raw_file, metadata, savename):
-    logger.log(f"Confirmed metadata for {raw_file}")
-    # Pass to peak extractor
-    #20250916 comment this section to see if duplicate conversion can be avoided
-    #mspext.convert_raw_to_csv(raw_file, debug=False)
-
-def launch_metadata_for_all(files):
-    MetadataEditorWindow(root, files, on_metadata_ready, on_finish=reset_main_status)
-
-
-def build_final_path(metadata: Dict, out_dir: str, kind: str) -> str:
-    """
-    Build final CSV path from metadata and type ('ms2' or 'ms3').
-    Assumes you already have fields like Experiment Title / Sample / Date etc.
-    """
-    # Example: adapt to your naming scheme
-    stem = metadata.get("Generated_Filename_Stem") or metadata.get("Experiment Title") or "untitled"
-    stem = str(stem).strip().replace(" ", "_")
-    return str(Path(out_dir) / f"{kind}_{stem}.csv")
-
-from typing import Dict
-
-def build_final_path(metadata: Dict, out_dir: str, kind: str) -> str:
-    """
-    Build final CSV path from metadata and type ('ms2' or 'ms3').
-    Adjust this to your exact naming rules.
-    """
-    # Prefer your existing 'savename' logic; this is a fallback
-    stem = metadata.get("Generated_Filename_Stem") \
-        or metadata.get("Experiment Title") \
-        or metadata.get("Raw filename") \
-        or "untitled"
-    stem = str(stem).strip().replace(" ", "_")
-    return str(Path(out_dir) / f"{kind}_{stem}.csv")
-
-
-def finalize_converted_files(temp_ms2: str, temp_ms3: str, metadata: Dict, out_dir: str) -> Dict[str, str]:
-    final_ms2 = build_final_path(metadata, out_dir, kind="ms2")
-    final_ms3 = build_final_path(metadata, out_dir, kind="ms3")
-    Path(final_ms2).parent.mkdir(parents=True, exist_ok=True)
-    os.replace(temp_ms2, final_ms2)
-    os.replace(temp_ms3, final_ms3)
-    return {"ms2": final_ms2, "ms3": final_ms3}
-
-
-# Function to select raw file for further pre-processing
+# Spectral file processing for downstream csv-based pre-processing
 def select_file(filetype):
     filetypes_dict = {
         "raw": [("Raw file", "*.raw")],
         "mzml": [("mzML file", "*.mzML")],
-        "csv": [("CSV file", "*.csv")],
-        "excel": [("Excel file", "*.xls *.xlsx")]
     }
-
-    #filepath = filedialog.askopenfilename(filetypes=filetypes_dict.get(filetype, [("All files", "*.*")]))
     filepaths = filedialog.askopenfilenames(filetypes=filetypes_dict.get(filetype, [("All files", "*.*")]))
     if filepaths:
         valid_paths = [fp for fp in filepaths if validate_file_path(fp)]
         selected_files.setdefault(filetype, []).extend(valid_paths)
         update_display()
-        #validation of values
-        #file_contents_validation
     elif not filepaths:
-        print(f"No valid {filetype} file selected.")
+        print(f"No valid {filetype} spectral file(s) selected.")
 
+# path resolve
+def same_drive(a: str, b: str) -> bool:
+    da = os.path.splitdrive(os.path.abspath(a))[0].lower()
+    db = os.path.splitdrive(os.path.abspath(b))[0].lower()
+    return da == db
 
-# generic select file (20250407)
-def select_files_generic(filetype_key, allow_multiple=False, on_select_callback=None):
-    filetypes_dict = {
-        "csv": [("CSV files", "*.csv")],
-        "excel": [("Excel files", "*.xls *.xlsx")],
-        "json": [("JSON files", "*.json")],
-        "all": [("All files", "*.*")]
-    }
+# Finalize the ms2 and ms3 csv from temp name to proper exp + timestamp output
+def promote_temp_to_final(src: str, dst: str, logger):
+    """Promote temp→final.
+    - If same drive/volume: os.replace (atomic).
+    - Else: copy2 then remove src (Windows cross-drive).
+    """
+    dst = os.path.abspath(dst)
+    src = os.path.abspath(src)
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
 
-    filetypes = filetypes_dict.get(filetype_key, filetypes_dict["all"])
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"Temp file missing: {src}")
 
-    if allow_multiple:
-        filepaths = filedialog.askopenfilenames(filetypes=filetypes)
+    if same_drive(src, dst):
+        os.replace(src, dst)
+        logger.log(f"[finalize] Promoted (atomic) {src} → {dst}")
     else:
-        filepath = filedialog.askopenfilename(filetypes=filetypes)
-        filepaths = [filepath] if filepath else []
+        shutil.copy2(src, dst)
+        os.remove(src)
+        logger.log(f"[finalize] Promoted (copy+delete) {src} → {dst} (cross-drive)")
 
-    if filepaths and on_select_callback:
-        on_select_callback(filepaths)
+# Spectral file processing block Ends
+# ========================
 
+
+# Metadata-related blocks
+# Callback to log medatata is ready detection when prep the conversion
+# 20260414 code review: add savename display and suggestion from Claude Code
+def on_metadata_ready(raw_file, metadata, savename):
+    logger.log(f"Confirmed metadata for {raw_file} → {savename}")
+    # metadata is a full dict — not useful in a one-liner log. Leave it unused but in the signature. 
+    # It's there for future use (e.g., auto-assigning to experiment_projects).     
 
 def launch_metadata_batch():
     # need to rebuild to accept mzML
@@ -1946,20 +1948,6 @@ def launch_metadata_batch():
     MetadataEditorWindow(root, rawfilelist, on_metadata_ready, on_finish=reset_main_status)
 
 
-
-
-
-def on_batch_conversion_complete(converted_raws):
-    progress.stop()
-    convert_button.config(state="normal")
-    status_var.set("Raw file conversions complete. Proceeding to metadata entry...")
-    messagebox.showinfo("Conversion Complete", "Raw file conversion finished.\nNow entering metadata for each file.")
-    
-    launch_metadata_for_all(converted_raws)
-
-#added for pseudolabeling
-from pathlib import Path
-
 # Only the essentials are required; Derivatization may be absent in older files.
 REQUIRED_META_KEYS = ("Glycan Type", "Mass Analyzer charge mode")
 
@@ -1972,100 +1960,6 @@ def _load_json_safely(path):
             return json.load(f)
     except Exception:
         return None
-
-
-def _same_drive(a: str, b: str) -> bool:
-    da = os.path.splitdrive(os.path.abspath(a))[0].lower()
-    db = os.path.splitdrive(os.path.abspath(b))[0].lower()
-    return da == db
-
-def promote_temp_to_final(src: str, dst: str, logger):
-    """Promote temp→final.
-    - If same drive/volume: os.replace (atomic).
-    - Else: copy2 then remove src (Windows cross-drive).
-    """
-    dst = os.path.abspath(dst)
-    src = os.path.abspath(src)
-    Path(dst).parent.mkdir(parents=True, exist_ok=True)
-
-    if not os.path.exists(src):
-        raise FileNotFoundError(f"Temp file missing: {src}")
-
-    if _same_drive(src, dst):
-        os.replace(src, dst)
-        logger.log(f"[finalize] Promoted (atomic) {src} → {dst}")
-    else:
-        shutil.copy2(src, dst)
-        os.remove(src)
-        logger.log(f"[finalize] Promoted (copy+delete) {src} → {dst} (cross-drive)")
-
-def _score_metadata_candidate(meta: dict, sample_name: str, csv_path: str | None) -> int:
-    """Content-based score: does this metadata look like it belongs to the selected sample?"""
-    sample_tok = (sample_name or "").lower()
-    csv_tok = ""
-    if csv_path:
-        csv_tok = Path(csv_path).stem.lower()
-        if csv_tok.endswith(".raw"):  # normalize "...raw.csv" stems
-            csv_tok = csv_tok[:-4]
-    tokens = []
-    tokens.append(os.path.basename((meta.get("Raw filename") or "")).lower())
-    tokens.append(os.path.basename((meta.get("Original raw file path") or "")).lower())
-    tokens.append((meta.get("Experiment Title") or "").lower())
-
-    score = 0
-    for t in tokens:
-        if not t:
-            continue
-        if sample_tok and sample_tok in t:
-            score += 1
-        if csv_tok and csv_tok in t:
-            score += 1
-    return score
-
-#20260411 code review: is this not active?
-def _choose_metadata_dialog(parent, candidates):
-    """
-    candidates: list of tuples (path, meta_dict, score)
-    Returns: (path, meta_dict) or (None, None) if cancelled.
-    """
-    import tkinter as tk
-    from tkinter import ttk
-
-    win = tk.Toplevel(parent)
-    win.title("Select metadata JSON for this sample")
-    win.transient(parent)
-    win.grab_set()
-
-    cols = ("file", "raw", "exp", "score")
-    tree = ttk.Treeview(win, columns=cols, show="headings", height=min(10, len(candidates)))
-    for c, w in zip(cols, (36, 20, 26, 6)):
-        tree.heading(c, text=c.upper())
-        tree.column(c, width=12 * w, anchor="w")
-    for p, meta, s in candidates:
-        tree.insert("", "end", values=(
-            os.path.basename(p),
-            os.path.basename(meta.get("Raw filename") or ""),
-            (meta.get("Experiment Title") or ""),
-            s,
-        ))
-    tree.pack(fill="both", expand=True, padx=10, pady=8)
-
-    sel = {"idx": None}
-    def _ok():
-        cur = tree.selection()
-        if cur:
-            sel["idx"] = tree.index(cur[0])
-        win.destroy()
-
-    btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=(0,10))
-    ttk.Button(btns, text="OK", command=_ok).pack(side="right", padx=6)
-    ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
-
-    win.wait_window()
-    if sel["idx"] is None:
-        return None, None
-    p, meta, _ = candidates[sel["idx"]]
-    return p, meta
 
 def _resolve_metadata_for_sample(files: dict, sample_name: str, csv_path: str | None):
     """
@@ -2110,11 +2004,12 @@ def _resolve_metadata_for_sample(files: dict, sample_name: str, csv_path: str | 
 
     # 4) give up (launcher will optionally ask user once)
     return None, None
+# Metadata-related support block ends
+# ============================
 
-#newly added
+#20260414 code review: it is a fallback (safe net) when marker fails. Around line 5500~? this fallback produces ion_scoring_status = "ok(fallback) in AppLogger"
 def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value):
     """Minimal ion score using validator.findingions + marker.score_counter (anchors-aware)."""
-    import numpy as np, pandas as pd
     from mspvalidator_merger import findingions, expandpeaklist
 
     out = matched_df.copy()
@@ -2143,53 +2038,19 @@ def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value):
     out["ion hit count"] = counts
     out["ion hits m/z"] = hits_str
     return out
-
-#20262026
-def CGA_glycotope_score(matched_df, ion_df, ppm_value, debug=True):
-    """Introduce strucutral-sensitive glycotope aware scoring"""
-    import numpy as np, pandas as pd
-    from mspvalidator_merger import findingions, expandpeaklist
-
-    out = matched_df.copy()
-    # ensure peaks are lists (the validator expects python lists, not strings)
-    if isinstance(out["peaklist"].iloc[0], str) or isinstance(out["peakintensity"].iloc[0], str):
-        out = expandpeaklist(out)
-
-
-    """
-    ionlist_mz = pd.to_numeric(ion_df["mass"], errors="coerce").dropna().to_numpy()
-
-    scores, counts, hits_str = [], [], []
-    for _, row in out.iterrows():
-        # findingions returns a full listing: [(ion_mz, logI_plus1), ...] length == len(ionlist)
-        hit_pairs = findingions(row, ion_df[["mass"]], ppm_value)
-        matched_mz = [float(mz) for (mz, logi1) in hit_pairs if float(logi1) > 1.0]
-        try:
-            # prefer your module’s anchors-aware score if present
-            score = float(getattr(marker, "score_counter")(matched_mz, ionlist_mz))
-        except Exception:
-            # simple fraction fallback
-            score = (len(matched_mz) / max(1, len(ionlist_mz))) if len(ionlist_mz) else 0.0
-        scores.append(score)
-        counts.append(len(matched_mz))
-        hits_str.append(";".join(f"{mz:.6f}" for mz in matched_mz))
-
-    out["ion score"] = scores
-    out["ion hit count"] = counts
-    out["ion hits m/z"] = hits_str
-    return out
-    """
 
 #20250929 for combining datasets
-# --- Combine Trainable Datasets (Plan 1) ---
+# --- Combine Trainable Datasets with helper functions useful for other modules ---
+
+# UID related helpers
 def _infer_uid_series(df: pd.DataFrame, src_base: str):
     """
     Returns a UID series. Prefer MS2scan_no if present; otherwise index-based.
     UID format: {src_base}#scan{MS2scan_no}  OR  {src_base}#row{n}
     """
     # normalize possible scan column variants
-    scan_candidates = ["MS2scan_no", "MS2scan", "ScanNo", "scan", "scan_no", "ms2_scan_no"]
-    scan_col = next((c for c in scan_candidates if c in df.columns), None)
+    scan_candidatecols = ["MS2scan_no", "MS2scan", "ScanNo", "scan", "scan_no", "ms2_scan_no"]
+    scan_col = next((c for c in scan_candidatecols if c in df.columns), None)
 
     if scan_col is not None:
         # convert to string for safe concatenation
@@ -2236,7 +2097,10 @@ def _outer_union_concat(dfs: list[pd.DataFrame]) -> pd.DataFrame:
     front = [c for c in ["UID", "Origin_Basename", "Origin_File"] if c in big.columns]
     rest  = [c for c in big.columns if c not in front]
     return big[front + rest]
+# UID related helpers end
+# =======================
 
+# Combine Trainable Datasets called in ML analysis window
 def combine_trainable_datasets_ui(parent=None):
     """
     UI entry point:
@@ -2263,7 +2127,7 @@ def combine_trainable_datasets_ui(parent=None):
             prefer_tab = False
             # if you want to force TSV sniff for certain prefixes:
             # prefer_tab = os.path.basename(p).lower().startswith(("ms2_", "trainable_"))
-            df = _robust_read_csv(p, prefer_tab=prefer_tab)
+            df = robust_read_csv(p, prefer_tab=prefer_tab)
             df = _ensure_uid_and_origin(df, p)
             dfs.append(df)
         except Exception as e:
@@ -2314,15 +2178,246 @@ def combine_trainable_datasets_ui(parent=None):
         f"Combined CSV:\n{out_csv}\n\n"
         f"Log:\n{log_path}"
     )
+# Combine Trainable Datasets ends
+# ==============================
 
-#end 20250929
+def _utc_now_iso():
+    # RFC3339-ish without microseconds
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
+# Avoid status symbol contaminate the tree contexts
+def clean_sample_name(text):
+    for symbol in ["✅", "⚠️", "❌", "⛔"]:
+        if text.startswith(symbol):
+            text = text[len(symbol):].strip()
+
+    if text.startswith("Sample:"):
+        text = text[len("Sample:"):].strip()
+
+    # Remove validation tag suffix
+    if " (metadata missing)" in text:
+        text = text.replace(" (metadata missing)", "")
+    if " (validation failed)" in text:
+        text = text.replace(" (validation failed)", "")
+    if " (unvalidated)" in text:
+        text = text.replace(" (unvalidated)", "")
+
+    return text.strip()
+# ====================
+
+# normalized method 
+
+
+# 20260417 Code review: removed redundant definition and import
+# patch in 20260127 to apply new data structure of method json (method v1)
+# resolve paths in 3 ways: Empty/None/non-string → returns None; Already absolute returns as-is; Relative path → joins with base and normalizes
+def _resolve_path(base, p):
+    """Resolve relative paths against method file folder; keep absolute paths (Windows or POSIX) as-is."""
+    if not p:
+        return None
+    if not isinstance(p, str):
+        return None
+    p = p.strip()
+    if not p:
+        return None
+    # POSIX absolute
+    if os.path.isabs(p):
+        return p
+    # Windows drive absolute, even when running on non-Windows
+    if re.match(r"^[A-Za-z]:[\\/]", p):
+        return p
+
+    return os.path.normpath(os.path.join(base, p))
+# ==
+
+def normalize_method_json(method_obj: dict, method_path: str, base_dir: str = None):
+    """
+    Normalize ANY accepted method-json family into:
+    (exp_name, sample_name, tree_entry_dict, v1_method_dict)
+
+    - tree_entry_dict matches your TreeView keys:
+        csv, excel, metadata, json, ionlist_path, insilico_csv, pseudolabel_csv, (optional) trainable_csv
+    - v1_method_dict matches the v1 schema you approved (json_type/schema_version + method/sample/inputs/artifacts/parameters)
+    """
+    if not isinstance(method_obj, dict):
+        print(f"[DEBUG][Error] method_obj must be a dict")
+        raise ValueError("method_obj must be a dict")
+
+    base = base_dir or os.path.dirname(method_path)
+    # ----------------------------
+    # A) Detect method family
+    # ----------------------------
+    jt = method_obj.get("json_type")
+    # New v1 schema (preferred)
+    is_v1 = (jt == JSON_TYPE_METHOD) and isinstance(method_obj.get("inputs"), dict)
+    # Legacy MAS schema (experiment + samples dict)
+    is_legacy_mas = (not is_v1) and isinstance(method_obj.get("samples"), dict) and bool(method_obj.get("samples"))
+    # Legacy CGA/pseudolabel schema (dataset_type/parents)
+    is_legacy_cga = (not is_v1) and (
+        method_obj.get("dataset_type") == "pseudolabel" or isinstance(method_obj.get("parents"), dict))
+
+    if not (is_v1 or is_legacy_mas or is_legacy_cga):
+        logger.log("[ERROR 1] Unrecognized method JSON structure")
+        raise ValueError("Unrecognized method JSON structure (normalize_method_json)")
+
+    # ----------------------------
+    # B) Extract exp_name / sample_name + paths into a unified internal record
+    # ----------------------------
+    if is_v1:
+        exp_name = (
+            (method_obj.get("sample") or {}).get("experiment_title")
+            or (method_obj.get("method") or {}).get("name")
+            or "Recovered"
+        )
+        sample_name = ((method_obj.get("sample") or {}).get("sample_name")
+                    or "RecoveredSample")
+
+        inputs = method_obj.get("inputs") or {}
+        artifacts = method_obj.get("artifacts") or {}
+
+        csv_path = _resolve_path(base, (inputs.get("converted_csv") or {}).get("path"))
+        meta_path = _resolve_path(base, (inputs.get("metadata_json") or {}).get("path"))
+        excel_path = _resolve_path(base, (inputs.get("annotation_excel") or {}).get("path"))
+
+        ion_path = _resolve_path(base, (inputs.get("ion_list") or {}).get("path"))
+        insilico_path = _resolve_path(base, (inputs.get("insilico_glycan_list") or {}).get("path"))
+        scoreb_path = _resolve_path(base, (inputs.get("score_b_workbook") or {}).get("path"))
+        #change name from pseudolabels_tsv to CGAresult_tsv
+        pl_path = _resolve_path(base, (artifacts.get("CGAresult_tsv") or artifacts.get("pseudolabels_tsv") or {}).get("path"))  
+        train_path = _resolve_path(base, (artifacts.get("trainable_csv") or {}).get("path"))
+
+        method_family = (method_obj.get("method") or {}).get("family") or ("CGA" if ion_path or insilico_path else "MAS")
+
+    elif is_legacy_mas:
+        exp_name = method_obj.get("experiment") or "Recovered"
+        # legacy may contain multiple samples; import them one-by-one upstream
+        # here we normalize ONLY the first sample (caller can loop externally if desired)
+        sample_name = next(iter(method_obj["samples"].keys()))
+        files = method_obj["samples"][sample_name] or {}
+
+        csv_path = _resolve_path(base, files.get("csv"))
+        excel_path = _resolve_path(base, files.get("excel"))
+        meta_path = _resolve_path(base, files.get("metadata"))
+
+        ion_path = _resolve_path(base, files.get("ionlist_path"))
+        insilico_path = _resolve_path(base, files.get("insilico_csv"))
+        scoreb_path = _resolve_path(base, files.get("score_b_workbook_path"))
+        pl_path = _resolve_path(base, files.get("pseudolabel_csv"))
+        train_path = _resolve_path(base, files.get("trainable_csv"))
+
+        method_family = "MAS"  # legacy MAS method files represent MAS by default
+
+    else:  # legacy CGA/pseudolabel
+        exp_name = method_obj.get("experiment_title") or "Recovered"
+        sample_name = method_obj.get("sample_name") or os.path.splitext(os.path.basename(method_path))[0]
+        parents = method_obj.get("parents") or {}
+        ionlist = method_obj.get("ionlist") or {}
+
+        csv_path = _resolve_path(base, parents.get("converted_csv"))
+        meta_path = _resolve_path(base, parents.get("metadata_json"))
+        excel_path = _resolve_path(base, parents.get("annotation_excel"))  # usually absent
+        ion_path = _resolve_path(base, ionlist.get("path"))
+        insilico_path = _resolve_path(base, parents.get("insilico_csv"))
+        scoreb_path = _resolve_path(base, parents.get("score_b_workbook_path")) #files -> parents. Mistake? Found and corrected by Claude Code
+        pl_path = _resolve_path(base, parents.get("pseudolabels_tsv") or parents.get("pseudolabel_csv"))
+        train_path = _resolve_path(base, parents.get("trainable_csv"))
+
+        method_family = "CGA"
+
+    # normalize sample name the same way GUI expects
+    sample_name = clean_sample_name(sample_name)
+
+    # ----------------------------
+    # C) Produce TreeView entry (your internal representation)
+    # ----------------------------
+    tree_entry = {
+        "json": method_path,   # method file path belongs here
+        "csv": csv_path,
+        "excel": excel_path,
+        "metadata": meta_path,
+        "ionlist_path": ion_path,
+        "insilico_csv": insilico_path,
+        "score_b_workbook_path": scoreb_path,
+        "pseudolabel_csv": pl_path,
+        "trainable_csv": train_path,
+    }
+    # drop empty
+    tree_entry = {k: v for k, v in tree_entry.items() if v}
+
+    # ----------------------------
+    # D) Produce canonical v1 method dict (in-memory)
+    # ----------------------------
+    if is_v1:
+        v1 = method_obj
+        # Ensure headers exist (enforced)
+        v1["json_type"] = JSON_TYPE_METHOD
+        v1["schema_version"] = v1.get("schema_version") or SCHEMA_V1
+        # Ensure timestamps
+        v1.setdefault("created_utc", _utc_now_iso())
+        v1["updated_utc"] = _utc_now_iso()
+        v1.setdefault("uid", str(uuid.uuid4()))
+        return exp_name, sample_name, tree_entry, v1
+
+    # Build v1 from legacy shapes
+    v1 = {
+        "json_type": JSON_TYPE_METHOD,
+        "schema_version": SCHEMA_V1,
+        "uid": str(uuid.uuid4()),
+        "created_utc": _utc_now_iso(),
+        "updated_utc": _utc_now_iso(),
+        "method": {
+            "family": method_family,
+            "name": f"{exp_name}:{sample_name}:{method_family}",
+            "description": "",
+            "tags": []
+        },
+        "sample": {
+            "sample_name": sample_name,
+            "experiment_title": exp_name
+        },
+        "inputs": {
+            "converted_csv": {"path": csv_path} if csv_path else None,
+            "metadata_json": {"path": meta_path} if meta_path else None,
+            "annotation_excel": {"path": excel_path} if excel_path else None,
+            "ion_list": {"path": ion_path} if ion_path else None,
+            "score_b_workbook": {"path": scoreb_path} if scoreb_path else None,
+            "insilico_glycan_list": {"path": insilico_path} if insilico_path else None
+        },
+        "parameters": {
+            "mas": {},
+            "cga": {},
+            "scoring": {},
+            "ml": {}
+        },
+        "artifacts": {
+            "CGAresult_tsv": {"path": pl_path} if pl_path else None, #pseudolabels_tsv -> CGAresult_tsv
+            "trainable_csv": {"path": train_path} if train_path else None,
+            "unlabeled_csv": None,
+            "reports": []
+        },
+        "validation": {
+            "status": "unknown",
+            "checked_utc": None,
+            "items": []
+        },
+        "software": {
+            "glycomsp": {"version": "", "commit": ""},
+            "extractor": {"name": "", "version": ""}
+        },
+        "operator": {"name": "", "note": ""}
+    }
+
+    # remove nulls in inputs/artifacts for cleanliness
+    v1["inputs"] = {k: v for k, v in v1["inputs"].items() if v is not None}
+    v1["artifacts"] = {k: v for k, v in v1["artifacts"].items() if v is not None}
+
+    return exp_name, sample_name, tree_entry, v1
+
+# Prepare Dataset Window and related modules
 def open_prepare_dataset_window():
     subwin = tk.Toplevel(root)
     subwin.title("Prepare Dataset")
     subwin.geometry("800x550")
-
-
     #drag
     drag_data = {
     "item": None,
@@ -2341,33 +2436,15 @@ def open_prepare_dataset_window():
     sample_method_folder = None  # Global path for saving per-sample method.json files
     experiment_status_labels = {}  # GUI labels for status display, indexed by experiment
     # fixed 20260305 P1-B: uuid import and _utc_now_iso must be at top of outer function, not after inner function definitions that use them
-    import re
-    import uuid
 
-    def _utc_now_iso():
-        # RFC3339-ish without microseconds
-        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
     #20250917 start fixing json issues
     # --- BEGIN: exp.json save/load helpers (generic; PL-ready) ---
-    from pathlib import Path
-
-    def _norm(p):
-        if not p: return None
-        return os.path.normpath(os.path.expanduser(str(p)))
-
-    def _rel(p, base_dir):
-        p = _norm(p)
-        if not p: return p
-        try:
-            return os.path.relpath(p, base_dir)
-        except Exception:
-            return p
-
     def _abs(p, base_dir):
         if not p: return p
         return os.path.normpath(p if os.path.isabs(p) else os.path.join(base_dir, p))
 
+    # returns experiment title only I think. Role: STATE-MANAGER
     def _current_exp_title():
         """Return selected experiment name; if selection is inside sample/method/file, climb to Experiment node."""
         sel = tree.selection()
@@ -2386,45 +2463,19 @@ def open_prepare_dataset_window():
         return txt.replace("Experiment:", "").strip().split(" (")[0].strip()
 
     #patch to avoid dropping exp info when load -> save new exp json from legacy format
+    #20260415 code review: in future this criteria might change
+    # --- Legacy format migration (deprecate after v1.1- publish) ---
     def _infer_method_kinds(files: dict):
         kinds = []
         has_csv = bool(files.get("csv"))
         has_meta = bool(files.get("metadata"))
-
         if has_csv and has_meta and files.get("excel"):
             kinds.append("MAS")
         if has_csv and has_meta and files.get("ionlist_path") and files.get("insilico_csv"):
             kinds.append("CGA")
         return kinds
-    #20260204
-    def _ensure_method_stub(files: dict, family: str, sample_name: str):
-        """
-        Ensure files["_methods"] contains at least one method entry (stub allowed).
-        This is required because refresh_tree shows CGA artifacts only under Method nodes.
-        """
-        if not isinstance(files, dict):
-            return
 
-        methods = files.get("_methods")
-        if not isinstance(methods, list):
-            methods = []
-            files["_methods"] = methods
-
-        # If a method with same family already exists, do nothing
-        for m in methods:
-            if (m.get("family") or "").upper() == family.upper():
-                return
-
-        # Create a stub method entry (path can be None until we export)
-        methods.append({
-            "method_id": str(uuid.uuid4()),
-            "method_name": f"{sample_name}.{family}.method.v1 (unsaved)",
-            "family": family.upper(),
-            "path": None,
-            "status": "unknown",
-            "notes": ""
-        })
-
+    # force method file appears before saving exp json. Produce one method entry per family
     def _ensure_methods_before_saving_exp_v1(exp_title: str):
         """
         Silent upgrade:
@@ -2467,7 +2518,7 @@ def open_prepare_dataset_window():
             for kind in kinds:
                 try:
                     # Auto-save path in method folder (no dialogs)
-                    out_path = save_method_v1_for_sample(
+                    save_method_v1_for_sample(
                         exp_title,
                         sample_name,
                         out_path=None,
@@ -2485,6 +2536,8 @@ def open_prepare_dataset_window():
             if files["_methods"]:
                 files["json"] = files["_methods"][0]["path"]
 
+
+    # --- exp.json save/load helpers ---
     def export_experiment_json(exp_title, out_path):
         """
         Experiment JSON v1:
@@ -2515,14 +2568,6 @@ def open_prepare_dataset_window():
         }
         payload = _ensure_header(payload, JSON_TYPE_EXPERIMENT)
 
-        def _infer_family(files: dict) -> str:
-            # heuristic for legacy-loaded states
-            if files.get("ionlist_path") or files.get("insilico_csv") or files.get("pseudolabel_csv"):
-                return "CGA"
-            if files.get("excel"):
-                return "MAS"
-            return "UNKNOWN"
-
         for sname, files in samples.items():
             files = files or {}
 
@@ -2535,7 +2580,7 @@ def open_prepare_dataset_window():
                 if mp:
                     methods = [{
                         "method_name": os.path.basename(mp),
-                        "family": _infer_family(files),
+                        "family": _detect_legacy_family(files) or "UNKNOWN",
                         "path": mp,
                         "status": "unknown",
                         "notes": ""
@@ -2563,7 +2608,7 @@ def open_prepare_dataset_window():
                     "method_name": m.get("method_name") or os.path.basename(mpath),
                     "family": m.get("family") or "UNKNOWN",
                     "method_ref": {
-                        "path": _to_posix(mpath),
+                        "path": pathcanon.to_posix_str(mpath),
                         "hash": {"alg": "sha256", "value": h} if h else None,
                         "last_seen_utc": _now_iso_utc()
                     },
@@ -2617,37 +2662,6 @@ def open_prepare_dataset_window():
         logger.log(f"[EXP v1] Saved → {out_path}")
         return out_path
 
-    def import_experiment_json_old(in_path):#if new code doesn't work, switch to old
-        base = os.path.dirname(in_path)
-        #with open(in_path, "r", encoding="utf-8") as f:
-        #    data = json.load(f)
-        data = load_typed_json(
-            in_path,
-            expected_type=JSON_TYPE_EXPERIMENT,
-            allow_legacy=True,              # rejects "unknown legacy", accepts confidently-classified legacy
-            context="[EXP] "
-        )
-
-        exp_title = data.get("experiment") or "Unnamed Experiment"
-        experiment_projects.setdefault(exp_title, {"samples": {}})
-        dst = experiment_projects[exp_title]["samples"]
-
-        # Back-compat: accept both a flat per-sample dict or a {'files':{...}} shape
-        for sname, sample_blob in (data.get("samples") or {}).items():
-            if isinstance(sample_blob, dict) and "files" in sample_blob:
-                files = sample_blob.get("files") or {}
-            else:
-                files = sample_blob or {}
-            # absolutize
-            # resolved = {k: _abs(v, base) for k, v in files.items() if isinstance(v, str)}
-            resolved = {k: _abs(_from_posix(v), base) for k, v in files.items() if isinstance(v, str) and v.strip()}
-            dst[sname] = resolved
-
-        experiment_method_paths[exp_title] = in_path
-        logger.log(f"[EXP] Loaded ← {in_path}")
-        refresh_tree()
-        return exp_title
-    
     def import_experiment_json(in_path):
         base = os.path.dirname(in_path)
 
@@ -2694,7 +2708,7 @@ def open_prepare_dataset_window():
                     if not isinstance(mpath, str) or not mpath.strip():
                         continue
 
-                    mpath_abs = _abs(_from_posix(mpath), base)
+                    mpath_abs = _abs(str(pathcanon.to_native_path(mpath)), base)
                     exists = os.path.exists(mpath_abs)
 
                     # Validate by hash if present
@@ -2804,7 +2818,7 @@ def open_prepare_dataset_window():
                 files = sample_blob.get("files") or {}
             else:
                 files = sample_blob or {}
-            resolved = {k: _abs(_from_posix(v), base) for k, v in files.items() if isinstance(v, str) and v.strip()}
+            resolved = {k: _abs(str(pathcanon.to_native_path(v)), base) for k, v in files.items() if isinstance(v, str) and v.strip()}
             dst[sname] = resolved
 
             #fixed 20260313 LEGACY-1: auto-detect family and create method for old-format samples
@@ -2827,11 +2841,10 @@ def open_prepare_dataset_window():
         logger.log(f"[EXP legacy] Loaded ← {in_path}")
         refresh_tree()
         return exp_title
-
     # --- END: exp.json save/load helpers ---
-    ###
+    # =====================================
 
-    #20250917 future function: integrity check
+    #20250917 future placeholder: integrity check
     # Reuse an existing toolbar if present; otherwise create one
     try:
         toolbar
@@ -2843,47 +2856,14 @@ def open_prepare_dataset_window():
         # For now: just a friendly placeholder dialog
         tk.messagebox.showinfo(
             "Project integrity",
-            "This feature is in development.\n\n"
-            "Planned: compute & store file hashes, check missing/changed files, "
-            "and help you relink or bulk change roots."
+            "This feature is in development.\n"
+            "Planned: compute & store file hashes, check missing&changed files,\n"
+            "and help you to build portable or rebuild migrated project files."
         )
-        # (Later you might call into mspik.writehashtojson(...) etc.)
+    ttk.Button(toolbar, text="Check integrity",state="disabled", command=_check_integrity_clicked).pack(side="left", padx=4)
 
-    ttk.Button(toolbar, text="Check integrity", command=_check_integrity_clicked)\
-       .pack(side="left", padx=4)
 
-    #20260127 quick test fix on method file
-    def _get_selected_exp_sample():
-        item = tree.selection()
-        if not item:
-            messagebox.showwarning("Method v1", "Select a sample node first.")
-            return None, None
-        iid = item[0]
-
-        # Your TreeView structure is Experiment -> Sample -> Files.
-        # For a file row, parent is sample; for sample row, parent is experiment.
-        text = tree.item(iid, "text")
-
-        parent = tree.parent(iid)
-        if not parent:
-            return None, None
-
-        # If user selected a file row, go up one to sample
-        if text.startswith(("CSV:", "EXCEL:", "Metadata:", "Method:", "Ion List:", "Pseudolabel CSV:", "In silico", "Trainable", "Unlabeled")):
-            iid = parent
-            parent = tree.parent(iid)
-
-        # Now iid should be sample row, parent should be experiment row
-        sample_text = tree.item(iid, "text")
-        exp_text = tree.item(parent, "text") if parent else ""
-
-        # Expected labels from your UI: "Experiment: X" and "Sample: Y"
-        exp_name = exp_text.replace("Experiment:", "").strip()
-        #sample_name = sample_text.replace("Sample:", "").strip()
-        exp_name = exp_name.split(" (")[0].strip()   # safety if you add status tags later
-        sample_name = clean_sample_name(sample_text) # <-- THIS is the key fix
-        return exp_name, sample_name
-    #20260202
+    #Main sample node resolver, important
     def _get_selected_context():
         """
         Returns:
@@ -2951,7 +2931,10 @@ def open_prepare_dataset_window():
             method_path = files.get("json")  # active method fallback
 
         return exp_name, sample_name, method_path
-        
+    # Main sample node resolver ends
+    # =============================
+
+    # ensure method node exists, if no, add an unknown for it
     def _ensure_method_stub(files: dict, family: str, sample_name: str):
         """Ensure there is a Method node to hang CGA/MAS artifacts under in the tree."""
         if not isinstance(files, dict):
@@ -2964,7 +2947,6 @@ def open_prepare_dataset_window():
 
         famU = (family or "").upper()
 
-        # already exists?
         for m in methods:
             if (m.get("family") or "").upper() == famU:
                 return
@@ -2978,7 +2960,7 @@ def open_prepare_dataset_window():
             "notes": ""
         })
 
-
+    # --- Legacy format migration (deprecate after v1.1 publish) ---
     def _detect_legacy_family(files: dict):
         """Auto-detect method family from artifact patterns in a legacy exp.json sample.
         Returns 'CGA', 'MAS', or None.
@@ -2993,6 +2975,7 @@ def open_prepare_dataset_window():
             return "MAS"  # Has manual annotation spreadsheet
         return None
 
+    # main updater for method (called when method file needs to be updated)
     def _register_or_update_method_ref(files: dict, out_path: str, family: str):
         """Attach a saved method JSON path to the right method entry and keep legacy 'json' in sync."""
         famU = (family or "").upper()
@@ -3021,97 +3004,21 @@ def open_prepare_dataset_window():
         # legacy compatibility: lots of code still reads files["json"]
         files["json"] = out_path
 
-    def _get_selected_context_old():
-        """
-        Return (exp_name, sample_name, method_path_or_none).
-        Works when user selects:
-        - a Sample node
-        - a Method node
-        - a File node under a Method
-        - a File node under Sample
-        """
-        sel = tree.selection()
-        if not sel:
-            return None, None, None
-
-        node = sel[0]
-
-        # climb upwards to find sample node
-        sample_node = node
-        while sample_node:
-            t = tree.item(sample_node, "text")
-            if "Sample:" in t:
-                break
-            sample_node = tree.parent(sample_node)
-        if not sample_node:
-            return None, None, None
-
-        exp_node = tree.parent(sample_node)
-        if not exp_node:
-            return None, None, None
-
-        exp_text = tree.item(exp_node, "text")
-        exp_name = exp_text.replace("Experiment:", "").strip()
-        exp_name = exp_name.split(" (")[0].strip()
-
-        sample_text = tree.item(sample_node, "text")
-        sample_name = clean_sample_name(sample_text)
-
-        # try find method path:
-        # - if selection is inside a method node, read the "Method JSON:" child or use _methods cache
-        method_path = None
-
-        # Case A: selected somewhere under a method node → find nearest "Method:" ancestor
-        method_node = node
-        while method_node:
-            tt = tree.item(method_node, "text")
-            if tt.startswith("Method:"):
-                break
-            method_node = tree.parent(method_node)
-
-        if method_node and tree.item(method_node, "text").startswith("Method:"):
-            # Search children for "Method JSON:"
-            for child in tree.get_children(method_node):
-                ct = tree.item(child, "text")
-                if ct.startswith("Method JSON:"):
-                    # match the method entry by basename if possible
-                    basename = ct.replace("Method JSON:", "").strip()
-                    files = experiment_projects[exp_name]["samples"].get(sample_name, {})
-                    for m in (files.get("_methods") or []):
-                        p = m.get("path")
-                        if p and os.path.basename(p) == basename:
-                            method_path = p
-                            break
-                    if method_path is None:
-                        # fall back: if active method matches
-                        active = files.get("json")
-                        if active and os.path.basename(active) == basename:
-                            method_path = active
-                    break
-
-        # Case B: no method ancestor; use active method if present
-        if method_path is None:
-            files = experiment_projects[exp_name]["samples"].get(sample_name, {})
-            method_path = files.get("json")
-
-        return exp_name, sample_name, method_path
-
+    # Method export writer
     def _export_method_v1(force_family: str):
-        exp_name, sample_name, method_path = _get_selected_context() #20260202 replace _get_selected_exp_sample()
+        exp_name, sample_name, method_path = _get_selected_context() 
         if not exp_name or not sample_name:
             return
-
         # Build v1 dict from current links (no writing yet)
         try:
             v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=force_family)
         except Exception as e:
             messagebox.showerror("Method v1", str(e))
             return
-
         # Ask user where to save
         csv_path = experiment_projects[exp_name]["samples"][sample_name].get("csv")
         default_dir = os.path.dirname(csv_path) if csv_path else os.getcwd()
-        default_name = f"{sample_name}.{force_family}.method.v1.json"
+        default_name = f"{sample_name}.{force_family}.method.json"  #method.v1.json -> method.json
         out_path = filedialog.asksaveasfilename(
             title="Save Method v1 JSON",
             initialdir=default_dir,
@@ -3121,7 +3028,6 @@ def open_prepare_dataset_window():
         )
         if not out_path:
             return
-
         # Save
         try:
             with open(out_path, "w", encoding="utf-8") as f:
@@ -3132,10 +3038,11 @@ def open_prepare_dataset_window():
         except Exception as e:
             messagebox.showerror("Method v1", f"Failed to save:\n{out_path}\n{e}")
             return
-
         messagebox.showinfo("Method v1", f"Saved:\n{out_path}")
+    # Method export writer ends
+    # =========================
 
-    #20251002
+    # Some definitions/parameters will be called in Widgets within Prepare Dataset panel
     include_mass_feat_var = tk.BooleanVar(value=False)
     #20250905 added for negative label
     # --- Negative sampling (Prepare Dataset) ---
@@ -3143,26 +3050,27 @@ def open_prepare_dataset_window():
     neg_ratio_var       = tk.DoubleVar(value=3.0)   # max neg : pos
     #neg_scorecol_var    = tk.StringVar(value="score")
     #neg_scorethr_var    = tk.DoubleVar(value=0.05)  # keep scans with max(score) < thr
-    neg_markercols_var  = tk.StringVar(value="")    # e.g. "core_marker_b,core_marker_y"
     neg_markermin_var   = tk.IntVar(value=1)        # require < this many marker hits
     min_hits_var      = tk.IntVar(value=3)      # keep scans with < min_hits hits
     ppm_tol_var       = tk.StringVar(value="10")# ppm tolerance; text with validation
     n_features_var    = tk.IntVar(value=0)      # total ion features (from ion_df)
     gate_hint_var     = tk.StringVar(value="Ion features not loaded yet")
-    # --- Ion suggestion options ---
+    # --- Ion mining (ion suggestion in source code) options ---
     ion_suggest_enable_var   = tk.BooleanVar(value=False)
     ion_suggest_ppm_var      = tk.DoubleVar(value=10.0)
     ion_suggest_dafloor_var  = tk.DoubleVar(value=0.03)
     ion_suggest_minsupp_var  = tk.IntVar(value=5)     # min glycan support per ion
     ion_suggest_topk_var     = tk.IntVar(value=60)    # how many to export
     last_suggest_csv_var = tk.StringVar(value="")
+    # ===========================
 
-    # --- Treeview UI ---
+    # --- Treeview UI: panel of sample nodes showing ---
     tree = ttk.Treeview(subwin)
     tree.heading("#0", text="Dataset Explorer", anchor="w")
     tree.pack(expand=True, fill="both", padx=10, pady=10)
 
-    # --- Tree logic ---
+    # --- Tree logic block---
+    # Check validation when select a tree node. Updates the Link and Merge button states based on what the user clicked in the tree.
     def on_tree_select(event):
         exp_name, sample_name, method_path = _get_selected_context()
         if not exp_name or not sample_name:
@@ -3182,15 +3090,15 @@ def open_prepare_dataset_window():
             merge_button.config(state="normal" if has_merge_inputs else "disabled")
         # fixed 20260306 Test-A: removed circular binding from handler (was inside else block, never triggered at init)
 
+    # Tree-view selection event listener(handler)
     tree.bind("<<TreeviewSelect>>", on_tree_select)  # fixed 20260306 Test-A: added TreeviewSelect binding to setup
 
+    # Link & Validation on MAS method sample. Considering CGA compatibility
     def try_link_selected_sample():
         sel = tree.selection()
         if not sel:
             return
-        node = sel[0]
-        text = tree.item(node, "text")
-
+        node = sel[0] # only select the first one selected (single selection)
         # climb until we find a Sample node (or root)
         while node:
             t = tree.item(node, "text")
@@ -3203,25 +3111,15 @@ def open_prepare_dataset_window():
 
         sample_id = node
         exp_id = tree.parent(sample_id)
-
         sample_name = clean_sample_name(tree.item(sample_id, "text"))
         exp_name = tree.item(exp_id, "text").replace("Experiment: ", "").split(" (")[0].strip()
-
-        link_and_validate_sample(exp_name, sample_name)
-
-    def try_link_selected_sample_old():
-        sel = tree.selection()
-        if not sel:
-            return
-        sample_id = sel[0]
-        exp_id = tree.parent(sample_id)
-        sample_name = clean_sample_name(tree.item(sel[0], "text"))
-        #sample_name = tree.item(sample_id, "text").replace("Sample: ", "").split(" (")[0]
-        exp_name = tree.item(exp_id, "text").replace("Experiment: ", "")
         link_and_validate_sample(exp_name, sample_name)
 
     # --- Tree refresh logic ---
     def refresh_tree():
+        # 20260415 code review: attempt to fix elements drifting issue
+        # remember current selection context                  
+        old_exp, old_sample, _ = _get_selected_context()
         tree.delete(*tree.get_children())
 
         for exp_title, exp_data in experiment_projects.items():
@@ -3297,7 +3195,7 @@ def open_prepare_dataset_window():
                         # outer "files" dict and are not yet separated per-method.
                         # Keeping idx == 1 guard until per-method artifact storage is implemented.
                         if idx == 1:
-                            for ftype in ["insilico_csv", "ionlist_path", "score_b_workbook_path", "pseudolabel_csv"]:
+                            for ftype in ["insilico_csv", "ionlist_path", "score_b_workbook_path", "pseudolabel_csv", "trainable_csv"]:
                                 if files.get(ftype):
                                     if ftype == "insilico_csv":
                                         label = "In-silico CSV"
@@ -3307,6 +3205,8 @@ def open_prepare_dataset_window():
                                         label = "Pseudolabel CSV"
                                     elif ftype == "score_b_workbook_path":
                                         label = "CGA score B reference"
+                                    elif ftype == "trainable_csv":
+                                        label = "CGA-based trainable csv"
                                     else:
                                         label = ftype.upper()
                                     tree.insert(method_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
@@ -3332,64 +3232,20 @@ def open_prepare_dataset_window():
                                                      text=f"{_label}: {os.path.basename(_entry['path'])}")
                             except Exception:
                                 pass  # silently skip if method JSON is missing or malformed
-                """
-                for ftype in ["csv", "excel", "json", "metadata", "insilico_csv", "ionlist_path", "score_b_workbook_path", "pseudolabel_csv"]:
-                    if files.get(ftype):
-                        if ftype == "json":
-                            label = "Method"
-                        elif ftype == "metadata":
-                            label = "Metadata"
-                        elif ftype == "insilico_csv":
-                            label = "In-silico CSV"
-                        elif ftype == "ionlist_path":
-                            label = "Ion List"
-                        elif ftype == "pseudolabel_csv":
-                            label = "Pseudolabel CSV"
-                        else:
-                            label = ftype.upper()
-                        tree.insert(sample_node, "end", text=f"{label}: {os.path.basename(files[ftype])}")
-                """
-    # --- statistics ---
-    def show_experiment_summary(exp_name):
-        if exp_name not in experiment_projects:
-            return
+        # 20260415 restore selection after rebuild
+        if old_exp and old_sample:                                                   
+            for exp_iid in tree.get_children():           
+                if tree.item(exp_iid, "text").replace("Experiment:","").strip().split(" (")[0].strip() == old_exp:
+                    for sample_iid in tree.get_children(exp_iid):                    
+                        if clean_sample_name(tree.item(sample_iid, "text")) == old_sample:
+                            tree.selection_set(sample_iid)                           
+                            tree.see(sample_iid)          
+                            return
+    # Tree refresh logic ends
+    # =======================
 
-        total = 0
-        validated = 0
 
-        for sname in experiment_projects[exp_name]["samples"]:
-            total += 1
-            if (exp_name, sname) in linked_validated_samples:
-                validated += 1
-
-        unvalidated = total - validated
-
-        summary = (
-            f"🧪 Experiment Summary: {exp_name}\n\n"
-            f"• Total Samples: {total}\n"
-            f"• ✅ Validated: {validated}\n"
-            f"• ⚠️ Unvalidated: {unvalidated}"
-        )
-        messagebox.showinfo("Experiment Status", summary)
-    # --- prevent symbols getting read --- v9 changed 
-    def clean_sample_name(text):
-        for symbol in ["✅", "⚠️", "❌", "⛔"]:
-            if text.startswith(symbol):
-                text = text[len(symbol):].strip()
-
-        if text.startswith("Sample:"):
-            text = text[len("Sample:"):].strip()
-
-        # Remove validation tag suffix
-        if " (metadata missing)" in text:
-            text = text.replace(" (metadata missing)", "")
-        if " (validation failed)" in text:
-            text = text.replace(" (validation failed)", "")
-        if " (unvalidated)" in text:
-            text = text.replace(" (unvalidated)", "")
-
-        return text.strip()
-    # --- Add sample to selected experiment ---
+    # --- Add sample (customized empty node) to selected experiment ---
     def add_sample():
         sel = tree.selection()
         if not sel:
@@ -3406,13 +3262,14 @@ def open_prepare_dataset_window():
         sample_name = simpledialog.askstring("New Sample", "Enter sample name:")
         if not sample_name:
             return
+        # 20260415 code review: Plan to support multiple method on same sample, the logic might need revision
         if sample_name in experiment_projects[exp_title]["samples"]:
             messagebox.showwarning("Duplicate Sample", f"Sample '{sample_name}' already exists.")
             return
-
-        experiment_projects[exp_title]["samples"][sample_name] = {"csv": None, "excel": None, "json": None}
+        experiment_projects[exp_title]["samples"][sample_name] = {"csv": None, "excel": None, "metadata": None, "json": None} #20260415 added "metadata": None
         refresh_tree()
 
+    # Temp stable solution to remove sample or experiment with no entry inside
     def clean_unassigned_samples():
         exp = "Unassigned"
         if exp not in experiment_projects:
@@ -3431,18 +3288,17 @@ def open_prepare_dataset_window():
             del experiment_projects[exp]  # if no samples left, remove experiment too
         refresh_tree()
 
-    #20260126 changed
-    #weird
+    # Opens MetadataEditorWindow to create post-metadata when user clicks Link Sample button on a sample with both CSV and EXCEL (MAS workflow)
     def store_metadata_back_to_sample(exp_name, sample_name, rawfile, metadata, savename, outdir=None):
         base_dir = outdir or os.path.dirname(rawfile)
-        json_path = os.path.join(base_dir, savename + ".json")
+        meta_path = os.path.join(base_dir, savename + ".json")
 
         # Fallback if sample doesn't exist yet (e.g., metadata was created before file assignment)
         # Ensure experiment and sample containers exist
         if exp_name not in experiment_projects:
             experiment_projects[exp_name] = {"samples": {}, "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M")}
         if sample_name not in experiment_projects[exp_name]["samples"]:
-            experiment_projects[exp_name]["samples"][sample_name] = {"csv": None, "excel": None, "json": None}
+            experiment_projects[exp_name]["samples"][sample_name] = {"csv": None, "excel": None, "metadata": None, "json": None} #20260415 added "metadata": None
 
         # Now safe to reference sample
         sample = experiment_projects[exp_name]["samples"][sample_name]
@@ -3451,11 +3307,10 @@ def open_prepare_dataset_window():
         # Enforce header fields on newly generated metadata
         metadata["json_type"] = "glycomsp.metadata"
         metadata["schema_version"] = "1.0.0"
-
         # Store as metadata (not method)
-        sample["metadata"] = json_path
+        sample["metadata"] = meta_path
 
-        refresh_tree()
+        refresh_tree() # 20260415 code review: is refresh needed indeed?
 
         # Try to rename sample to raw name (from metadata), only if different
         try:
@@ -3468,9 +3323,14 @@ def open_prepare_dataset_window():
             del experiment_projects[exp_name]["samples"][sample_name]
             sample_name = raw_base
 
-        refresh_tree()
-        write_method_file(exp_name)#uncommented 20260127 after fixed
+        # 20260415 code review: automatically callback and link sample once metadata is generated
+        if sample.get("csv") and sample.get("excel") and sample.get("metadata"):   
+            logger.log(f"[Validation][auto]: start link and validation using created {sample['metadata']}\n")      
+            link_and_validate_sample(exp_name, sample_name)
+
+        refresh_tree()                                     
     
+    # Real window caller that calls store_metadata_back_to_sample
     def open_metadata_editor_for_sample(exp_name, sample_name):
         from tkinter import simpledialog
 
@@ -3497,15 +3357,15 @@ def open_prepare_dataset_window():
             output_dir=outdir,
             skip_conversion=True
         )
-
+        # 20260415 code review: previous patch in __init__ of MetadataEditorWindow already declares this, no need to prevent too early load file before rendering in tk widget
         # Delay execution of load_file until window is fully initialized
-        if not editor.skip_conversion:
-            editor.window.after(10, lambda: editor.load_file(raw_file_path))
-        else:
-            print(f"[debug] skipping loading raw file")
+        #if not editor.skip_conversion:
+        #    editor.window.after(10, lambda: editor.load_file(raw_file_path))
+    #  Post-metadata creating widget block ends
+    #  =========================================
 
-    #live update of ion hits
-
+    # Negative Sampling Options block
+    # using _get_selected_context to return sample dict for downstream work (later blocks) referencing certain entry within it. 
     def current_selected_files():
         exp_name, sample_name, method_path = _get_selected_context()
         if not exp_name or not sample_name:
@@ -3515,44 +3375,13 @@ def open_prepare_dataset_window():
         except KeyError:
             return None
 
-    def current_selected_files_old():
-        """Return the files dict for the currently selected sample,
-        even if a child file node is selected."""
-        sel = tree.selection()
-        if not sel:
-            return None
-
-        node = sel[0]
-        text = tree.item(node, "text")
-
-        # If a file row like 'CSV: ...' is selected, go up to the sample row
-        if ":" in text:
-            node = tree.parent(node)
-            text = tree.item(node, "text")
-
-        # Now `node` should be a sample row; derive sample & experiment names
-        sample_name = clean_sample_name(text)
-        exp_node    = tree.parent(node)
-        if not exp_node:
-            return None
-
-        exp_text = tree.item(exp_node, "text") or ""
-        exp_name = exp_text.replace("Experiment: ", "").split(" (")[0].strip()
-
-        try:
-            return experiment_projects[exp_name]["samples"][sample_name]
-        except KeyError:
-            return None
-
+    # Negative Sampling Excel picker
     def _fetch_ion_count_for_dialog():
         # Try: current sample’s Excel; else let user pick one.
         from tkinter import filedialog, messagebox
         files = current_selected_files()
         excel_path = None
         try:
-            # replace this with how you access the selected sample's file map
-            # e.g., files = get_selected_sample_files()
-            #files = experiment_projects["samples"]#current_selected_files()  # <-- implement this small accessor
             excel_path = files.get("excel")
         except Exception:
             excel_path = None
@@ -3572,6 +3401,7 @@ def open_prepare_dataset_window():
         except Exception as e:
             messagebox.showwarning("Ion list", f"Could not read ionlist:\n{e}")
 
+    # Live update the tk var value in Negative Sampling Options when the ion(feature) counts are known
     def _update_gate_hint():
         try:
             k = int(min_hits_var.get())
@@ -3584,9 +3414,8 @@ def open_prepare_dataset_window():
         else:
             gate_hint_var.set(f"Gating non-glycan: ion matches < {k} hits (feature count unknown yet)")
 
-    # added 20250905 place here bc validate+merge use this function
+    # Prepare Negative Sampling Options Panel that passes/update the negative sampling accross MAS (merge MAS) and CGA (CGA to trainable) 
     def open_negative_options_dialog():
-        import re
         dlg = tk.Toplevel(root)        # you already switched to root
         dlg.title("Negative Sampling Options")
         dlg.resizable(False, False)
@@ -3656,11 +3485,13 @@ def open_prepare_dataset_window():
         _update_gate_hint()
 
         tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=5, column=0, columnspan=2, pady=(4,10))
+    # Negative Sampling Options block end
+    # ===================================
 
-    #20250906 add ion suggestion method function
-    def open_ion_suggest_dialog():
+    # Ion mining block (suggest features - fragment ions)
+    def open_ion_mining_dialog():
         dlg = tk.Toplevel(root)
-        dlg.title("Ion Suggestions")
+        dlg.title("Ion Mining")
         dlg.resizable(False, False)
         dlg.grab_set()
 
@@ -3685,36 +3516,34 @@ def open_prepare_dataset_window():
                 textvariable=ion_suggest_topk_var).grid(row=4, column=1, sticky="w", padx=6, pady=(2,10))
 
         tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=5, column=0, columnspan=2, pady=(2,10))
+    # Ion mining block Ends
+    # =====================
 
-    # --- link and validate the grouped sample ---
+    # Validate sample status and link the sample (update status in tree, should be captured and saved to method json)
     def link_and_validate_sample(exp_name, sample_name):
 
         sample_name = clean_sample_name(sample_name)
         if sample_name not in experiment_projects[exp_name]["samples"]:
-            logger.log(f"[ERROR] Cleaned sample name '{sample_name}' not found under '{exp_name}'")
+            logger.log(f"[TREEVIEW Error] Clean sample name '{sample_name}' not found under '{exp_name}'")
             messagebox.showerror("Invalid Sample", f"Sample not found in experiment: {sample_name}")
             return
         sample = experiment_projects[exp_name]["samples"][sample_name]
 
         # Check file presence
         if not sample.get("csv") or not sample.get("excel"):
+            logger.log(f"[Error 0] Missing either converted spectral data or annotation sheet")
             messagebox.showerror("Missing File", "Sample must have both a CSV and Excel file before linking.")
             return
         
-
         # Validate CSV format
-        #try:
-        if not mspval.validate_csv_structure(sample["csv"]): #when it returns False
-        #except Exception as e:
-            
+        if not mspval.validate_csv_structure(sample["csv"]): #when it returns False meaning failed 
             messagebox.showerror("CSV Validation Failed")#, f"{sample['csv']}")
-            logger.log(f"[Validation] CSV failed: {sample['csv']}\n")
-            #raise ValueError("csv read error: file may be corrupted or unreadable.")
+            logger.log(f"[Validation Failed] Spectral data CSV failed: {sample['csv']}\n")
             validation_failed_samples.add((exp_name, sample_name))
             refresh_tree()
             return  # ← this prevents continuing to metadata
         else:
-            logger.log(f"[Validation] CSV successful: {sample['csv']}\n")
+            logger.log(f"[Validation] Spectral data CSV successful: {sample['csv']}\n")
         #Validate Excel format (assume sheet 'MSlist' exists and ion list is valid) 
 
         try:
@@ -3725,7 +3554,7 @@ def open_prepare_dataset_window():
                 raise ValueError("Sheet 'MSlist' not found in Excel.")
         except Exception as e:
             messagebox.showerror("Excel Validation Failed", f"{sample['excel']}\n\n{e}")
-            logger.log(f"[Validation] Excel failed: {sample['excel']}\n{e}")
+            logger.log(f"[Validation Failed] Annotation sheet failed: {sample['excel']}\n{e}")
             validation_failed_samples.add((exp_name, sample_name))
             refresh_tree()
             return  # ← this prevents continuing to metadata
@@ -3735,19 +3564,30 @@ def open_prepare_dataset_window():
         MSlistdf = pd.read_excel(anno, sheet_name="MSlist")
         ionlistdf = pd.read_excel(anno, sheet_name="ionlist")
         if not mspval.validate_annotation_structure(MSlistdf):
-        #except Exception as e:
-            messagebox.showerror("Excel Validation Failed")#), f"{sample['excel']}\n")
-            logger.log(f"[Validation] Excel failed: {sample['excel']}\n")
-            #raise ValueError("Excel read error: file may be corrupted or unreadable.")
+            messagebox.showerror("Excel Validation Failed")
+            logger.log(f"[Validation Failed] MAS Annotation failed: {sample['excel']}\n")
             validation_failed_samples.add((exp_name, sample_name))
             refresh_tree()
             return  # ← this prevents continuing to metadata
         else:
-            logger.log(f"[Validation] Excel successful: {sample['csv']}\n")
-        ion_df = ionlistdf[["mass"]] 
+            logger.log(f"[Validation] MAS Annotation is valid: {sample['excel']}\n")
+        
+        # 20260416 code review: allow score B workbook ionlist validation
+        if "mass" in ionlistdf.columns:                                                      
+            ion_df = ionlistdf[["mass"]]                          
+        elif "fragmentation_mass" in ionlistdf.columns:                                      
+            ion_df = ionlistdf[["fragmentation_mass"]].rename(columns={"fragmentation_mass":
+        "mass"})                                                                             
+        else:                                                     
+            logger.log(f"[Validation] ion list has no 'mass' or 'fragmentation_mass' column")
+            return  
+
+        # validate the mass column contains clean float values
         if ion_df["mass"].dtype != "float64":
-            logger.log(f"[Validation] ion list has invalid values: {sample['csv']}\n")
+            logger.log(f"[Validation] ion list has invalid values: {sample['excel']}\n")
             return
+        else:
+            logger.log(f"[Validation] ion list validation successful: {sample['excel']}\n")
 
         # Check metadata
         #if not sample.get("json"):
@@ -3760,89 +3600,24 @@ def open_prepare_dataset_window():
 
         # All checks passed → mark as validated
         linked_validated_samples.add((exp_name, sample_name))
-        #write_method_file(exp_name)
-        # NEW: generate a per-sample Method v1 (MAS) instead of saving experiment .exp.json here
+
         try:
-            save_method_v1_for_sample(exp_name, sample_name, kind="MAS", auto=True)
+            save_method_v1_for_sample(exp_name, sample_name, kind="MAS", auto=True) #using v1 method generator
         except Exception as e:
-            logger.log(f"[Method v1][ERROR] Failed to auto-export Method v1 for {exp_name}/{sample_name}: {e}")
+            logger.log(f"[Method v1][ERROR 1] Failed to auto-export Method v1 for {exp_name}/{sample_name}: {e}")
             messagebox.showwarning("Method v1", f"Validated, but failed to export Method v1.\n\n{e}")
             print("try to use old write method file. Notice that it generates .exp.json for unknown reasons")
             write_method_file(exp_name)
         messagebox.showinfo("Validated", f"Sample '{sample_name}' under '{exp_name}' is now validated.")
+        logger.log(f"Sample '{sample_name}' under '{exp_name}' is now linked and validated")
         refresh_tree()
 
-    from pathlib import Path
-
-    def _resolve_method_json(files: dict) -> str | None:
-        """
-        Return an absolute path to the sample's method JSON.
-        Works whether files['json'] is absolute, relative, or just a basename.
-        Searches (in order): as-given, CSV folder, Excel folder, CWD.
-        """
-        cand = (files.get("json") or "").strip()
-        if not cand:
-            return None
-
-        p = Path(cand)
-        if p.is_absolute() and p.exists():
-            return str(p.resolve())
-
-        # Use the basename (user may have stored only the filename)
-        name = p.name if p.name else cand
-
-        # search roots: where users most often keep the JSON
-        roots = []
-        csvp   = files.get("csv")
-        excelp = files.get("excel")
-        if csvp:   roots.append(Path(csvp).parent)
-        if excelp: roots.append(Path(excelp).parent)
-        roots.append(Path.cwd())
-
-        for r in roots:
-            try:
-                q = (r / name)
-                if q.exists():
-                    return str(q.resolve())
-            except Exception:
-                pass
-        return None
-
-    def _get_ml_context():
-        """
-        Returns the three things the panel needs:
-        - exp_json: path to the current experiment's .exp.json (if any)
-        - method_json: path to the currently selected sample's method .json (if any)
-        - current_params: optional in-memory set (we're not keeping one, so None)
-        """
-        exp_title = _current_exp_title()
-        exp_json_path = experiment_method_paths.get(exp_title)
-
-        files = current_selected_files() or {}
-        # You already have this helper in the same function:
-        method_json_path = _resolve_method_json(files)
-
-        return {
-            "exp_json": exp_json_path,
-            "method_json": method_json_path,
-            "current_params": None,
-        }
-
-
+    # Merge MAS dataset into trainable (ML applicable) format. Not tracked after dataset production.
     def try_merge_selected_sample():
         exp_name, sample_name, method_path = _get_selected_context()
         if not exp_name or not sample_name:
             return
-        """
-        sel = tree.selection()
-        if not sel:
-            return
 
-        sample_node = sel[0]
-        sample_name = clean_sample_name(tree.item(sample_node, "text"))
-        exp_node = tree.parent(sample_node)
-        exp_name = tree.item(exp_node, "text").replace("Experiment: ", "").split(" (")[0].strip()
-        """
         files = experiment_projects[exp_name]["samples"][sample_name]
         #fixed 20260309 Test-A Secondary: metadata key with backward compatibility
         # v12 samples store metadata under "metadata"; old v11 legacy stored it under "json"
@@ -3854,6 +3629,7 @@ def open_prepare_dataset_window():
         #fixed 20260313 ML-2: ensure MAS method exists before merge
         # Legacy samples may not have a MAS method node; create one now so merge can proceed.
         if not files.get("_methods") or not any(m.get("family") == "MAS" for m in files.get("_methods", [])):
+            print(f"[DEBUG]: add MAS method node (for legacy validated but not merged file)")
             _ensure_method_stub(files, family="MAS", sample_name=sample_name)
             save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="MAS", auto=True)
 
@@ -3861,28 +3637,21 @@ def open_prepare_dataset_window():
         outdir = filedialog.askdirectory(title="Select output folder to save merged dataset")
         if not outdir:
             return
-
-        # Ask user for ion sheet name (later we will allow external ion file)
-        #ion_sheet_name = simpledialog.askstring("Ion Sheet", "Enter ion sheet name (in Excel):", initialvalue="core_OG")
-        
-        #20250905 quick fix on path issue
-        #metadata_path=files["json"]
-        metadata_path = _resolve_method_json(files)
+        # 20260416 code review fixed wrong reference on method json, should be metadata json to get derivatization field string
+        metadata_path = files.get('metadata')
         if not metadata_path:
             messagebox.showerror(
-                "Merge Failed",
-                "Could not locate the sample method JSON.\n\n"
-                f"Original value: {files.get('json')}\n"
-                "Tried: CSV folder, Excel folder, and the current working directory."
+                "Merge Failed\n","Could not locate the metadata."
             )
+            print(f"[DEBUG] Could not locate the metadata.")
+            logger.log(f"[ERROR 1] Metadata lost, merge abort")
             return
 
-        print(f"[DEBUG] Method JSON resolved to: {metadata_path}")
-        #print(f"debug: metadata file: {metadata_path}")
         try:
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
             derivatization_type = metadata.get("Derivatization Type", "Others")
+            print(f"[DEBUG] Derivatization Type is {derivatization_type}")
             if derivatization_type == "Others":
                 value = simpledialog.askfloat("Custom Derivatization Mass","Enter custom derivatization mass (e.g., 50.1234):")
                 if value is None:
@@ -3892,12 +3661,10 @@ def open_prepare_dataset_window():
                     # pass it into directassign_files or your protonated mass logic
                     # need to save the info back later
                 
-            
-            today = datetime.now().strftime("%Y%m%d")
+            today = datetime.now().strftime("%Y%m%d_%H%M%S")
             outname = f"{sample_name}_merged_{today}.csv"
             outpath = os.path.join(outdir, outname)
             #quick fix on path
-
 
             pre_df, iondfindex, ion_df = mspval.directassign_files(files["excel"], files["csv"],derivatization_type, debug = False)
             try:
@@ -3927,8 +3694,7 @@ def open_prepare_dataset_window():
                 else:
                     print("[Prepare] No eligible negatives found with current gates.")
 
-
-            #add ion suggestion
+            # Calling Ion Mining 
             if ion_suggest_enable_var.get():
                 global export_ion_suggestions_csv, SuggestParams, _ionmod
                 if export_ion_suggestions_csv is None:
@@ -3957,16 +3723,19 @@ def open_prepare_dataset_window():
                             pre_df, ion_df, out_csv=suggest_csv, params=params,
                             label_col="Structure", majority_label="Non-glycan"
                         )
-                        print(f"[Prepare] Ion suggestions saved: {suggest_csv}")
-                        messagebox.showinfo("Ion suggestions",
+                        print(f"[Prepare] Ion mining report saved: {suggest_csv}")
+                        messagebox.showinfo("Ion Mining",
                             f"Suggested ions written to:\n{os.path.basename(suggest_csv)}")
                         last_suggest_csv_var.set(suggest_csv)
                     except Exception as e:
-                        messagebox.showwarning("Ion suggestions", f"Suggestion failed:\n{e}")
+                        messagebox.showwarning("Ion Mining", f"Suggestion failed:\n{e}")
 
             mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
             #fixed 20260313 ML-2: update method after merge completes
+            # 20260416 add trainable_csv tracking (in future we may need subnode, or separated ML method under same MAS/CGA method)
+            files["trainable_csv"] = outpath 
+
             try:
                 save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="MAS", auto=True)
                 refresh_tree()
@@ -3974,71 +3743,33 @@ def open_prepare_dataset_window():
                 logger.log(f"[ML-2] post-merge method update failed: {e_method}")
         except Exception as e:
             messagebox.showerror("Merge Failed", f"Error:\n{str(e)}")
+    # MAS to trainable merge workflow block ends
+    # =========================================
 
-    #20250911 move convert pseudolabeled data to trainable csv functionality to here
-    # ---------- PSEUDOLABEL → TRAINABLE (one-pass) ----------
-    import ast, re, math
+    # CGA analysis result (previously called Pseudolabel) data to trainable csv functionality block
+    # ---------- CGA → TRAINABLE (one-pass) ----------
+    import ast, re
     from datetime import datetime
 
-    _TUPLE_LIKE_RE = re.compile(r"^\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$")
-    _FHNSKDN_RE    = re.compile(r"^(F\d+)?(H\d+)?(N\d+)?(S\d+)?(G\d+)?(KDN\d+)?$")
-    _NONMASS = {
-        "entry_no","MS1scan_no","MS1_isolationmass","MS1_monoisolationmass","chargeState",
-        "protonatedmass","MS2scan_no","label","Structure","composition","theoretical_mass",
-        "observed_mass","ppm_error","ion score","ion hit count","ion hits m/z",
-        "ion hits intensity","ion hits logI","ion hits relI","ID","Source","unique_ID",
-        "IUPACname(optional)","Glycanannotation2","GlyToucan ID"
-    }
-
-
-    #20250912@mark fix MS2Scan_no missing in pseudo -> trainable csv
+    # 20250912@mark fix MS2Scan_no missing in pseudo -> trainable csv
     SCAN_CANDIDATES = ("MS2scan_no", "MS2Scan_no", "ScanNum", "scan", "Scan", "unique_ID")
-    def _canonicalize_scan_column(df):
-        """
-        Ensure there is a canonical 'MS2scan_no' string column in df.
-        If a candidate exists, copy/rename it; otherwise leave df unchanged.
-        Drops duplicate candidate columns after promoting.
-        """
-        import pandas as pd
-        if df is None or df.empty:
-            return df
-        src = next((c for c in SCAN_CANDIDATES if c in df.columns), None)
-        if not src:
-            return df
-        # create/overwrite canonical
-        df = df.copy()
-        df["MS2Scan_no"] = df[src].astype(str)
-        # drop other candidates except the canonical
-        for c in SCAN_CANDIDATES:
-            if c in df.columns and c != "MS2scan_no":
-                df.drop(columns=[c], inplace=True)
-        return df
 
-    def _coerce_comp_to_tuple(x):
-        if isinstance(x, (list, tuple)) and len(x) == 6:
-            return tuple(int(v) for v in x)
-        s = str(x).strip()
-        if _TUPLE_LIKE_RE.match(s):
-            try:
-                t = ast.literal_eval(s)
-                if isinstance(t, (list, tuple)) and len(t) == 6:
-                    return tuple(int(v) for v in t)
-            except Exception:
-                return None
-        return None
-
-    def _infer_ion_masses_from_wide_df(df):
-        masses = []
-        for c in df.columns:
-            if c in _NONMASS: continue
-            try:
-                masses.append(float(c))
-            except Exception:
+    # 20260416 code review: change to add exceptions from _NONMASS list to MASSLIKE list to avoid future contamination
+    # in CGA -> Trainable 6) Feature rebuilding, when use "Reuse existing wide features CSV", this function will be triggered                                                                       
+    def _infer_ion_masses_from_wide_df(df):                                              
+        """Extract ion m/z values from wide-format feature CSV column headers.           
+        Ion mass columns are named by their m/z value (e.g., '344.1726').                
+        Non-numeric headers (metadata, labels) are skipped automatically.
+        """                                                                              
+        masses = []                                           
+        for c in df.columns:                                                             
+            try:                                              
+                masses.append(float(c))                                                  
+            except (ValueError, TypeError):                   
                 continue
         return sorted(set(masses))
-    #20250912 fix MS2scan missing issue
-    SCAN_CANDIDATES = ("MS2scan_no","MS2Scan_no","ScanNum","scan","Scan","unique_ID")
 
+    # Keep MS2scan_no consistent and controllable in df, so later dataframe edit operation won't get crazy.
     def _ensure_scan(df, fallback=None):
         """
         Guarantee a canonical string column 'MS2scan_no' exists in df.
@@ -4046,7 +3777,6 @@ def open_prepare_dataset_window():
         Else, if fallback (Series/array) matches length, insert it.
         Returns df (copy).
         """
-        import pandas as pd
         if df is None or df.empty:
             return df
         out = df.copy()
@@ -4060,26 +3790,20 @@ def open_prepare_dataset_window():
         if fallback is not None and len(fallback) == len(out):
             out.insert(0, "MS2scan_no", pd.Series(fallback, index=out.index, dtype="string"))
             return out
+        
         # last resort: fail early with context
-        print("[PL→Train][debug] _ensure_scan failed; df cols:", list(df.columns)[:20], "len=", len(df))
+        print("[CGA→Train][Error] _ensure_scan failed to assign MS2scan_no; df cols:", list(df.columns)[:20], "len=", len(df))
+        logger.log(f"[CGA→Train][Error] _ensure_scan failed to guarantee MS2scan_no in df")
         raise KeyError("MS2scan_no")
 
-    #20250912 fix bad calls (the function looks not identical to score_counter in marker)
 
-    def _clean_cols(df):
-        if df is None or df.empty: 
-            return df
-        df = df.copy()
-        df.columns = [str(c).strip().replace("\ufeff","") for c in df.columns]
-        return df
-
+    # (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc) → F, H, N, S, G, K string compact output. MIND the ORDER of input and output
     def _comp_tuple_to_label(x):
         """
         Accepts a tuple/list/str and returns compact label like F1H4N2S3 (omit zeros).
         Order: (Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc) → H,N,S,G,K,F in label
         If you use F,H,N,S,G,K as your canonical, adjust the mapping below.
         """
-        import ast, json
         if x is None or x == "" or (isinstance(x, float) and str(x) == "nan"):
             return None
         if isinstance(x, str):
@@ -4091,16 +3815,20 @@ def open_prepare_dataset_window():
                     pass
             if isinstance(x, str):  # fallback simple split
                 parts = [p for p in x.replace("(","").replace(")","").split(",") if p.strip()!=""]
+                # safe check of not integer
+                for p in parts:                                                                      
+                    if float(p) % 1 != 0:                                                            
+                        raise ValueError(f"Fractional monosaccharide count in composition: '{p}' (full input: {x})") 
                 x = [int(float(p)) for p in parts] if parts else []
         if isinstance(x, (list, tuple)):
             # Assume library order: Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc
             # Label order (O/N both): F, H, N, S(=NeuAc), G(=NeuGc), K(=KDN)
             if len(x) < 6:
                 x = list(x) + [0]*(6-len(x))
-            hex_, hexc, neuac, neugc, kdn, fuc = [int(v) for v in x[:6]]
+            hex, hexc, neuac, neugc, kdn, fuc = [int(v) for v in x[:6]]
             parts = []
             if fuc:   parts.append(f"F{fuc}")
-            if hex_:  parts.append(f"H{hex_}")
+            if hex:  parts.append(f"H{hex}")
             if hexc:  parts.append(f"N{hexc}")
             if neuac: parts.append(f"S{neuac}")
             if neugc: parts.append(f"G{neugc}")
@@ -4108,6 +3836,7 @@ def open_prepare_dataset_window():
             return "".join(parts) if parts else None
         return None
 
+    # count peak hits only, no hit peak reference (that one is moved to score B iirc, and here count serves as "minimal hit" to assign it as glycan, <hits will be assigned as Non-glycans)
     def _count_hits_to_ionlist(peaklist, peakintensity, ion_masses, ppm: float) -> int:
         """
         Count how many reference ion_masses have at least one observed peak within +/- ppm window.
@@ -4145,16 +3874,17 @@ def open_prepare_dataset_window():
             if np.any(np.abs(peaks - float(m)) <= tol):
                 hits += 1
         return hits
+    # ========
 
-    def build_trainable_from_pseudolabels(
+    def build_trainable_from_CGA(
         sample_name: str,
-        pseudo_path: str,
+        cga_path: str,
         ion_file_path: str | None,
         ion_sheet_name: str | None,
         salvage_path: str | None,
         thresholds: dict,
         neg_opts: dict,
-        feature_mode: str,          # "rebuild" or "reuse"
+        feature_mode: str,          # "extract" or "reuse"
         wide_feat_csv: str | None,  # used when feature_mode == "reuse"
         output_path: str | None,
         logger=None,
@@ -4164,7 +3894,7 @@ def open_prepare_dataset_window():
         ):
         """
         One-pass builder:
-        - Load pseudolabeled long TSV
+        - Load CGA (pseudolabeled) long TSV
         - Normalize labels (compact FHNSGKDN)
         - Threshold selection (min ion score, max |ppm|, Top-N)
         - Optional salvage override
@@ -4172,17 +3902,19 @@ def open_prepare_dataset_window():
         - Save trainable CSV
         Returns: (outpath, summary_dict)
         """
-        import pandas as pd, os
 
+        import numpy as np
+        # apply CLI-friendly log declaration
         log = (logger.log if logger else print)
-        log(f"[PL→Train] starting for sample={sample_name}")
 
-        # 1) Load pseudo TSV (long form)
-        pl = _robust_read_csv(pseudo_path, prefer_tab=True) #always tsv
-        #new
-        pl = _clean_cols(pl)
+        log(f"[CGA→Trainable] converting sample={sample_name}")
+
+        # 1) Load CGA TSV (long form)
+        pl = robust_read_csv(cga_path, prefer_tab=True) # Always tsv
+        pl = clean_cols(pl) # Prevents COM elements from Window MS
         if pl is None or pl.empty:
-            raise RuntimeError("Pseudolabeled TSV is empty or unreadable.")
+            log(f"[CGA→Trainable][Error 0] invalid CGA tsv from {sample_name}")
+            raise RuntimeError("CGA TSV is empty or unreadable.")
         # unify case/aliases early
         aliases = {c.lower(): c for c in pl.columns}
         def has(col): return col in pl.columns
@@ -4190,69 +3922,65 @@ def open_prepare_dataset_window():
 
         #20251002 probably include mass to trainable datasets
         # --- [MS1 attach] make sure precursor mass is present when gate or feature needs it
-        # detect PL scan column now (we'll reuse it)
-        _scan_candidates = ("MS2scan_no","MS2Scan_no","ScanNum","scan","Scan","unique_ID")
-        pl_scan_col = next((c for c in _scan_candidates if c in pl.columns), None)
-        if not pl_scan_col and any(k.lower() in aliases for k in _scan_candidates):
-            # resolve via lowercase aliases if needed
-            pl_scan_col = aliases[next(k for k in (s.lower() for s in _scan_candidates) if k in aliases)]
+        # detect CGA column (case-sensitive)
+        pl_scan_col = next((c for c in SCAN_CANDIDATES if c in pl.columns), None)
+        # If failed, use case-insensitve aliases. if the DataFrame has "ms2scan_no" (all lowercase), Pass 1 misses it but Pass 2 finds "ms2scan_no" in aliases and       
+        # returns the original column name from the DataFrame
+        if not pl_scan_col and any(k.lower() in aliases for k in SCAN_CANDIDATES):
+            pl_scan_col = aliases[next(k for k in (s.lower() for s in SCAN_CANDIDATES) if k in aliases)]
         if not pl_scan_col:
-            raise RuntimeError("Pseudolabels lack an MS2 scan column (e.g., 'MS2scan_no').")
+            raise RuntimeError("CGA tsv lacks an MS2 scan column (e.g., 'MS2scan_no').")
         pl[pl_scan_col] = pl[pl_scan_col].astype(str)
 
         #debug lines
-        print("[PL→Train][dbg] scan_col in PL:", pl_scan_col)
-        print("[PL→Train][dbg] include_mass_feature (arg):", include_mass_feature)
-        print("[PL→Train][dbg] columns in PL (first 20):", pl.columns.tolist()[:20])
-        print("[PL→Train][dbg] 'protonatedmass' in PL before MS1 attach:", "protonatedmass" in pl.columns)
-        print("[PL→Train][dbg] converted_csv_path:", converted_csv_path)
+        print("[CGA→Train][DEBUG] scan_col in CGA tsv for MS2 scan no:", pl_scan_col)
+        print("[CGA→Train][DEBUG] MS1 gate argument: include_mass_feature:", include_mass_feature)
+        print("[CGA→Train][DEBUG] column names in CGA tsv (first 20):", pl.columns.tolist()[:20])
+        print("[CGA→Train][DEBUG] 'protonatedmass' in CGA tsv before MS1 attach:", "protonatedmass" in pl.columns)
+        print("[CGA→Train][DEBUG] converted_csv_path:", converted_csv_path)
         #####
 
+        # When CGA tsv lacks protonatedmass and user checked "Include precursor mass as feature, this block fires"
         need_ms1 = bool(include_mass_feature) or (precursor_gate_ppm is not None)
         if need_ms1 and "protonatedmass" not in pl.columns:
             if not converted_csv_path or not os.path.exists(converted_csv_path):
+                log(f"[CGA→Train][ERROR 0]: CGA tsv missing when protonatedmass as feature is selected")
                 raise RuntimeError("MS1 mass required (gate/feature), but converted MS2 CSV/TSV is missing.")
-            conv = _robust_read_csv(converted_csv_path, prefer_tab=True)
+            conv = robust_read_csv(converted_csv_path, prefer_tab=True)
             # find scan + mass columns in converted file
-            conv_scan = next((c for c in _scan_candidates if c in conv.columns), None)
+            conv_scan = next((c for c in SCAN_CANDIDATES if c in conv.columns), None)
             conv_mz   = next((c for c in ("protonatedmass","ProtonatedMass","precursor_mass","mz","MZ") if c in conv.columns), None)
             if not conv_scan or not conv_mz:
+                log(f"[CGA→Train][ERROR 1]: Missing MS2scan_no and protonatedmass-like columns")
                 raise RuntimeError("Converted CSV/TSV must include MS2scan_no and protonatedmass-like columns.")
             conv = conv[[conv_scan, conv_mz]].dropna()
             conv[conv_scan] = conv[conv_scan].astype(str)
             pl = pl.merge(conv.rename(columns={conv_mz: "protonatedmass"}), left_on=pl_scan_col, right_on=conv_scan, how="left").drop(columns=[conv_scan])
-
-        #debug lines
-        print("[PL→Train][dbg] after MS1 attach: 'protonatedmass' in PL =", "protonatedmass" in pl.columns)
-        if "protonatedmass" in pl.columns:
-            print("[PL→Train][dbg] protonatedmass head:", pl["protonatedmass"].head(5).tolist())
-
-        #add here? to apply precursor filter
-        import numpy as np, pandas as pd
+        #print("[PL→Train][dbg] after MS1 attach: 'protonatedmass' in PL =", "protonatedmass" in pl.columns)
+        #if "protonatedmass" in pl.columns:
+        #    print("[PL→Train][dbg] protonatedmass head:", pl["protonatedmass"].head(5).tolist())
 
         if precursor_gate_ppm is not None:
             # Need the library mass per composition; accept any available column name
-            lib_mass_col = next((c for c in ("theoretical_mass","Mass","mass","TheoMass") if c in pl.columns), None)
+            lib_mass_col = next((c for c in ("theoretical_mass","Mass","mass","TheoMass", "Theoretical_mass", "theoreticalmass", "TheoreticalMass") if c in pl.columns), None)
             if lib_mass_col is None:
-                raise RuntimeError("Pseudolabels lack a theoretical mass column to compare against.")
-
+                log(f"[CGA→Train][ERROR 1]: Missing theoretical mass column")
+                raise RuntimeError("CGA lack a theoretical mass column to compare against with.")
+            #ppm calculation is healthy: denominator is theo mass pl[lib_mass_col]
             with np.errstate(divide="ignore", invalid="ignore"):
                 pl["ppm_precursor"] = 1e6 * (pl["protonatedmass"] - pl[lib_mass_col]) / pl[lib_mass_col]
 
             before = len(pl)
             pl = pl[pl["ppm_precursor"].abs() <= float(precursor_gate_ppm)]
             after = len(pl)
-            if logger: logger.log(f"[PL→Train] precursor gate {precursor_gate_ppm} ppm: kept {after}/{before} rows")
-        if "ppm_precursor" in pl.columns:
-            print("[PL→Train][dbg] after gate: kept rows:", len(pl))
+            if logger: logger.log(f"[CGA→Train] precursor gate {precursor_gate_ppm} ppm: kept {after}/{before} rows")
 
-        # preferred canonical names
-        scan_candidates = ("MS2scan_no","MS2Scan_no","ScanNum","scan","Scan","unique_ID")
-        scan_col = next((c for c in scan_candidates if has(c) or has_lower(c)), None)
-        if scan_col and scan_col not in pl.columns and has_lower(scan_col):
-            scan_col = aliases[scan_col.lower()]
+        # 20260416 Code review: refactored to inactivate duplicated scan_col to scan_col. Keep dead block until we make sure it is fine. -> Tested. Looks good, remove in next version
+        #scan_col = next((c for c in SCAN_CANDIDATES if has(c) or has_lower(c)), None)
+        #if scan_col and scan_col not in pl.columns and has_lower(scan_col):
+        #    scan_col = aliases[scan_col.lower()]
 
-        # make/standardize 'composition'
+        # Standardize 'composition'
         if not has("composition"):
             if has("comp_str"):  # some runs write comp_str
                 pl.rename(columns={"comp_str": "composition"}, inplace=True)
@@ -4268,22 +3996,22 @@ def open_prepare_dataset_window():
                     lambda v: v if isinstance(v, str) 
                     else (v[0] if isinstance(v, (list, tuple)) and v else None)
                 )
-
         # final sanity
         if "composition" not in pl.columns:
-            print("[PL→Train][debug] pseudolabel headers:", pl.columns.tolist()[:30])
-            raise RuntimeError("No composition/comp_tuple column in pseudolabels.")        
-
-
+            print("[CGA→Train][ERROR 1] CGA headers:", pl.columns.tolist()[:30])
+            raise RuntimeError("No composition/comp_tuple column in CGA file.")     
+        log(f"[CGA→Train] composition column: source={'composition' if has('composition') else 'derived'}, non-null={int(pl['composition'].notna().sum())}/{len(pl)}")
+        # ============================================
 
         # 2) Thresholding / selection (Updated 20260330)
         min_score = float(thresholds.get("min_ion_score", 0.0))
         max_abs_ppm = float(thresholds.get("max_abs_ppm", 20.0))
-        topn = int(thresholds.get("topn", 1))
+        topn = int(thresholds.get("topn", 1)) # get top 1 composition in same MS2scan_no. Notice that score A is identical for isomers, so w/o score b, first from mspinsilico? wins.
         use_score = ("ion score" in pl.columns)
         if "ppm_error" not in pl.columns:
-            pl["ppm_error"] = 9e9  # fallback if missing
+            pl["ppm_error"] = np.nan #20260416 changed to nan to avoid weird 9e9 in output... do we have that output? I think save issue is visible in ML part #9e9  
 
+        # gates "did Score B select this row?" 
         def _truthy(v):
             if pd.isna(v):
                 return False
@@ -4292,6 +4020,7 @@ def open_prepare_dataset_window():
             s = str(v).strip().lower()
             return s in {"true", "1", "yes", "y", "t"}
 
+        # gates "did Score B actually assign a composition?"
         def _nonempty_label(v):
             if pd.isna(v):
                 return False
@@ -4300,17 +4029,22 @@ def open_prepare_dataset_window():
 
         # First build the eligible pool using the same quality thresholds as before
         eligible = pl.copy()
+
+        # when ion score is presented (should have one after CGA, it is score A), pick those > min_score, default value in GUI is 0.07
         if use_score:
             eligible = eligible[eligible["ion score"] >= min_score]
-        eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm]
+        # 20260416 nan version, if not working rollback
+        if "ppm_error" in pl.columns and pl["ppm_error"].notna().any():
+            eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm]  
+        #eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm] #old #9e9 version use this line
 
-        # Legacy fallback selection (current behavior)
-        order_cols = [scan_col] + (["ion score"] if use_score else ["ppm_error"])
+        # Legacy fallback selection (current behavior), score A based selection is copied to legacy_sel
+        order_cols = [pl_scan_col] + (["ion score"] if use_score else ["ppm_error"]) #replaced pl_scan_col
         ascending  = [True] + ([False] if use_score else [True])
         legacy_sel = (
             eligible
             .sort_values(order_cols, ascending=ascending)
-            .groupby(scan_col, as_index=False)
+            .groupby(pl_scan_col, as_index=False) #replaced pl_scan_col that means get Top N of same MS2scan_no
             .head(topn)
             .copy()
         )
@@ -4327,7 +4061,7 @@ def open_prepare_dataset_window():
                 scoreb_sel = scoreb_sel[scoreb_sel["selected_composition"].map(_nonempty_label)].copy()
                 scoreb_sel["Structure"] = scoreb_sel["selected_composition"].astype(str).str.strip()
             else:
-                # defensive fallback
+                # defensive fallback to avoid header inconsistency
                 if "composition" in scoreb_sel.columns:
                     scoreb_sel["Structure"] = scoreb_sel["composition"].astype(str).str.strip()
 
@@ -4336,16 +4070,16 @@ def open_prepare_dataset_window():
                 if "score_b_rank" in scoreb_sel.columns:
                     scoreb_sel = (
                         scoreb_sel
-                        .sort_values([scan_col, "score_b_rank"], ascending=[True, True])
-                        .groupby(scan_col, as_index=False)
+                        .sort_values([pl_scan_col, "score_b_rank"], ascending=[True, True]) #replaced pl_scan_col
+                        .groupby(pl_scan_col, as_index=False) #pl_scan_col
                         .head(1)
                         .copy()
                     )
                 else:
                     scoreb_sel = (
                         scoreb_sel
-                        .sort_values([scan_col], ascending=[True])
-                        .groupby(scan_col, as_index=False)
+                        .sort_values([pl_scan_col], ascending=[True]) #pl_scan_col
+                        .groupby(pl_scan_col, as_index=False) #pl_scan_col
                         .head(1)
                         .copy()
                     )
@@ -4355,10 +4089,10 @@ def open_prepare_dataset_window():
                 else:
                     scoreb_sel["selection_source"] = scoreb_sel["selection_source"].replace("", "score_b").fillna("score_b")
 
-                scoreb_scan_ids = set(scoreb_sel[scan_col].astype(str))
+                scoreb_scan_ids = set(scoreb_sel[pl_scan_col].astype(str))#pl_scan_col
 
                 # fallback only for scans not covered by Score B-selected rows
-                fallback_sel = legacy_sel[~legacy_sel[scan_col].astype(str).isin(scoreb_scan_ids)].copy()
+                fallback_sel = legacy_sel[~legacy_sel[pl_scan_col].astype(str).isin(scoreb_scan_ids)].copy() #pl_scan_col
 
                 # IMPORTANT: legacy fallback must still define Structure
                 if "composition" in fallback_sel.columns:
@@ -4378,20 +4112,20 @@ def open_prepare_dataset_window():
                         .replace("", "score_a_fallback")
                         .fillna("score_a_fallback")
                     )
-                log(f"[PL→Train][dbg] scoreb_sel rows: {len(scoreb_sel)} null_Structure: {int(scoreb_sel['Structure'].isna().sum()) if 'Structure' in scoreb_sel.columns else 'NA'}")
-                log(f"[PL→Train][dbg] fallback_sel rows: {len(fallback_sel)} null_Structure: {int(fallback_sel['Structure'].isna().sum()) if 'Structure' in fallback_sel.columns else 'NA'}")
+                log(f"[CGA→Train][DEBUG] scoreb_sel rows: {len(scoreb_sel)} null_Structure: {int(scoreb_sel['Structure'].isna().sum()) if 'Structure' in scoreb_sel.columns else 'NA'}")
+                log(f"[CGA→Train][DEBUG] fallback_sel rows: {len(fallback_sel)} null_Structure: {int(fallback_sel['Structure'].isna().sum()) if 'Structure' in fallback_sel.columns else 'NA'}")
 
                 sel = pd.concat([scoreb_sel, fallback_sel], ignore_index=True, sort=False)
 
-                log(f"[PL→Train] selection mode: Score B preferred, Score A fallback")
-                log(f"[PL→Train] Score B-selected scans used: {len(scoreb_scan_ids)}")
-                log(f"[PL→Train] Score A fallback rows used: {len(fallback_sel)}")
+                log(f"[CGA→Train][AUTODETECT] ranking method change to: Score B preferred, Score A fallback")
+                log(f"[CGA→Train] Score B-selected scans used: {len(scoreb_scan_ids)}")
+                log(f"[CGA→Train] Score A fallback rows used: {len(fallback_sel)}")
             else:
                 sel = legacy_sel.copy()
-                log("[PL→Train] selection mode: no valid Score B-selected rows found; using legacy fallback only")
+                log("[CGA→Train][AUTODETECT] no valid Score B-selected rows found; ranking method is: Legacy Score A based")
         else:
             sel = legacy_sel.copy()
-            log("[PL→Train] selection mode: Score B columns absent; using legacy fallback only")
+            log("[CGA→Train][AUTODETECT] Score B columns absent; ranking method is: Legacy Score A based")
         #20250912 fix critical root cause: no Structure column if we have pure pl datasets. It's composition!
         # --- normalize label column on the selection table ---
         # we want a guaranteed 'Structure' column to merge later
@@ -4414,10 +4148,10 @@ def open_prepare_dataset_window():
         #20250912@mark
         # ---- normalize scan key to string to avoid dtype mismatches ----
         # keep scan key as string to avoid dtype mismatches
-        sel[scan_col] = sel[scan_col].astype(str)
+        sel[pl_scan_col] = sel[pl_scan_col].astype(str) #pl_scan_col
 
         #debug track
-        print("[PL→Train][dbg] sel cols:", [scan_col, "Structure"], 
+        print("[CGA→Train][DEBUG]sel cols:", [pl_scan_col, "Structure"],  #pl_scan_col
             "null_Struct:", int(sel["Structure"].isna().sum()))
         # 3) Ion list
         ion_df = _read_ion_df(ion_file_path) if ion_file_path else None
@@ -4426,259 +4160,190 @@ def open_prepare_dataset_window():
             pass
 
         # 4) Features
-        # If REBUILD: need long-form peaks and a numeric ion mass list
+        # If EXTRACT (REBUILD): need long-form peaks and a numeric ion mass list
         # If REUSE : use the provided wide feature CSV and infer numeric masses (for negatives later)
         import numpy as np
         from ml_ng_utils import build_features_from_peaks_log10_plus1
 
         ion_masses = None
-        if feature_mode == "rebuild":
+        if feature_mode == "extract":
             if ion_df is None or "mass" not in ion_df.columns:
-                raise RuntimeError("Ion list with a 'mass' column is required to rebuild features.")
+                log(f"[ERROR 1] Require an ion list with mass column to define features for peak extraction (is file corrupted?)")
+                raise RuntimeError("Ion list with a 'mass' column is required to to define features for peak extraction")
             ion_masses = ion_df["mass"].astype(float).tolist()
 
             # require long-form peaks to build features
             if not {"peaklist","peakintensity"}.issubset(pl.columns):
-                raise RuntimeError("Pseudolabeled TSV must contain 'peaklist' and 'peakintensity' to rebuild features.")
-            
-            #20251030 fix MS2scan_no error
-            pos_scans_df = sel[[scan_col,"peaklist","peakintensity"]].rename(columns={scan_col:"MS2scan_no"})
-            pos_scans_df["MS2scan_no"] = pos_scans_df["MS2scan_no"].astype(str)
-
-            # Build features
-            pos_feat = build_features_from_peaks_log10_plus1(
-                pos_scans_df, ion_masses, ppm=float(thresholds.get("ion_ppm", 10.0))
-            )
-
-            # --- NEW: robust scan handling even when features are empty ---
-            scan_series = pos_scans_df["MS2scan_no"].astype("string")
-            if pos_feat is None or pos_feat.empty:
-                # Create a minimal shell so downstream code can proceed gracefully
-                import pandas as pd
-                pos_feat = pd.DataFrame({"MS2scan_no": scan_series})
-                pos_feat["_scan_fallback"] = scan_series
-            else:
-                # Ensure canonical scan column then record fallback for later merges
-                pos_feat = _ensure_scan(pos_feat, fallback=scan_series)
-                pos_feat["_scan_fallback"] = pos_feat["MS2scan_no"].astype(str).values
-            # --------------------------------------------------------------
-            print("[PL→Train][dbg] ion_masses count:", 0 if ion_masses is None else len(ion_masses))
-
-            #debug print
-            print("[PL→Train][dbg] pos_feat pre-merge has:", 
-            [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
-
-            # attach label next; do NOT subset columns yet
-            # updated 20260330
-            merge_cols = [scan_col, "Structure"] + (["selection_source"] if "selection_source" in sel.columns else [])
-            pos_feat = pos_feat.merge(sel[merge_cols],
-                                    left_on="MS2scan_no", right_on=scan_col,
-                                    how="left").drop(columns=[scan_col])
-            ## extra debug to eliminate nan after score b implementation
-            # --- DEBUG: inspect NaN Structure rows ---
-            nan_mask = pos_feat["Structure"].isna() | (
-                pos_feat["Structure"].astype(str).str.strip().str.lower().isin({"nan", "none", "null", ""})
-            )
-
-            nan_rows = pos_feat[nan_mask]
-
-            if len(nan_rows) > 0:
-                unique_scans = nan_rows["MS2scan_no"].nunique() if "MS2scan_no" in nan_rows.columns else 0
-
-                log(f"[PL→Train][WARN] NaN Structure rows detected: {len(nan_rows)}")
-                log(f"[PL→Train][WARN] Unique MS2 scans affected: {unique_scans}")
-
-                # show a few examples for inspection
-                preview_cols = [c for c in ["MS2scan_no", "Structure"] if c in nan_rows.columns]
-                try:
-                    preview = nan_rows[preview_cols].head(5).to_string(index=False)
-                    log(f"[PL→Train][WARN] Sample NaN rows:\n{preview}")
-                except Exception:
-                    pass
-
-            # --- DROP NaN Structure rows (recommended) ---
-            pos_feat = pos_feat[~nan_mask].copy()
-            # optional deeper trace: check if these scans existed in sel
-            if "MS2scan_no" in pos_feat.columns:
-                sel_scans = set(sel[scan_col].astype(str))
-                nan_scan_ids = set(nan_rows["MS2scan_no"].astype(str))
-                missing_in_sel = nan_scan_ids - sel_scans
-
-                log(f"[PL→Train][DEBUG] NaN scans missing from selection: {len(missing_in_sel)}")
-
-            # === attach MS1 (protonatedmass) + delta_ppm into wide features when requested ===
-            print("[PL→Train][dbg] rebuild: include_mass_feature", include_mass_feature)
-
-            # === Include precursor mass as a feature (rebuild) ===========================
-            if include_mass_feature:
-                print("[PL→Train][dbg] rebuild: include_mass_feature =", include_mass_feature)
-
-                # Build a (scan, protonatedmass) table from PL, renaming scan to MS2scan_no
-                pm_src_scan = pl_scan_col  # detected earlier from PL
-                if "protonatedmass" not in pl.columns:
-                    print("[PL→Train][dbg][mass] WARNING: PL lacks 'protonatedmass' after MS1 attach; skipping mass feature")
-                else:
-                    pm = (pl[[pm_src_scan, "protonatedmass"]]
-                            .dropna()
-                            .drop_duplicates(pm_src_scan)
-                            .rename(columns={pm_src_scan: "MS2scan_no"}))
-                    pm["MS2scan_no"] = pm["MS2scan_no"].astype(str)
-                    print("[PL→Train][dbg][mass] pm rows:", len(pm), 
-                        "head:", pm.head(3).to_dict("records"))
-
-                    # Make sure pos_feat actually has MS2scan_no; if not, rebuild it
-                    if "MS2scan_no" not in pos_feat.columns:
-                        print("[PL→Train][dbg][mass] pos_feat missing MS2scan_no; rebuilding from fallback…")
-                        pos_feat = _ensure_scan(pos_feat, fallback=pos_feat.get("_scan_fallback"))
-                        print("[PL→Train][dbg][mass] after ensure_scan, has MS2scan_no?",
-                            "MS2scan_no" in pos_feat.columns)
-
-                    # Final guard (fail soft if still missing)
-                    if "MS2scan_no" in pos_feat.columns:
-                        # Cast to string to avoid dtype merge issues
-                        pos_feat["MS2scan_no"] = pos_feat["MS2scan_no"].astype(str)
-                        # Merge
-                        pos_feat = pos_feat.merge(pm, on="MS2scan_no", how="left")
-                        print("[PL→Train][dbg][mass] merged mass → pos_feat cols now:",
-                            [c for c in pos_feat.columns[:25]])
-                        print("[PL→Train][dbg][mass] protonatedmass non-null count:",
-                            int(pos_feat["protonatedmass"].notna().sum()))
-                    else:
-                        print("[PL→Train][dbg][mass] ABORT mass merge: no MS2scan_no in pos_feat")
-            # ============================================================================
-
-            # ensure scan column exists (from the earlier patch) then cast to str
-            if "MS2scan_no" not in pos_feat.columns and len(pos_feat) == len(pos_scans_df):
-                pos_feat.insert(0, "MS2scan_no", pos_scans_df["MS2scan_no"].values)
-            pos_feat["MS2scan_no"] = pos_feat["MS2scan_no"].astype(str)
-
-            if "Structure" not in pos_feat.columns:
-                pos_feat = pos_feat.merge(
-                    sel[[scan_col, "Structure"]],
-                    left_on="MS2scan_no",
-                    right_on=scan_col,
-                    how="left",
-                    suffixes=("", "_pl")  # avoid _x/_y confusion
-                ).drop(columns=[scan_col])
-            else:
-                # Normalize any legacy duplicates from previous runs
-                if "Structure_x" in pos_feat.columns and "Structure_y" in pos_feat.columns:
-                    pos_feat["Structure"] = pos_feat["Structure_x"].fillna(pos_feat["Structure_y"])
-                    pos_feat.drop(columns=["Structure_x","Structure_y"], inplace=True, errors="ignore")
-                elif "Structure_pl" in pos_feat.columns:
-                    pos_feat["Structure"] = pos_feat.get("Structure").fillna(pos_feat["Structure_pl"])
-                    pos_feat.drop(columns=["Structure_pl"], inplace=True, errors="ignore")
-            #debug print
-            print("[PL→Train][dbg] pos_feat post-merge has:", 
-                [c for c in ("MS2scan_no","Structure","Structure_pl","Structure_x","Structure_y","_scan_fallback") 
-                if c in pos_feat.columns])
-
+                log(f"[ERROR 1] CGA TSV requires 'peaklist' and 'peakintensity' for extracting features (is file corrupted?)")
+                raise RuntimeError("CGA TSV must contain 'peaklist' and 'peakintensity' to extract and rebuild features.")
         else:  # feature_mode == "reuse"
-            if not wide_feat_csv:
+            if not wide_feat_csv:                                                            
+                log(f"[ERROR 1] Require an trainable wide feature CSV file to define features for peak extraction (is file corrupted?)")
                 raise RuntimeError("Provide a wide feature CSV when feature_mode='reuse'.")
-            print("[PL→Train][dbg][reuse branch] pos_feat pre-merge has:", 
-                [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
-            # 1) load the wide feature matrix
-            feat = _robust_read_csv(wide_feat_csv)  # CSV (wide)
-            if feat is None or feat.empty:
+                                                                        
+            # 1) load the wide feature matrix                     
+            feat = robust_read_csv(wide_feat_csv)
+            if feat is None or feat.empty:                                                   
+                log(f"[ERROR 1] Trainable wide feature CSV is unreadable or empty (file corrupted?)")
                 raise RuntimeError("Wide feature CSV unreadable or empty.")
-
-            # 2) detect its scan column *after* feat exists
-            scan_feat = next((c for c in ("MS2scan_no","ScanNum","scan","Scan","unique_ID") if c in feat.columns), None)
-            if not scan_feat:
+                                                                       
+            # 2) detect scan column                                                          
+            scan_feat = next((c for c in SCAN_CANDIDATES if c in feat.columns), None)
+            if not scan_feat:                                                                
+                log(f"[ERROR 1] No MS2 scan column founr in trainable wide CSV. (file corrupted?)")
                 raise RuntimeError("No scan column found in wide feature CSV.")
 
-            # 3) infer numeric ion masses from wide headers for later (negs)
-            ion_masses = _infer_ion_masses_from_wide_df(feat)
-            if not ion_masses:
+
+            feat[scan_feat] = feat[scan_feat].astype(str)                                    
+        
+            # 3) infer ion masses from headers (for negatives later)                         
+            ion_masses = _infer_ion_masses_from_wide_df(feat)     
+            if not ion_masses:                                                               
+                log(f"[ERROR 1] Missing features from trainable CSV headers")
                 raise RuntimeError("No numeric ion masses inferred from wide feature CSV headers.")
-            #20250912@mark
-            feat[scan_feat] = feat[scan_feat].astype(str)
-            # positives
-            pos_feat = _ensure_scan(pos_feat, fallback=pos_scans_df["MS2scan_no"])
+            
+            pos_feat = _ensure_scan(feat, fallback=None) 
+
+        #20251030 fix MS2scan_no name and type error
+        pos_scans_df = sel[[pl_scan_col,"peaklist","peakintensity"]].rename(columns={pl_scan_col:"MS2scan_no"}) #pl_scan_col
+        pos_scans_df["MS2scan_no"] = pos_scans_df["MS2scan_no"].astype(str)
+
+        # Build features from extracted list
+        pos_feat = build_features_from_peaks_log10_plus1(pos_scans_df, ion_masses, ppm=float(thresholds.get("ion_ppm", 10.0)))
+
+        # --- NEW: robust scan handling even when features are empty ---
+        scan_series = pos_scans_df["MS2scan_no"].astype("string")
+        if pos_feat is None or pos_feat.empty:
+            # Create a minimal shell so downstream code can proceed gracefully
+
+            pos_feat = pd.DataFrame({"MS2scan_no": scan_series})
+            pos_feat["_scan_fallback"] = scan_series
+        else:
+            # Ensure canonical scan column then record fallback for later merges
+            pos_feat = _ensure_scan(pos_feat, fallback=scan_series)
             pos_feat["_scan_fallback"] = pos_feat["MS2scan_no"].astype(str).values
-            #debug print
-            print("[PL→Train][dbg] pos_feat pre-merge has:", 
-            [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
+        # --------------------------------------------------------------
+        log(f"[CGA→Train][info] features count: {0 if ion_masses is None else len(ion_masses)}")
 
-            #20251001 fix by GPT?
-            if "protonatedmass" in pl.columns and "MS2scan_no" in pos_feat.columns:
-                pm = pl[["MS2scan_no","protonatedmass"]].dropna().drop_duplicates("MS2scan_no")
-                pos_feat = pos_feat.merge(pm, on="MS2scan_no", how="left")
-                print("[PL→Train][dbg] 20251001fix")
-                if include_mass_feature:
-                    _lib_mass_pl = next((c for c in ("theoretical_mass","Mass","mass","TheoMass") if c in pl.columns), None)
-                    if _lib_mass_pl:
-                        tm = pl[[pl_scan_col, _lib_mass_pl]].dropna().drop_duplicates(pl_scan_col)
-                        pos_feat = pos_feat.merge(tm.rename(columns={pl_scan_col: "MS2scan_no"}), on="MS2scan_no", how="left")
-                        with np.errstate(divide="ignore", invalid="ignore"):
-                            pos_feat["delta_ppm"] = 1e6 * (pos_feat["protonatedmass"] - pos_feat[_lib_mass_pl]) / pos_feat[_lib_mass_pl]
+        #debug print
+        print("[CGA→Train][DEBUG] pos_feat pre-merge has:", 
+        [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in pos_feat.columns])
 
-            # attach label next; do NOT subset columns yet
-            # Updated 20260330
-            merge_cols = [scan_col, "Structure"] + (["selection_source"] if "selection_source" in sel.columns else [])
-            pos_feat = pos_feat.merge(sel[merge_cols],
-                                    left_on="MS2scan_no", right_on=scan_col,
-                                    how="left").drop(columns=[scan_col])
-            ## extra debug to eliminate nan after score b implementation
-            # --- DEBUG: inspect NaN Structure rows ---
-            nan_mask = pos_feat["Structure"].isna() | (
-                pos_feat["Structure"].astype(str).str.strip().str.lower().isin({"nan", "none", "null", ""})
-            )
+        # attach label next; do NOT subset columns yet
+        # updated 20260330
+        merge_cols = [pl_scan_col, "Structure"] + (["selection_source"] if "selection_source" in sel.columns else [])
+        pos_feat = pos_feat.merge(sel[merge_cols],
+                                left_on="MS2scan_no", right_on=pl_scan_col,
+                                how="left").drop(columns=[pl_scan_col]) #pl_scan_col
+        # 20260417 A inspection of fixing 100% warn on this [PL→Train][dbg][mass] pos_feat missing MS2scan_no; rebuilding from fallback… /[CGA→Train][WARN] pos_feat missing MS2scan_no, run fallback...
+        if "MS2scan_no_x" in pos_feat.columns:                                               
+            print("[CGA→Train][DEBUG] MS2scan_no_x found after merge, renaming to MS2scan_no")                                                                         
+            pos_feat.rename(columns={"MS2scan_no_x": "MS2scan_no"}, inplace=True)
+            pos_feat.drop(columns=["MS2scan_no_y"], errors="ignore", inplace=True)           
+        elif "MS2scan_no_y" in pos_feat.columns:                  
+            print("[CGA→Train][DEBUG] MS2scan_no_y found after merge (no _x), renaming to MS2scan_no")                                                                         
+            pos_feat.rename(columns={"MS2scan_no_y": "MS2scan_no"}, inplace=True)
 
-            nan_rows = pos_feat[nan_mask]
+        ## extra debug to eliminate nan after score b implementation
+        # --- DEBUG: inspect NaN Structure rows ---
+        nan_mask = pos_feat["Structure"].isna() | (
+            pos_feat["Structure"].astype(str).str.strip().str.lower().isin({"nan", "none", "null", ""})
+        )
 
-            if len(nan_rows) > 0:
-                unique_scans = nan_rows["MS2scan_no"].nunique() if "MS2scan_no" in nan_rows.columns else 0
+        nan_rows = pos_feat[nan_mask]
 
-                log(f"[PL→Train][WARN] NaN Structure rows detected: {len(nan_rows)}")
-                log(f"[PL→Train][WARN] Unique MS2 scans affected: {unique_scans}")
+        if len(nan_rows) > 0:
+            unique_scans = nan_rows["MS2scan_no"].nunique() if "MS2scan_no" in nan_rows.columns else 0
+            log(f"[CGA→Train][WARN] NaN Structure rows detected: {len(nan_rows)}")
+            log(f"[CGA→Train][WARN] Unique MS2 scans affected: {unique_scans}")
+            # show a few examples for inspection
+            preview_cols = [c for c in ["MS2scan_no", "Structure"] if c in nan_rows.columns]
+            try:
+                preview = nan_rows[preview_cols].head(5).to_string(index=False)
+                log(f"[CGA→Train][WARN] Sample NaN rows:\n{preview}")
+            except Exception:
+                pass
 
-                # show a few examples for inspection
-                preview_cols = [c for c in ["MS2scan_no", "Structure"] if c in nan_rows.columns]
-                try:
-                    preview = nan_rows[preview_cols].head(5).to_string(index=False)
-                    log(f"[PL→Train][WARN] Sample NaN rows:\n{preview}")
-                except Exception:
-                    pass
+        # --- DROP NaN Structure rows (recommended) ---
+        pos_feat = pos_feat[~nan_mask].copy()
+        # optional deeper trace: check if nan MS2 scans still exist in sel
+        if "MS2scan_no" in pos_feat.columns:
+            sel_scans = set(sel[pl_scan_col].astype(str)) #pl_scan_col
+            nan_scan_ids = set(nan_rows["MS2scan_no"].astype(str))
+            missing_in_sel = nan_scan_ids - sel_scans
+            log(f"[CGA→Train][ERROR 1] NaN MS2scan_no missing from selection: {len(missing_in_sel)}, is file corrupted?")
 
-            # --- DROP NaN Structure rows (recommended) ---
-            pos_feat = pos_feat[~nan_mask].copy()
-            # optional deeper trace: check if these scans existed in sel
-            if "MS2scan_no" in pos_feat.columns:
-                sel_scans = set(sel[scan_col].astype(str))
-                nan_scan_ids = set(nan_rows["MS2scan_no"].astype(str))
-                missing_in_sel = nan_scan_ids - sel_scans
+        # === attach MS1 (protonatedmass) + delta_ppm into wide features when requested ===
+        log(f"[CGA→Train][setting] Extract mode, including MS1 precursor mass as feature: {include_mass_feature}")
 
-                log(f"[PL→Train][DEBUG] NaN scans missing from selection: {len(missing_in_sel)}")
-
-
-            # attach label if missing
-            if "Structure" not in pos_feat.columns:
-                pos_feat = pos_feat.merge(
-                    sel[[scan_col, "Structure"]],
-                    left_on="MS2scan_no",
-                    right_on=scan_col,
-                    how="left",
-                    suffixes=("", "_pl")  # avoid _x/_y confusion
-                ).drop(columns=[scan_col])
+        # === Include precursor mass as a feature (rebuild) ===========================
+        if include_mass_feature:
+            # Build a (scan, protonatedmass) table from CGA, renaming scan to MS2scan_no
+            pm_src_scan = pl_scan_col  # detected earlier from CGA
+            if "protonatedmass" not in pl.columns:
+                log("[CGA→Train][WARN] CGA file missing 'protonatedmass' after MS1 attach; skipping mass feature inclusion")
             else:
-                # Normalize any legacy duplicates from previous runs
-                if "Structure_x" in pos_feat.columns and "Structure_y" in pos_feat.columns:
-                    pos_feat["Structure"] = pos_feat["Structure_x"].fillna(pos_feat["Structure_y"])
-                    pos_feat.drop(columns=["Structure_x","Structure_y"], inplace=True, errors="ignore")
-                elif "Structure_pl" in pos_feat.columns:
-                    pos_feat["Structure"] = pos_feat.get("Structure").fillna(pos_feat["Structure_pl"])
-                    pos_feat.drop(columns=["Structure_pl"], inplace=True, errors="ignore")
-            #debug print
-            print("[PL→Train][dbg] pos_feat post-merge has:", 
+                pm = (pl[[pm_src_scan, "protonatedmass"]]
+                        .dropna()
+                        .drop_duplicates(pm_src_scan)
+                        .rename(columns={pm_src_scan: "MS2scan_no"}))
+                pm["MS2scan_no"] = pm["MS2scan_no"].astype(str)
+                log(f"[CGA→Train][info] MS2 with MS1 precursor feature count: {len(pm)} ")
+                print("[CGA→Train][DEBUG] head:", pm.head(3).to_dict("records"))
+
+            # Make sure pos_feat actually has MS2scan_no; if not, rebuild it
+            # Why MS2scan_no is missing, rebuild 100% will be triggered, is probably coming from drop(columns=[pl_scan_col], 20260417 fix attempted
+            if "MS2scan_no" not in pos_feat.columns:
+                log("[CGA→Train][WARN] pos_feat missing MS2scan_no, run fallback...")
+                pos_feat = _ensure_scan(pos_feat, fallback=pos_feat.get("_scan_fallback"))
+                log(f"[CGA→Train][DEBUG] after ensure_scan fallback, has MS2scan_no now?{'MS2scan_no' in pos_feat.columns}" )
+
+            # Final guard (fail soft if still missing)
+            if "MS2scan_no" in pos_feat.columns:
+                # Cast to string to avoid dtype merge issues
+                pos_feat["MS2scan_no"] = pos_feat["MS2scan_no"].astype(str)
+                # Merge
+                pos_feat = pos_feat.merge(pm, on="MS2scan_no", how="left")
+                print("[CGA→Train][DEBUG] merged mass → pos_feat cols preview",
+                    [c for c in pos_feat.columns[:25]])
+                print("[CGA→Train][DEBUG] protonatedmass non-null count:",
+                    int(pos_feat["protonatedmass"].notna().sum()))
+            else:
+                print("[CGA→Train][ERROR 1] ABORT mass merge: no MS2scan_no in pos_feat")
+        # ============================================================================
+
+        # ensure scan column exists (from the earlier patch) then cast to str
+        if "MS2scan_no" not in pos_feat.columns and len(pos_feat) == len(pos_scans_df):
+            pos_feat.insert(0, "MS2scan_no", pos_scans_df["MS2scan_no"].values)
+        pos_feat["MS2scan_no"] = pos_feat["MS2scan_no"].astype(str)
+
+        if "Structure" not in pos_feat.columns:
+            pos_feat = pos_feat.merge(
+                sel[[pl_scan_col, "Structure"]],
+                left_on="MS2scan_no",
+                right_on=pl_scan_col,
+                how="left",
+                suffixes=("", "_pl")  # avoid _x/_y confusion
+            ).drop(columns=[pl_scan_col]) #pl_scan_col
+        else:
+            # Normalize any legacy duplicates from previous runs
+            if "Structure_x" in pos_feat.columns and "Structure_y" in pos_feat.columns:
+                pos_feat["Structure"] = pos_feat["Structure_x"].fillna(pos_feat["Structure_y"])
+                pos_feat.drop(columns=["Structure_x","Structure_y"], inplace=True, errors="ignore")
+            elif "Structure_pl" in pos_feat.columns:
+                pos_feat["Structure"] = pos_feat.get("Structure").fillna(pos_feat["Structure_pl"])
+                pos_feat.drop(columns=["Structure_pl"], inplace=True, errors="ignore")
+        #debug print
+        print("[CGA→Train][DEBUG] pos_feat post-merge has:", 
             [c for c in ("MS2scan_no","Structure","Structure_pl","Structure_x","Structure_y","_scan_fallback") 
             if c in pos_feat.columns])
- 
+
+
         # 5) Optionally add negatives (easy non-glycan) using the same ion set
-        pos_ids_set = set(sel[scan_col].astype(str))
+        pos_ids_set = set(sel[pl_scan_col].astype(str)) #pl_scan_col
         add_negs = bool(neg_opts.get("enable", False))
         final_df = pos_feat.copy()
+
         if add_negs:
             # --- params ---
             min_hits  = int(neg_opts.get("min_hits", 3))
@@ -4690,13 +4355,14 @@ def open_prepare_dataset_window():
 
             # --- sanity: ion masses source ---
             if ion_df is None or ion_df.empty:
+                print(f"[DEBUG] ion_df is missing after reference, try ion_masses instead")
                 ion_df = pd.DataFrame({"mass": ion_masses})
 
             # --- collect candidate negatives from long pseudolabel TSV ---
             #   (scans with < min_hits glycan-ion matches and not already positive)
             neg_rows = []
-            for r in pl[[scan_col, "peaklist", "peakintensity"]].dropna().itertuples(index=False):
-                sid = str(getattr(r, scan_col))
+            for r in pl[[pl_scan_col, "peaklist", "peakintensity"]].dropna().itertuples(index=False): #pl_scan_col
+                sid = str(getattr(r, pl_scan_col)) #pl_scan_col
                 if sid in pos_ids_set:
                     continue
                 hits = _count_hits_to_ionlist(
@@ -4720,8 +4386,8 @@ def open_prepare_dataset_window():
                 neg_df["MS2scan_no"] = neg_df["MS2scan_no"].astype(str)
 
                 # DEBUG: prove we have scan ids before featurizing
-                print("[PL→Train][dbg][neg] kept rows:", len(neg_df),
-                    "first scans:", neg_df["MS2scan_no"].head(5).tolist())
+                log(f"[CGA→Train][DEBUG][Neg sampling] Row counts after capping: {len(neg_df)}")
+                print(f"[DEBUG][Neg sampling] first scans: ", neg_df["MS2scan_no"].head(5).tolist())
 
                 # --- build features for negatives (only kept rows) ---
                 neg_feat = build_features_from_peaks_log10_plus1(neg_df, ion_masses, ppm=ng_ppm)
@@ -4729,18 +4395,19 @@ def open_prepare_dataset_window():
                 neg_feat["Structure"] = NEG_LABEL
                 neg_feat["_scan_fallback"] = neg_feat["MS2scan_no"].astype(str).values
 
-                print("[PL→Train][dbg][neg] after features:",
+                print("[CGA→Train][DEBUG][Neg sampling] after features:",
                     [c for c in ("MS2scan_no","Structure","_scan_fallback") if c in neg_feat.columns],
                     "first scans:", neg_feat["MS2scan_no"].head(5).tolist())
+                
         # 6) Finalize + save
         if output_path is None or output_path.strip() == "":
-            outdir = os.path.dirname(pseudo_path)
+            outdir = os.path.dirname(cga_path)
             # suffix reflects whether MS1 is part of the feature set
             mass_suffix = "_withMass" if include_mass_feature else "_noMass"
-            outname = f"{sample_name}_trainable_fromPL_{datetime.now().strftime('%Y%m%d')}{mass_suffix}.csv"
+            outname = f"{sample_name}_trainable_fromPL_{datetime.now().strftime('%Y%m%d_%H%M%S')}{mass_suffix}.csv"
             output_path = os.path.join(outdir, outname)
-            if logger:
-                logger.log(f"[PL→Train] include_mass_feature={include_mass_feature} → {os.path.basename(output_path)}")
+
+        log(f"[CGA→Train] include_mass_feature={include_mass_feature} → {os.path.basename(output_path)}")
 
         # assemble
         # --- assemble ---
@@ -4748,13 +4415,13 @@ def open_prepare_dataset_window():
                 pd.concat([pos_feat, neg_feat], ignore_index=True, sort=False)
 
         # Debug: check for protonatedmass survival before ensure_scan
-        print("[PL→Train][dbg] after concat: has protonatedmass?","protonatedmass" in final_df.columns)
+        print("[CGA→Train][DEBUG] after concat: has protonatedmass?","protonatedmass" in final_df.columns)
         if "protonatedmass" in final_df.columns:
-            print("[PL→Train][dbg] final protonatedmass non-null:",
+            print("[CGA→Train][DEBUG] final protonatedmass non-null:",
                 int(final_df["protonatedmass"].notna().sum()))
-        print("[PL→Train][dbg] after concat: cols=", final_df.columns.tolist()[:20])
+        print("[CGA→Train][DEBUG] after concat: cols=", final_df.columns.tolist()[:20])
         if "protonatedmass" in final_df.columns:
-            print("[PL→Train][dbg] protonatedmass head:", final_df["protonatedmass"].head().tolist())
+            print("[CGA→Train][DEBUG] protonatedmass head:", final_df["protonatedmass"].head().tolist())
 
         # --- make sure we can reconstruct the scan column ---
         combined_fallback = final_df["_scan_fallback"].astype(str) if "_scan_fallback" in final_df.columns else None
@@ -4762,43 +4429,34 @@ def open_prepare_dataset_window():
         final_df = _ensure_scan(final_df, fallback=combined_fallback)
 
         # Debug after ensure_scan
-        print("[PL→Train][dbg] after ensure_scan: cols=", final_df.columns.tolist()[:20])
+        print("[CGA→Train][DEBUG] after ensure_scan: cols=", final_df.columns.tolist()[:20])
         if "protonatedmass" in final_df.columns:
-            print("[PL→Train][dbg] protonatedmass head:", final_df["protonatedmass"].head().tolist())
-
-        # DEBUG (safe now)
-        #print("[PL→Train][dbg] after ensure_scan: has_scan=", "MS2scan_no" in final_df.columns,
-        #    "has_structure=", "Structure" in final_df.columns)
-        #print("[PL→Train][dbg] first scans:", final_df["MS2scan_no"].head(5).tolist())
+            print("[CGA→Train][DEBUG] protonatedmass head:", final_df["protonatedmass"].head().tolist())
 
         # drop helper only after ensure_scan
         final_df.drop(columns=["_scan_fallback"], errors="ignore", inplace=True)
 
-        print("[PL→Train][dbg] end-before-order: cols=", final_df.columns.tolist()[:30])
+        log(f"[CGA→Train][DEBUG] end-before-order: cols= {final_df.columns.tolist()[:30]}")
 
         if not include_mass_feature:
             final_df.drop(columns=["protonatedmass","delta_ppm","ppm_precursor","precursor_gate_comp"],
                         errors="ignore", inplace=True)
-            print("[PL→Train][dbg] end: MS1 feature disabled → dropped MS1 columns")
+            print("[CGA→Train][DEBUG][auto] MS1 feature disabled → dropped MS1 columns in trainable csv product")
 
         # order columns for saving
         feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure")]
         if include_mass_feature and "protonatedmass" in final_df.columns:
-            # ensure mass stays in feature columns
-            if "protonatedmass" not in feature_cols:
-                feature_cols.insert(0, "protonatedmass")
+            # 20260417 code review: fix the guarantee of protonatedmass should be at the beginning of feature rows, next to "MS2scan_no","Structure"
+            feature_cols = [c for c in feature_cols if c != "protonatedmass"]                
+            feature_cols.insert(0, "protonatedmass")
         else:
             # explicitly drop if user disabled
             feature_cols = [c for c in feature_cols if c != "protonatedmass"]
-        # order columns for saving
-        #feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure")]
-        
+
         final_df = final_df[["MS2scan_no","Structure"] + feature_cols]
 
-
         final_df.to_csv(output_path, index=False)
-        log(f"[PL→Train] saved: {output_path}")
-
+        log(f"[CGA→Train] saved: {output_path}")
         # summary
         classes = final_df["Structure"].value_counts().to_dict()
         summary = {
@@ -4812,20 +4470,19 @@ def open_prepare_dataset_window():
             "neg_opts": neg_opts
         }
         return output_path, summary
-    # ---------- end PSEUDOLABEL → TRAINABLE ----------
+    # ---------- end CGA (PSEUDOLABEL) → TRAINABLE ----------
 
 
-
-    #added 20250906 ion suggestion window?
+    # Added 20250906 ion mining viewer window, not that useful so keep as-is for now
     def open_ion_suggestions_viewer():
-        import os, pandas as pd
+
         from tkinter import filedialog, messagebox, ttk
 
         path = last_suggest_csv_var.get().strip()
         if not path or not os.path.exists(path):
             # let user pick if we don't have a saved path yet
             path = filedialog.askopenfilename(
-                title="Open ion suggestions CSV",
+                title="Open ion mining suggestions CSV",
                 filetypes=[("CSV files","*.csv"), ("All files","*.*")]
             )
             if not path:
@@ -4893,8 +4550,10 @@ def open_prepare_dataset_window():
         tk.Button(btns, text="Copy selected m/z", command=copy_mz).pack(side="left", padx=6)
         tk.Button(btns, text="Open folder", command=open_csv_folder).pack(side="left", padx=6)
         tk.Button(btns, text="Close", command=dlg.destroy).pack(side="left", padx=6)
+    # ==================
 
-    #newly added
+    # Run CGA analysis block
+    # Create jsonl as run log when a CGA analysis is completed (generates scored A + B(optionally) tsv)
     def append_runlog(files: dict, entry: dict):
         """Append one JSON line to a per-sample ops log."""
         try:
@@ -4917,13 +4576,12 @@ def open_prepare_dataset_window():
         except Exception:
             traceback.print_exc()
 
+    # 20260417 code review: keep the function name for now is fine
     def run_pseudolabeling(sample_name: str, files: dict, meta_overrides: dict, parent=None,
                         ppm_value: float = 20.0, keep_top_n_per_scan: int = 3,
                         ion_ppm: float = 10.0, anchors_required: int = 2):
         import pandas as pd, numpy as np, traceback, os
-        from datetime import datetime
-        # use your module helpers
-        #label_style: str = "short"):
+
         """
         label_style: "short" -> A/s/p   ;  "long" -> A/Sul/Phos
         """
@@ -4933,20 +4591,23 @@ def open_prepare_dataset_window():
         ion_path = files.get("ionlist_path")
 
         if not csv_path or not os.path.exists(csv_path):
+            logger.log(f"[WARN] Missing MS2 spectral data csv for CGA analysis")
             messagebox.showwarning("Converted CSV missing", "Link a converted CSV for this sample.")
             return
         if not ins_path or not os.path.exists(ins_path):
+            logger.log(f"[WARN] Missing in-silico glycan list csv for CGA analysis")
             messagebox.showwarning("In-silico CSV missing", "Generate or link an in-silico CSV first.")
             return
 
         # 1) Load inputs
-        df  = _robust_read_csv(csv_path, prefer_tab=True)   # converted TSV
-        lib = _robust_read_csv(ins_path)                    # in-silico CSV
+        df  = robust_read_csv(csv_path, prefer_tab=True)   # converted TSV
+        lib = robust_read_csv(ins_path)                    # in-silico CSV
 
         # column heuristics (converted)
         scan_col = next((c for c in ["MS2scan_no","unique_ID","ScanNum","scan","Scan"] if c in df.columns), None)
         mass_col = next((c for c in ["protonatedmass","ProtonatedMass","precursor_mass","mz","MZ"] if c in df.columns), None)
         if not scan_col or not mass_col:
+            logger.log(f"[ERROR 1] MS2 spectral data csv missing MS2scan_no and/or protonatedmass for CGA analysis.")
             messagebox.showerror("Columns not found",
                 "Could not find scan/mass columns in converted file (need e.g., MS2scan_no + protonatedmass).")
             return
@@ -4961,14 +4622,19 @@ def open_prepare_dataset_window():
         for _c in MOD_COLS:
             if _c not in lib.columns:
                 lib[_c] = 0
-
-        libn = marker.normalize_insilico(
-            lib,
-            comp_cols=COMP_COLS_BASE,   # keep tuple = 6-core only
-            mass_col="Mass",
-            add_legacy_repr=True,
-        ).copy()
-
+        try:
+            libn = marker.normalize_insilico(
+                lib,
+                comp_cols=COMP_COLS_BASE,   # keep tuple = 6-core only
+                mass_col="Mass",
+                add_legacy_repr=True,
+            ).copy()
+            logger.log(f"[DEBUG] in silico library is loaded and normalized")
+        except:
+            logger.log(f"[ERROR 1] in silico library normalization failed")
+            messagebox.showerror("in silico library normalization failed. Is marker module missing?")
+            return
+        
         # IMPORTANT: keep modifier columns on the normalized table
         # normalize_insilico typically returns a row-per-entry frame preserving order,
         # so we can attach auxiliary columns directly by index alignment:
@@ -5018,12 +4684,10 @@ def open_prepare_dataset_window():
             ]
         )
         matched = matched.rename(columns={"comp_str": "composition"})
-        import math
 
         # 20250920 Try to add ion mining to PL
         # --- helper: build pre_df (positives from PL + optional sampled negatives) ---
         def _pre_df_for_ion_suggest_from_pl(matched, csv_path, ion_df):
-            import pandas as pd
             # positives: take peaks from 'matched' (already carries peaklist/peakintensity in PL path)
             need = ["MS2scan_no","peaklist","peakintensity"]
             # error prevention, but why GPT add this? Safer but I didn't ask for it
@@ -5063,19 +4727,16 @@ def open_prepare_dataset_window():
                 lambda r: marker.canonical_label_from_row(r, style="short"), axis=1
             )
         except Exception as e:
-            print(f"[label] failed to build Pseudolabeling; reason={e}")
+            logger.log(f"[ERROR 2][CGA] failed to build CGA analysis result; reason={e}")
+            print(f"[ERROR 2][CGA] failed to build CGA analysis result; reason={e}")
             matched["composition"] = ""
 
         # If downstream expects 'composition', mirror it (optional) #changed already above
         #matched["composition"] = matched["Predicted_Label"]
 
         if matched.empty:
-            messagebox.showinfo("Pseudolabeling", "No precursor matches within tolerance.")
+            messagebox.showinfo("CGA Aborted", "No precursor matches within tolerance.")
             return
-
-
-   
-
 
         # 4) Bring peaklist into matched (needed for ion scoring)
 
@@ -5097,7 +4758,7 @@ def open_prepare_dataset_window():
             # no peaks → ion scoring will be skipped
             pass
 
-        # --- 4.5) Ion suggestions from PL (requires peaklist/peakintensity now present) ---
+        # --- 4.5) Ion mining from PL (requires peaklist/peakintensity now present) ---
         if ion_suggest_enable_var.get() and "peaklist" in matched.columns and "peakintensity" in matched.columns:
             # ensure ion mining module is available
             global export_ion_suggestions_csv, SuggestParams, _ionmod
@@ -5125,16 +4786,18 @@ def open_prepare_dataset_window():
                         pre_df, ion_df_for_suggest, out_csv=suggest_csv, params=params,
                         label_col="Structure", majority_label="Non-glycan"
                     )
-                    print(f"[PL→Trainable] Ion suggestions saved: {suggest_csv}")
+                    logger.log(f"[CGA] Ion mining suggestions saved: {suggest_csv}")
+                    print(f"[CGA] Ion mining suggestions saved: {suggest_csv}")
                     last_suggest_csv_var.set(suggest_csv)
                     messagebox.showinfo("Ion suggestions",
                                         f"Suggested ions written to:\n{os.path.basename(suggest_csv)}")
                 except Exception as e:
+                    logger.log(f"[CGA][ERROR 2] Ion mining failed, skipped")
                     messagebox.showwarning("Ion suggestions", f"Suggestion failed:\n{e}")
             else:
-                messagebox.showwarning("Ion suggestions",
+                logger.log(f"[CGA][ERROR 2] Ion mining failed")
+                messagebox.showwarning("Ion mining failed",
                                     "Ion module failed to import. Check console for the exact error.")
-
 
         # 5) Ion scoring (optional)
         ion_scoring_status, n_with_scores = "skipped", 0
@@ -5175,12 +4838,15 @@ def open_prepare_dataset_window():
                     ion_scoring_status = "ok"
                     n_with_scores = int((matched.get("ion hit count", 0) > 0).sum()) if "ion hit count" in matched.columns else 0
                 else:
-                    print("[ion] scorer returned no ion columns; falling back to simple score_counter")
+                    logger.log("[CGA][WARN] ion scorer returned no ion columns; falling back to simple score_counter")
+                    print("[CGA][WARN] ion scorer returned no ion columns; falling back to simple score_counter")
                     raise RuntimeError("no_ion_columns")
 
             except Exception as e:
                 import traceback; traceback.print_exc()
                 # 5b) fallback — always produce basic ion columns with score_counter
+                logger.log("[CGA→Train][EXCEPTION] Using fallback ion scoring with hardcoded PerMe N-glycan anchor masses (204.087, 366.140, 512.197 Da). ")
+                print("[CGA→Train][EXCEPTION] Using fallback ion scoring with hardcoded PerMe N-glycan anchor masses (204.087, 366.140, 512.197 Da). ")
                 try:
                     matched = _fallback_simple_ion_scoring(matched, ion_df, ion_ppm)
                     ion_scoring_status = "ok(fallback)"
@@ -5193,6 +4859,8 @@ def open_prepare_dataset_window():
 
         scan_right = "MS2scan_no"
         if scan_right not in matched.columns:
+            logger.log(f"[CGA][DEBUG] MS2scan_no has _x or _y in upstream drop process")
+            print(f"[CGA][DEBUG] MS2scan_no has _x or _y in upstream drop process")
             for alt in ("MS2scan_no_x", "MS2scan_no_y", "ScanNum", "scan", "Scan", "unique_ID"):
                 if alt in matched.columns:
                     matched = matched.rename(columns={alt: "MS2scan_no"})
@@ -5225,13 +4893,14 @@ def open_prepare_dataset_window():
        #20250930 fix win11 issue
        # 7) Save TSV next to converted CSV  (ABSOLUTE + explicit encoding)
         outdir  = os.path.dirname(os.path.abspath(csv_path))
-        outname = f"{sample_name}_pseudolabels_{datetime.now().strftime('%Y%m%d')}.tsv"
+        outname = f"{sample_name}_pseudolabels_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv" #added HMS to avoid overwriting
         outpath = os.path.abspath(os.path.join(outdir, outname))
         out.to_csv(outpath, index=False, sep="\t", encoding="utf-8")
 
         # store absolute path so refresh_tree can always find it
         files["pseudolabel_csv"] = outpath
-
+        logger.log(f"CGA analysis saved to: {outpath}")
+        print(f"CGA analysis saved to: {outpath}")
         # 7) Save TSV next to converted CSV
 
         append_runlog(files, {
@@ -5256,8 +4925,9 @@ def open_prepare_dataset_window():
                 "Pseudolabeling complete", f"Saved and linked:\n{p}"
             ))
         subwin.after(0, refresh_tree)
-    # 20260329
-    # new block for score b
+    # CGA analysis block ends
+    # =============
+    # 20260329 new block for score b
     def run_score_b_enrichment(
         pseudolabel_tsv_path: str,
         score_b_workbook_path: str,
@@ -5271,7 +4941,7 @@ def open_prepare_dataset_window():
         import traceback
 
         if not pseudolabel_tsv_path or not os.path.exists(pseudolabel_tsv_path):
-            messagebox.showwarning("Score B", "Pseudolabel TSV not found for Score B enrichment.")
+            messagebox.showwarning("Score B", "CGA TSV not found for Score B enrichment.")
             return pseudolabel_tsv_path
 
         if not score_b_workbook_path or not os.path.exists(score_b_workbook_path):
@@ -5284,7 +4954,7 @@ def open_prepare_dataset_window():
 
         try:
             from msp_CGA_structscore import enrich_cga_tsv_with_score_b
-
+            logger.log("[CGA][Score B] enrichment")
             return enrich_cga_tsv_with_score_b(
                 pseudolabel_tsv_path,
                 score_b_workbook_path,
@@ -5293,7 +4963,9 @@ def open_prepare_dataset_window():
                 charge_mode=charge_mode,
                 derivatization=derivatization,
             )
+            
         except Exception as e:
+            logger.log("[CGA][Score B][ERROR 2] enrichment failed")
             print("[Score B] enrichment failed")
             traceback.print_exc()
             messagebox.showwarning(
@@ -5301,31 +4973,46 @@ def open_prepare_dataset_window():
                 f"Score B enrichment failed.\n\nOriginal TSV was kept.\n\nReason:\n{e}"
             )
             return pseudolabel_tsv_path
+    # ==========
 
-    # --- Assign file to experiment/sample ---
+    # --- Assign file to experiment/sample, It's the low-level "put this file here" operation ---
     def assign_file(filetype, filepath, exp_title="Unassigned", sample_name="Unassigned"):
         if exp_title not in experiment_projects:
             experiment_projects[exp_title] = {"samples": {}}
         if sample_name not in experiment_projects[exp_title]["samples"]:
-            experiment_projects[exp_title]["samples"][sample_name] = {"csv": None, "excel": None, "json": None}
+            experiment_projects[exp_title]["samples"][sample_name] = {"csv": None, "excel": None, "metadata": None,  "json": None} #20260415 added "metadata": None
         experiment_projects[exp_title]["samples"][sample_name][filetype] = filepath
         refresh_tree()
+    # =============
 
+    # metadata extractor block
+    # extract raw filename from json
     def extract_rawname_from_metadata(json_path):
         try:
-            #with open(json_path, "r") as f:
-            #    meta = json.load(f)
             meta = load_typed_json(
                 json_path,
                 expected_type=JSON_TYPE_METADATA,
                 allow_legacy=True,
                 context="[Metadata] "
             ) #20260126
-
             rawbase = os.path.basename(meta.get("Raw filename", ""))
             return os.path.splitext(rawbase)[0]
         except:
             return None
+        
+    def extract_title_from_metadata(json_path):
+        try:
+            meta = load_typed_json(
+                                        json_path,
+                                        expected_type=JSON_TYPE_METADATA,
+                                        allow_legacy=True,
+                                        context="[Metadata] "
+                                    )#20260126
+            return meta.get("Experiment Title")
+        except:
+            return None
+    # metadata extractor block ends
+    # ============================
 
     # --- File handlers ---
     def handle_csv_selection(filepaths):
@@ -5338,61 +5025,12 @@ def open_prepare_dataset_window():
             sample_id = os.path.splitext(os.path.basename(path))[0]
             assign_file("excel", path, "Unassigned", sample_id)
 
-    def handle_json_selection(filepaths):
-        for path in filepaths:
-            title = extract_title_from_metadata(path) or "Unassigned"
-            rawname = extract_rawname_from_metadata(path) or "Unassigned"
-
-            assign_file("json", path, title, "Unassigned")
-
-            sample_name = "Unassigned"
-
-            # Auto-rename sample (move from 'Unassigned' to rawname)
-            if title in experiment_projects:
-                samples = experiment_projects[title]["samples"]
-                if "Unassigned" in samples:
-                    if rawname in samples:
-                        messagebox.showwarning("Sample Exists", f"Sample '{rawname}' already exists. Skipping rename.")
-                    else:
-                        samples[rawname] = samples.pop("Unassigned")
-                        sample_name = rawname  # <- use updated sample name
-                        refresh_tree()
-
-            # After rename, auto-write .method.json if csv + excel exist
-            sample = experiment_projects[title]["samples"].get(sample_name)
-            if sample and sample.get("csv") and sample.get("excel"):
-                from datetime import datetime
-                entry = {
-                    "csv": os.path.basename(sample["csv"]),
-                    "excel": os.path.basename(sample["excel"]),
-                    "metadata": os.path.basename(path),
-                    "raw_file": rawname,
-                    "validated": False
-                }
-                sample_method = {
-                    "experiment": title,
-                    "samples": {sample_name: entry},
-                    "generated_on": datetime.now().strftime("%Y-%m-%d %H:%M")
-                }
-                sample_method = _ensure_header(sample_method, JSON_TYPE_METHOD)  #20260126
-                try:
-                    sample_path = os.path.join(os.path.dirname(path), f"{sample_name}.method.json")
-                    with open(sample_path, "w") as f:
-                        json.dump(sample_method, f, indent=4)
-                    logger.log(f"[Method] Auto-saved method file for sample: {sample_path}")
-                    messagebox.showinfo("Method File Saved", f"A sample method file was saved:\n{os.path.basename(sample_path)}")
-
-                except Exception as e:
-                    logger.log(f"[WARNING] Failed to save method file for '{sample_name}': {e}")
     def handle_metadata_selection(filepaths):
         for path in filepaths:
             title = extract_title_from_metadata(path) or "Unassigned"
             rawname = extract_rawname_from_metadata(path) or "Unassigned"
-
             # IMPORTANT: store as metadata, not json(method)
             assign_file("metadata", path, title, "Unassigned")
-
-            sample_name = "Unassigned"
 
             # Auto-rename sample (move from 'Unassigned' to rawname)
             if title in experiment_projects:
@@ -5402,44 +5040,45 @@ def open_prepare_dataset_window():
                         messagebox.showwarning("Sample Exists", f"Sample '{rawname}' already exists. Skipping rename.")
                     else:
                         samples[rawname] = samples.pop("Unassigned")
-                        sample_name = rawname
                         refresh_tree()
-
             # DO NOT auto-write method here.
             # Metadata import should not create method/exp side-effects.
-        
-    def extract_title_from_metadata(json_path):
-        try:
-            #with open(json_path, "r") as f:
-            #    meta = json.load(f)
-            meta = load_typed_json(
-                                        json_path,
-                                        expected_type=JSON_TYPE_METADATA,
-                                        allow_legacy=True,
-                                        context="[Metadata] "
-                                    )#20260126
-            return meta.get("Experiment Title")
-        except:
-            return None
+    # End of file handlers
+    # ====================
 
+    # 20260417 Code review: add json filter for user selection
     def select_files_generic(filetype_key, allow_multiple=False, on_select_callback=None):
-        filetypes_dict = {
-            "csv": [("CSV files", "*.csv")],
-            "excel": [("Excel files", "*.xls *.xlsx")],
-            "json": [("JSON files", "*.json")],
-            "all": [("All files", "*.*")]
-        }
+        filetypes_dict = {                                                                   
+            "csv": [("CSV files", "*.csv")],                                                 
+            "excel": [("Excel files", "*.xls *.xlsx")],                                      
+            "json": [("JSON files", "*.json")],                                              
+            "method": [("Method JSON", "*.method.json"), ("JSON files", "*.json")],
+            "experiment": [("Experiment JSON", "*.exp.json"), ("JSON files", "*.json")],     
+            "metadata": [("Metadata JSON", "*.json")],            
+            "all": [("All files", "*.*")]                                                    
+        }     
         filetypes = filetypes_dict.get(filetype_key, filetypes_dict["all"])
-        if allow_multiple:
-            filepaths = filedialog.askopenfilenames(filetypes=filetypes)
-        else:
-            filepath = filedialog.askopenfilename(filetypes=filetypes)
-            filepaths = [filepath] if filepath else []
+        # 20260417 add crash prevention on certain macos with danger tkinter build
+        if allow_multiple:                                                                   
+            try:
+                filepaths = filedialog.askopenfilenames(filetypes=filetypes)                 
+            except Exception as e:                                                           
+                logger.log(f"[File Dialog] crashed: {e}")
+                filepaths = []                                                               
+        else:                                                     
+            try:                                                                             
+                filepath = filedialog.askopenfilename(filetypes=filetypes)
+            except Exception as e:
+                logger.log(f"[File Dialog] crashed: {e}")                                    
+                filepath = ""
+            filepaths = [filepath] if filepath else []  
+        # consider data validation from integrity checker 
         if filepaths and on_select_callback:
             on_select_callback(filepaths)
+    # =============== 
 
+    # Update experiment-level path display, currently less related to UX
     def update_status_display(exp_name):
-        # Update experiment-level path display
         path_label, sample_label = experiment_status_labels.get(exp_name, (None, None))
         if path_label:
             path = experiment_method_paths.get(exp_name)
@@ -5448,46 +5087,46 @@ def open_prepare_dataset_window():
         if sample_label:
             sample_label.set(f"Sample method will be saved at: {sample_method_folder if sample_method_folder else 'None'}")
 
-    #drag
+    # TREEVIEW OPERATION
+    # mouse dragging event - select
     def on_drag_start(event):
         item_id = tree.identify_row(event.y)
-        print("[DEBUG] Drag start:", drag_data)
-
         if not item_id:
               return
         item_text = tree.item(item_id, "text")
     
-        if ":" in item_text:  # This is a file node
+        if ":" in item_text:  # This is a file node by checking it has a : or not
             sample_id = tree.parent(item_id)
             exp_id = tree.parent(sample_id)
             if not sample_id or not exp_id:
                 return  # Avoid broken context
-        
             ft_raw = item_text.split(":")[0].strip()
             drag_data["filetype"] = normalize_ftype(ft_raw)              # <— was .lower()
             drag_data["filename"] = item_text.split(":")[1].strip()
             drag_data["item"] = item_id
-            #drag_data["filetype"] = item_text.split(":")[0].strip().lower()
-            #drag_data["filename"] = item_text.split(":")[1].strip()
             drag_data["from_sample"] = clean_sample_name(tree.item(sample_id, "text"))
             drag_data["from_exp"] = tree.item(exp_id, "text").replace("Experiment: ", "")
+            #print("[Explorer][DEBUG] Drag start on :", drag_data)
+            print(f"[Explorer][DEBUG] Drag: {drag_data.get('filetype')}:{drag_data.get('filename')} from {drag_data.get('from_exp')}/{drag_data.get('from_sample')}")
+            #if debug: (gives raw dict)
+            # print(f"[DEBUG] Drag start: { {k: v for k, v in drag_data.items() if k != 'item'} }")
         else:
             drag_data["item"] = None
 
-            
+    # mouse dragging event - release
     def on_drag_release(event):
         dest_id = tree.identify_row(event.y)
         if not dest_id or not drag_data["item"]:
             return
 
         dest_text = tree.item(dest_id, "text")
-        if not dest_text.startswith("Sample:") and not any(dest_text.startswith(sym + " Sample:") for sym in ["✅", "⚠️", "❌", "⛔"]):
-            return  # Only allow drop into sample
-
+        # 20260417 code review: replaced with a simpler version. Old one accept symbols existing before Sample: #if not dest_text.startswith("Sample:") and not any(dest_text.startswith(sym + " Sample:") for sym in ["✅", "⚠️", "❌", "⛔"]):
+        if "Sample:" not in dest_text:                            
+            return  
         to_sample = clean_sample_name(dest_text)
         to_exp_id = tree.parent(dest_id)
         to_exp = tree.item(to_exp_id, "text").replace("Experiment: ", "")
-
+        print(f"[DEBUG] Drag release: {drag_data.get('filetype')}:{drag_data.get('filename')}from {drag_data.get('from_exp')}/{drag_data.get('from_sample')} → {to_exp}/{to_sample}")  
         # Perform move
         move_file(
             from_exp=drag_data["from_exp"],
@@ -5497,17 +5136,15 @@ def open_prepare_dataset_window():
             to_exp=to_exp,
             to_sample=to_sample
         )
-
         drag_data["item"] = None
         refresh_tree()
 
 
-    # --- Right-click move logic ---
+    # mouse right-clicking event
     def on_right_click(event):
         item_id = tree.identify_row(event.y)
         if not item_id:
             return
-
         selected_text = tree.item(item_id, "text")
         sample_id = tree.parent(item_id)
         exp_id = tree.parent(sample_id)
@@ -5521,18 +5158,15 @@ def open_prepare_dataset_window():
         def remove_file(exp_name, sample_name, filetype):
             entry = experiment_projects[exp_name]["samples"][sample_name]
             entry[filetype] = None
-
             # Clear validation state if needed
             linked_validated_samples.discard((exp_name, sample_name))
             validation_failed_samples.discard((exp_name, sample_name))
-
             refresh_tree()
 
+        # get correct keys of filetype and filename
         filetype_raw = selected_text.split(":")[0].strip().lower()
         filetype = normalize_ftype(filetype_raw)                     # <— normalize before use
         filename = selected_text.split(":")[1].strip()
-        #filetype = selected_text.split(":")[0].strip().lower()
-        #filename = selected_text.split(":")[1].strip()
 
         menu = tk.Menu(subwin, tearoff=0)
         move_menu = tk.Menu(menu, tearoff=0)
@@ -5546,29 +5180,27 @@ def open_prepare_dataset_window():
         menu.add_cascade(label="Move to...", menu=move_menu)
         
         # Right-click on sample: enable linking
-        if selected_text.startswith("Sample: "):
+        if "Sample:" in selected_text:
             parent_id = tree.parent(item_id)
-            sample_name = selected_text.replace("Sample: ", "").split(" (")[0]
-            exp_name = tree.item(parent_id, "text").replace("Experiment: ", "")
+            sample_name = selected_text.replace("Sample:", "").split(" (")[0]
+            exp_name = tree.item(parent_id, "text").replace("Experiment:", "")
             menu.add_command(
                 label="Link and Validate Sample",
                 command=lambda: link_and_validate_sample(exp_name, sample_name)
             )
-        filetype = selected_text.split(":")[0].strip().lower()
-        filename = selected_text.split(":")[1].strip()
+
         # Add remove option if it's a valid file
         menu.add_command(label=f"Remove {filetype.upper()}",command=lambda: remove_file(exp_name, clean_sample_name(sample_name), filetype))  
         menu.post(event.x_root, event.y_root)
-          
 
-
-
+    # move file shared by drag release and right click menu
     def move_file(from_exp, from_sample, ftype, filename, to_exp, to_sample):
-        
         entry = experiment_projects[from_exp]["samples"][from_sample][ftype]
         if entry and os.path.basename(entry) == filename:
             experiment_projects[from_exp]["samples"][from_sample][ftype] = None
             assign_file(ftype, entry, to_exp, to_sample)
+    # TREEVIEW OPERATION block ends
+    # ============================
 
     # --- write to method ---
 
@@ -5619,8 +5251,8 @@ def open_prepare_dataset_window():
             base_dir = sample_method_folder or (
                 os.path.dirname(sample["csv"]) if sample.get("csv") else os.getcwd()
             )
-            today = datetime.now().strftime("%Y%m%d")
-            out_name = f"{sample_name}.{kind}.method.v1_{today}.json"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_name = f"{sample_name}.{kind}{timestamp}.method.json"
             out_path = os.path.join(base_dir, out_name)
 
         # Write
@@ -5635,51 +5267,9 @@ def open_prepare_dataset_window():
         # sample["json"] = out_path line removed).
         _register_or_update_method_ref(sample, out_path, family=kind)
         refresh_tree()
-
-        return out_path
-    #20260202 for fixing CGA not creating method json after action
-    def _save_method_v1_now(exp_name: str, sample_name: str, family: str):
-        files = experiment_projects[exp_name]["samples"][sample_name]
-
-        # ensure method list exists
-        _ensure_method_stub(files, family=family, sample_name=sample_name)
-
-        # build v1 dict from current tree/files (your existing builder)
-        v1 = build_method_v1_from_tree(exp_name, sample_name, force_family=family)  # see note below
-        files[f"_method_v1_cache_{family.upper()}"] = v1  #fixed 20260312 Test-B B1.2: family-keyed cache
-
-        # decide output path
-        if sample_method_folder:
-            os.makedirs(sample_method_folder, exist_ok=True)
-            out_name = f"{sample_name}.{family}.method.v1_{datetime.now().strftime('%Y%m%d')}.json"
-            out_path = os.path.join(sample_method_folder, out_name)
-        else:
-            out_path = filedialog.asksaveasfilename(
-                title="Save Method v1 JSON",
-                defaultextension=".json",
-                initialfile=f"{sample_name}.{family}.method.v1.json",
-                filetypes=[("JSON files", "*.json")]
-            )
-            if not out_path:
-                return None
-
-        save_method_v1_for_sample(exp_name, sample_name, out_path, auto=True)
-
-        # update method record
-        methods = files.get("_methods", [])
-        for m in methods:
-            if (m.get("family") or "").upper() == family.upper():
-                m["path"] = out_path
-                m["method_name"] = os.path.basename(out_path)
-                m["status"] = "unknown"
-                break
-
-        # backward compatibility (lots of old logic still reads files["json"])
-        files["json"] = out_path
-
-        refresh_tree()
         return out_path
 
+    # Legacy writing method file. Only fires when method v1 can't execute anyway.
     def write_method_file(exp_name, auto=False):
         method = {
             "experiment": exp_name,
@@ -5752,227 +5342,10 @@ def open_prepare_dataset_window():
             messagebox.showerror("Save Failed", f"Could not save method file:\n{e}")
 
         update_status_display(exp_name)
+    # ===
 
-    #patch in 20260127 to apply new data structure of method json
-    # fixed 20260305 P1-B: import re, import uuid, and def _utc_now_iso() were moved to top of open_prepare_dataset_window()
-    import os
-    from datetime import datetime
 
-    JSON_TYPE_METHOD = "glycomsp.method"   # keep consistent with your constants
-    SCHEMA_V1 = "1.0.0"
-
-    # --- safe loader ---
-    def safe_get_field(d, key, fallback="(not linked)"):
-        val = d.get(key)
-        return val if isinstance(val, str) and val.strip() else fallback
-    #def check_relative_location():
-    #add 20260126 fix CGA method legacy
-    def _resolve_path(base, p):
-        """Resolve relative paths against method file folder; keep absolute paths (Windows or POSIX) as-is."""
-        if not p:
-            return None
-        if not isinstance(p, str):
-            return None
-        p = p.strip()
-        if not p:
-            return None
-
-        # POSIX absolute
-        if os.path.isabs(p):
-            return p
-
-        # Windows drive absolute, even when running on non-Windows
-        if re.match(r"^[A-Za-z]:[\\/]", p):
-            return p
-
-        return os.path.normpath(os.path.join(base, p))
-
-    def normalize_method_json(method_obj: dict, method_path: str, base_dir: str = None):
-        """
-        Normalize ANY accepted method-json family into:
-        (exp_name, sample_name, tree_entry_dict, v1_method_dict)
-
-        - tree_entry_dict matches your TreeView keys:
-            csv, excel, metadata, json, ionlist_path, insilico_csv, pseudolabel_csv, (optional) trainable_csv
-        - v1_method_dict matches the v1 schema you approved (json_type/schema_version + method/sample/inputs/artifacts/parameters)
-        """
-        if not isinstance(method_obj, dict):
-            raise ValueError("method_obj must be a dict")
-
-        base = base_dir or os.path.dirname(method_path)
-
-        # ----------------------------
-        # A) Detect method family
-        # ----------------------------
-        jt = method_obj.get("json_type")
-        # New v1 schema (preferred)
-        is_v1 = (jt == JSON_TYPE_METHOD) and isinstance(method_obj.get("inputs"), dict)
-
-        # Legacy MAS schema (experiment + samples dict)
-        is_legacy_mas = (not is_v1) and isinstance(method_obj.get("samples"), dict) and bool(method_obj.get("samples"))
-
-        # Legacy CGA/pseudolabel schema (dataset_type/parents)
-        is_legacy_cga = (not is_v1) and (
-            method_obj.get("dataset_type") == "pseudolabel" or isinstance(method_obj.get("parents"), dict)
-        )
-
-        if not (is_v1 or is_legacy_mas or is_legacy_cga):
-            raise ValueError("Unrecognized method JSON structure (normalize_method_json)")
-
-        # ----------------------------
-        # B) Extract exp_name / sample_name + paths into a unified internal record
-        # ----------------------------
-        if is_v1:
-            exp_name = (
-                (method_obj.get("sample") or {}).get("experiment_title")
-                or (method_obj.get("method") or {}).get("name")
-                or "Recovered"
-            )
-            sample_name = ((method_obj.get("sample") or {}).get("sample_name")
-                        or "RecoveredSample")
-
-            inputs = method_obj.get("inputs") or {}
-            artifacts = method_obj.get("artifacts") or {}
-
-            csv_path = _resolve_path(base, (inputs.get("converted_csv") or {}).get("path"))
-            meta_path = _resolve_path(base, (inputs.get("metadata_json") or {}).get("path"))
-            excel_path = _resolve_path(base, (inputs.get("annotation_excel") or {}).get("path"))
-
-            ion_path = _resolve_path(base, (inputs.get("ion_list") or {}).get("path"))
-            insilico_path = _resolve_path(base, (inputs.get("insilico_glycan_list") or {}).get("path"))
-            scoreb_path = _resolve_path(base, (inputs.get("score_b_workbook") or {}).get("path"))
-
-            pl_path = _resolve_path(base, (artifacts.get("pseudolabels_tsv") or {}).get("path"))
-            train_path = _resolve_path(base, (artifacts.get("trainable_csv") or {}).get("path"))
-
-            method_family = (method_obj.get("method") or {}).get("family") or ("CGA" if ion_path or insilico_path else "MAS")
-
-        elif is_legacy_mas:
-            exp_name = method_obj.get("experiment") or "Recovered"
-            # legacy may contain multiple samples; import them one-by-one upstream
-            # here we normalize ONLY the first sample (caller can loop externally if desired)
-            sample_name = next(iter(method_obj["samples"].keys()))
-            files = method_obj["samples"][sample_name] or {}
-
-            csv_path = _resolve_path(base, files.get("csv"))
-            excel_path = _resolve_path(base, files.get("excel"))
-            meta_path = _resolve_path(base, files.get("metadata"))
-
-            ion_path = _resolve_path(base, files.get("ionlist_path"))
-            insilico_path = _resolve_path(base, files.get("insilico_csv"))
-            scoreb_path = _resolve_path(base, files.get("score_b_workbook_path"))
-            pl_path = _resolve_path(base, files.get("pseudolabel_csv"))
-            train_path = _resolve_path(base, files.get("trainable_csv"))
-
-            method_family = "MAS"  # legacy MAS method files represent MAS by default
-
-        else:  # legacy CGA/pseudolabel
-            exp_name = method_obj.get("experiment_title") or "Recovered"
-            sample_name = method_obj.get("sample_name") or os.path.splitext(os.path.basename(method_path))[0]
-            parents = method_obj.get("parents") or {}
-            ionlist = method_obj.get("ionlist") or {}
-
-            csv_path = _resolve_path(base, parents.get("converted_csv"))
-            meta_path = _resolve_path(base, parents.get("metadata_json"))
-            excel_path = _resolve_path(base, parents.get("annotation_excel"))  # usually absent
-            ion_path = _resolve_path(base, ionlist.get("path"))
-            insilico_path = _resolve_path(base, parents.get("insilico_csv"))
-            scoreb_path = _resolve_path(base, files.get("score_b_workbook_path"))
-            pl_path = _resolve_path(base, parents.get("pseudolabels_tsv") or parents.get("pseudolabel_csv"))
-            train_path = _resolve_path(base, parents.get("trainable_csv"))
-
-            method_family = "CGA"
-
-        # normalize sample name the same way GUI expects
-        sample_name = clean_sample_name(sample_name)
-
-        # ----------------------------
-        # C) Produce TreeView entry (your internal representation)
-        # ----------------------------
-        tree_entry = {
-            "json": method_path,   # method file path belongs here
-            "csv": csv_path,
-            "excel": excel_path,
-            "metadata": meta_path,
-            "ionlist_path": ion_path,
-            "insilico_csv": insilico_path,
-            "score_b_workbook_path": scoreb_path,
-            "pseudolabel_csv": pl_path,
-            "trainable_csv": train_path,
-        }
-        # drop empty
-        tree_entry = {k: v for k, v in tree_entry.items() if v}
-
-        # ----------------------------
-        # D) Produce canonical v1 method dict (in-memory)
-        # ----------------------------
-        if is_v1:
-            v1 = method_obj
-            # Ensure headers exist (enforced)
-            v1["json_type"] = JSON_TYPE_METHOD
-            v1["schema_version"] = v1.get("schema_version") or SCHEMA_V1
-            # Ensure timestamps
-            v1.setdefault("created_utc", _utc_now_iso())
-            v1["updated_utc"] = _utc_now_iso()
-            v1.setdefault("uid", str(uuid.uuid4()))
-            return exp_name, sample_name, tree_entry, v1
-
-        # Build v1 from legacy shapes
-        v1 = {
-            "json_type": JSON_TYPE_METHOD,
-            "schema_version": SCHEMA_V1,
-            "uid": str(uuid.uuid4()),
-            "created_utc": _utc_now_iso(),
-            "updated_utc": _utc_now_iso(),
-            "method": {
-                "family": method_family,
-                "name": f"{exp_name}:{sample_name}:{method_family}",
-                "description": "",
-                "tags": []
-            },
-            "sample": {
-                "sample_name": sample_name,
-                "experiment_title": exp_name
-            },
-            "inputs": {
-                "converted_csv": {"path": csv_path} if csv_path else None,
-                "metadata_json": {"path": meta_path} if meta_path else None,
-                "annotation_excel": {"path": excel_path} if excel_path else None,
-                "ion_list": {"path": ion_path} if ion_path else None,
-                "score_b_workbook": {"path": scoreb_path} if scoreb_path else None,
-                "insilico_glycan_list": {"path": insilico_path} if insilico_path else None
-            },
-            "parameters": {
-                "mas": {},
-                "cga": {},
-                "scoring": {},
-                "ml": {}
-            },
-            "artifacts": {
-                "pseudolabels_tsv": {"path": pl_path} if pl_path else None,
-                "trainable_csv": {"path": train_path} if train_path else None,
-                "unlabeled_csv": None,
-                "reports": []
-            },
-            "validation": {
-                "status": "unknown",
-                "checked_utc": None,
-                "items": []
-            },
-            "software": {
-                "glycomsp": {"version": "", "commit": ""},
-                "extractor": {"name": "", "version": ""}
-            },
-            "operator": {"name": "", "note": ""}
-        }
-
-        # remove nulls in inputs/artifacts for cleanliness
-        v1["inputs"] = {k: v for k, v in v1["inputs"].items() if v is not None}
-        v1["artifacts"] = {k: v for k, v in v1["artifacts"].items() if v is not None}
-
-        return exp_name, sample_name, tree_entry, v1
-
-    #new, GPT said it's UI independent
+    # build method file from treeview
     def build_method_v1_from_tree(exp_name: str, sample_name: str, *, force_family: str = None) -> dict:
         """
         Build a Method v1 dict from the current experiment_projects tree entry.
@@ -6026,8 +5399,8 @@ def open_prepare_dataset_window():
             "json_type": "glycomsp.method",
             "schema_version": "1.0.0",
             "uid": str(uuid.uuid4()),
-            "created_utc": _utc_now_iso() if "_utc_now_iso" in globals() else datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-            "updated_utc": _utc_now_iso() if "_utc_now_iso" in globals() else datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "created_utc": _utc_now_iso(),
+            "updated_utc": _utc_now_iso(),
 
             "method": {
                 "family": family,
@@ -6079,21 +5452,24 @@ def open_prepare_dataset_window():
             v1["inputs"]["insilico_glycan_list"] = {"path": os.path.normpath(insilico_path)}
             if scoreb_path:
                 v1["inputs"]["score_b_workbook"] = {"path": os.path.normpath(scoreb_path)}
+            if train_path: #added 20260417
+                v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
         #fixed 20260312 Test-B B1.1: gate all CGA artifacts/inputs, prevents cross-contamination
         # ion_list/insilico_glycan_list already gated above (in conditional inputs block).
         # pseudolabels_tsv, trainable_csv, unlabeled_csv are CGA pipeline outputs only;
         # MAS produces no pseudolabeling artifacts, so never include them in a MAS method.
         if family == "CGA":
             if pl_path:
-                v1["artifacts"]["pseudolabels_tsv"] = {"path": os.path.normpath(pl_path)}
+                v1["artifacts"]["CGAresult_tsv"] = {"path": os.path.normpath(pl_path)} #pseudolabels_tsv -> CGAresult_tsv
             if train_path:
                 v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
             if unlabeled_path:
                 v1["artifacts"]["unlabeled_csv"] = {"path": os.path.normpath(unlabeled_path)}
 
         return v1
+    # ==
 
-
+    # load method file(s)
     def load_method_file(paths=None):
         if not paths:
             paths = filedialog.askopenfilenames(
@@ -6114,6 +5490,7 @@ def open_prepare_dataset_window():
                     context="[Method Import] "
                 )
             except Exception as e:
+                logger.log(f"[Method Import][ERROR 1] skipped unsupported or malformed json: {path}: {e}")
                 messagebox.showerror("Error", f"Failed to load method file:\n{path}\n{e}")
                 continue
 
@@ -6121,7 +5498,7 @@ def open_prepare_dataset_window():
                 exp_name, sample_name, tree_entry, v1_obj = normalize_method_json(method, path)
             except Exception as e:
                 skipped += 1
-                logger.log(f"[Method Import] skipped {path}: {e}")
+                logger.log(f"[Method Import][ERROR 1] skipped probably malformed or broken json: {path}: {e}")
                 continue
 
             if exp_name not in experiment_projects:
@@ -6130,6 +5507,7 @@ def open_prepare_dataset_window():
             # If already exists, skip (or you can decide overwrite policy later)
             if sample_name in experiment_projects[exp_name]["samples"]:
                 skipped += 1
+                logger.log(f"[Method Import][WARN] skipped {sample_name}: already exists in {exp_name}")
                 continue
 
             experiment_projects[exp_name]["samples"][sample_name] = tree_entry
@@ -6145,24 +5523,27 @@ def open_prepare_dataset_window():
         msg = f"Imported {loaded} sample(s) successfully.\nSkipped: {skipped}"
         if skipped > 0:
             msg += "\n(Skipped files were already loaded or invalid)"
+        logger.log(f"[Method Import] Imported {loaded} sample(s) successfully. Skipped: {skipped}")    
         messagebox.showinfo("Method Import", msg)
+    # == 
 
     def change_experiment_method_path():
+        exp = _current_exp_title() or "Unassigned" # 20260418 code review fix Unassigned bug
         path = filedialog.asksaveasfilename(
             title="Select path to save experiment method file",
             defaultextension=".exp.json",
             filetypes=[("Experiment Method JSON", "*.exp.json")]
         )
         if path:
-            experiment_method_paths["Unassigned"] = path  # Replace key if you're in a real experiment context
-            update_status_display("Unassigned")
+            experiment_method_paths[exp] = path                                          
+            update_status_display(exp) 
 
     def change_sample_method_folder():
-        global sample_method_folder
+        nonlocal sample_method_folder # 20260418 code review: global -> nonlocal
         path = filedialog.askdirectory(title="Select folder to save sample method files")
         if path:
             sample_method_folder = path
-            update_status_display("Unassigned")
+            update_status_display(_current_exp_title() or "Unassigned") # 20260418 code review
 
     #20250917 to avoid hard-fixing the items in exp json so the PL workflow can be saved as well
     def load_experiment_method_file():
@@ -6174,8 +5555,10 @@ def open_prepare_dataset_window():
         if not path:
             return
         exp_title = import_experiment_json(path)
-        if exp_title in experiment_status_labels:
-            experiment_status_labels[exp_title].config(text=f"EXP file: {path}")
+        if exp_title in experiment_status_labels:  # 20260418 Code review fix: Calling .config(text=...) on a tuple crashes with AttributeError.    
+            path_label, _ = experiment_status_labels[exp_title]                              
+            if path_label:
+                path_label.set(f"EXP file: {path}")  
 
     def save_current_experiment_method():
         """Repurposed: save the *experiment* (.exp.json), capturing manual + PL keys."""
@@ -6187,40 +5570,30 @@ def open_prepare_dataset_window():
         path = experiment_method_paths.get(exp)
         if not path:
             safe = exp.replace(" ", "_")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S") # introduced in 20260418 code review
             path = filedialog.asksaveasfilename(
                 title="Save Experiment (.exp.json)",
                 defaultextension=".exp.json",
-                initialfile=f"{safe}.exp.json",
+                initialfile=f"{safe}_{stamp}.exp.json",
                 filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")]
             )
             if not path:
                 return
         export_experiment_json(exp, path)
+        # 20260418 Code review: add auto-mounting method folder                        
+        experiment_method_paths[exp] = path
+        update_status_display(exp)
 
+    # 20260417 code review: platform-based right-click binding + fix MacOS unclickable issue by adding button 2
+    def bind_right_click(widget, callback):                                              
+        widget.bind("<Button-3>", callback)           # Windows & Linux right-click
+        if platform.system() == "Darwin":                                                
+            widget.bind("<Button-2>", callback)       # macOS two-finger/right-click
+            widget.bind("<Control-Button-1>", callback)  # macOS Ctrl+click 
 
-    def bind_right_click(widget, callback):
-        # Universal right-click binding for macOS, Windows, Linux
-        widget.bind("<Button-3>", callback)  # Windows & Linux
-        widget.bind("<Control-Button-1>", callback)  # macOS trackpad
-
-    def get_selected_csv_path():
-        selected = tree.focus()
-        print(selected)
-        node_info = experiment_projects.get(selected)
-        print(f"node info: {node_info}")
-        if node_info and node_info["type"] == "csv":
-            exp = node_info["exp"]
-            sample = node_info["sample"]
-            path = experiment_projects[exp]["samples"][sample]["csv"]
-            return path
-        else:
-            return None
-
-
-    # -- pseudo labeling --
+    # -- CGA (pseudolabeling)
     def launch_pseudo_labeling():
         #import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
-        from datetime import datetime
         exp_name, sample_name, method_path = _get_selected_context()
         if not exp_name or not sample_name:
             messagebox.showwarning("No Selection", "Select a sample or method in the tree first.")
@@ -6230,11 +5603,12 @@ def open_prepare_dataset_window():
         meta_path = files.get("metadata")
 
         if not csv_path or not meta_path:
+            logger.log(f"[launch][CGA] Missing coupled csv and metadata json file")
             messagebox.showerror("Missing Files", "This sample must have both CSV and Metadata (.json) linked.")
             return
         
-        print("[launch] files:", files)
-        print("[launch] using meta:", meta_path)
+        print("[launch][DEBUG] files:", files)
+        print("[launch][DEBUG] using meta:", meta_path)
 
         # auto-resolve without prompting
         meta_path, meta_dict = _resolve_metadata_for_sample(files, sample_name, csv_path)
@@ -6252,16 +5626,18 @@ def open_prepare_dataset_window():
                     meta_path, meta_dict = picked, d
                     files["metadata"] = picked
                 else:
+                    logger.log(f"[launch][CGA][WARN 1] Metadata invalid or lacking Glycan Type / Mass Analyzer charge mode")
                     messagebox.showwarning("Metadata not valid",
                                         "Selected file lacks Glycan Type / Mass Analyzer charge mode.")
                     meta_path, meta_dict = None, None
             else:
+                logger.log(f"[launch][CGA][WARN 0] Metadata not found, derivatization and charges may be missing")
                 messagebox.showwarning(
                     "Metadata not found",
                     "Could not locate metadata for this sample. You can proceed, but defaults may be wrong."
                 )
 
-        print("[launch] using meta (final):", meta_path)
+        print("[launch][DEBUG] using metadata (final):", meta_path)
 
 
         def on_generate(payload):
@@ -6300,7 +5676,7 @@ def open_prepare_dataset_window():
             outdir = filedialog.askdirectory(title="Select output folder for in-silico CSV")
             if not outdir:
                 return None
-            outname = f"{sample_name}_insilico_{datetime.now().strftime('%Y%m%d')}.csv"
+            outname = f"{sample_name}_insilico_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             outpath = os.path.join(outdir, outname)
 
             try:
@@ -6344,11 +5720,13 @@ def open_prepare_dataset_window():
                     "chosen_counts": {"SO3": so3_count, "PO3H": po3h_count},
                 })
                 messagebox.showinfo("In-silico CSV generated", f"Saved and linked:\n{outpath}")
+                logger.log(f"In-silico CSV generated, Saved and linked at: {outpath}")
                 refresh_tree()
                 return outpath  # so the window can show it immediately
 
             except Exception as e:
                 traceback.print_exc()
+                logger.log(f"Generation failed {str(e)}")
                 messagebox.showerror("Generation failed", str(e))
                 return None
 
@@ -6411,7 +5789,7 @@ def open_prepare_dataset_window():
             )
 
             if not out_tsv:
-                # if wrapper stores it instead of returning
+                # Since run_pseudolabeling won't return any value, we reuse the stored value from files["pseudolabel_csv"]
                 out_tsv = files.get("pseudolabel_csv")
 
             # Part 2: Score B runtime enrichment
@@ -6462,8 +5840,8 @@ def open_prepare_dataset_window():
                     os.path.dirname(files["csv"]) if files.get("csv") else None
                 )
                 if base_dir:
-                    stamp = datetime.now().strftime("%Y%m%d")
-                    out_name = f"{sample_name}.CGA.method.v1_{stamp}.json"
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    out_name = f"{sample_name}.CGA{stamp}.method.json"
                     out_path = os.path.join(base_dir, out_name)
                     #fixed 20260313 Test-2: ensure parent directory exists
                     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -6483,7 +5861,7 @@ def open_prepare_dataset_window():
             refresh_tree()
 
         # Open the setup window with the resolved metadata
-        PseudoLabelingSetupWindow(
+        CGASetupWindow(
             root,
             meta_json_path=meta_path,
             meta_prefill=meta_dict or {},
@@ -6497,14 +5875,15 @@ def open_prepare_dataset_window():
             initial_ionlist=files.get("ionlist_path"),
             initial_scoreb_workbook=files.get("score_b_workbook_path"),
         )
+    # CGA setup & data passing block ends
 
-    #20250911 
+    # 20250911 CGA → Trainable window
     def open_pl_to_trainable_modal(root, sample_name, files, logger):
         import tkinter as tk
-        from tkinter import ttk, filedialog, messagebox
+        from tkinter import filedialog, messagebox
 
         win = tk.Toplevel(root)
-        win.title("Pseudolabel → Trainable (one-pass)")
+        win.title("CGA → Trainable (one-pass)")
         win.grab_set()
 
         # --- Inputs
@@ -6519,14 +5898,14 @@ def open_prepare_dataset_window():
         # NEW — precursor gate controls (default ON)
         apply_precursor_gate_var = tk.BooleanVar(value=True)
         precursor_ppm_var        = tk.StringVar(value="10")   # sensible default; adjust if you prefer
-        converted_csv_var        = tk.StringVar(value=files.get("converted_csv",""))
-
+        converted_csv_var        = tk.StringVar(value=files.get("csv","")) 
+        # 20260418 converted_csv -> csv. Edge case since run_pseudolabeling reads the converted CSV directly from files["csv"]. External tsv or reuse mode might touch this part
         def browse(var, exts=(("All","*.*"),)):
             p = filedialog.askopenfilename(filetypes=exts)
             if p: var.set(p)
 
         row=0
-        ttk.Label(frm, text="1) Pseudolabeled TSV/CSV (long):").grid(row=row, column=0, sticky="w"); 
+        ttk.Label(frm, text="1) CGA analysis report TSV/CSV (long):").grid(row=row, column=0, sticky="w"); 
         ttk.Entry(frm, textvariable=pseudo_var, width=70).grid(row=row, column=1, sticky="we")
         ttk.Button(frm, text="Choose…", command=lambda: browse(pseudo_var,(("TSV/CSV","*.tsv *.csv"),))).grid(row=row, column=2); row+=1
 
@@ -6597,10 +5976,10 @@ def open_prepare_dataset_window():
         feat_box = ttk.LabelFrame(frm, text="6) Feature building")
         feat_box.grid(row=row, column=0, columnspan=3, sticky="we", pady=(4,8))
 
-        mode = tk.StringVar(value="rebuild")
-        ttk.Radiobutton(feat_box, text="Rebuild ALL features from long-form peaks (log10(1+I))",
-                        variable=mode, value="rebuild").grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Radiobutton(feat_box, text="Reuse existing wide features CSV",
+        mode = tk.StringVar(value="extract")
+        ttk.Radiobutton(feat_box, text="Extract features from long-form peaks and build feature matrix (log10(I) + 1)",
+                        variable=mode, value="extract").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Radiobutton(feat_box, text="Reuse existing trainable CSV features",
                         variable=mode, value="reuse").grid(row=1, column=0, columnspan=3, sticky="w")
         ttk.Entry(feat_box, textvariable=wide_var, width=70).grid(row=2, column=0, sticky="we")
         ttk.Button(feat_box, text="Choose…",
@@ -6637,10 +6016,10 @@ def open_prepare_dataset_window():
                 pg_ppm   = float(precursor_ppm_var.get()) if apply_precursor_gate_var.get() else None
                 conv_path = converted_csv_var.get().strip() or None
                 #debug line
-                print("[PL→Train][dbg] include_mass_feature UI:", include_mass_feat_var.get())
-                outpath, summary = build_trainable_from_pseudolabels(
+                print("[CGA→Train][DEBUG] include_mass_feature UI:", include_mass_feat_var.get())
+                outpath, summary = build_trainable_from_CGA(
                     sample_name=sample_name,
-                    pseudo_path=pseudo_var.get().strip(),
+                    cga_path=pseudo_var.get().strip(),
                     ion_file_path=ion_var.get().strip(),
                     ion_sheet_name=ion_sheet.get().strip() or None,
                     salvage_path=salvage_var.get().strip() or None,
@@ -6656,34 +6035,28 @@ def open_prepare_dataset_window():
                     include_mass_feature=bool(include_mass_feat_var.get()),
                     #converted_csv_path=converted_csv_path_entry.get().strip() or None,
                 )
-                status.config(text=outpath)
+                status.config(text=outpath) 
                 messagebox.showinfo("Done", f"Saved trainable CSV:\n{outpath}\n\nSummary:\nrows={summary['rows']} cols={summary['cols']}\nclasses={summary['classes']}")
+                # 20260417 code review: add trainable csv (CGA route) with tree update
+                files["trainable_csv"] = outpath
+                print(f"[DEBUG] files['trainable_csv'] set to: {files.get('trainable_csv')}")
+                refresh_tree()
             except Exception as e:
                 import traceback; traceback.print_exc()
                 messagebox.showerror("Failed", str(e))
 
         ttk.Button(frm, text="Build Trainable CSV", command=run_once).grid(row=row+2, column=1, pady=8)
+
     def try_pl_to_trainable():
         exp_name, sample_name, method_path = _get_selected_context()
         if not exp_name or not sample_name:
             messagebox.showerror("No Selection", "Please select a sample or method first.")
             return
-
+        
         files = experiment_projects[exp_name]["samples"][sample_name]
         open_pl_to_trainable_modal(root, sample_name, files, logger)
 
-    def try_pl_to_trainable_old():
-        sel = tree.selection()
-        if not sel:
-            messagebox.showerror("No Selection", "Please select a sample first.")
-            return
-        sample_node = sel[0]
-        sample_name = clean_sample_name(tree.item(sample_node, "text"))
-        exp_node = tree.parent(sample_node)
-        exp_name = tree.item(exp_node, "text").replace("Experiment: ", "").split(" (")[0].strip()
 
-        files = experiment_projects[exp_name]["samples"][sample_name]
-        open_pl_to_trainable_modal(root, sample_name, files, logger)
 
     # --- Button panel ---
     button_frame = tk.Frame(subwin)
@@ -6691,7 +6064,6 @@ def open_prepare_dataset_window():
 
     tk.Button(button_frame, text="Add MS2 CSV(s)", command=lambda: select_files_generic("csv", True, handle_csv_selection)).grid(row=0, column=0, padx=5)
     tk.Button(button_frame, text="Add Excels (ion list/man annotation)", command=lambda: select_files_generic("excel", True, handle_excel_selection)).grid(row=0, column=1, padx=5)
-    #tk.Button(button_frame, text="Add Sample using metadata", command=lambda: select_files_generic("json", True, handle_json_selection)).grid(row=0, column=2, padx=5)
     tk.Button(button_frame, text="Add Sample using metadata", command=lambda: select_files_generic("json", True, handle_metadata_selection)).grid(row=0, column=2, padx=5)
     tk.Button(button_frame, text="Add Sample", command=add_sample).grid(row=1, column=0, padx=5)
     tk.Button(button_frame, text="Clean up empty unassigned sample tags", command=clean_unassigned_samples).grid(row=1, column=1, padx=5)
@@ -6699,14 +6071,14 @@ def open_prepare_dataset_window():
     link_button.grid(row=1, column=2, padx=5) #why it was gone?
     merge_button = tk.Button(button_frame, text="Merge Sample", state="disabled", command=lambda: try_merge_selected_sample())
     merge_button.grid(row=1, column=3, padx=5)
-    tk.Button(button_frame, text="Negative options…",
+    tk.Button(button_frame, text="Negative Sampling Setting",
           command=open_negative_options_dialog).grid(row=2, column=0, padx=5)
-    tk.Button(button_frame, text="Ion suggestions…",
-          command=open_ion_suggest_dialog).grid(row=2, column=1, padx=5)
-    tk.Button(button_frame, text="View suggestions…",
+    tk.Button(button_frame, text="Ion Mining",
+          command=open_ion_mining_dialog).grid(row=2, column=1, padx=5)
+    tk.Button(button_frame, text="Browse Ion Mining result",
           command=open_ion_suggestions_viewer).grid(row=2, column=2, padx=5)
     tk.Button(button_frame, text="Load Method", command=load_method_file).grid(row=2, column=3, padx=5)
-    ttk.Button(button_frame, text="CGA manager", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
+    tk.Button(button_frame, text="CGA manager", command=lambda:launch_pseudo_labeling()).grid(row=3, column=0, padx=5, pady=5) 
     #GPT said without () it only passes the function, and work only if clicked
     tk.Button(button_frame, text="CGA → Trainable",
           command=try_pl_to_trainable).grid(row=3, column=1, padx=5)
@@ -6732,27 +6104,23 @@ def open_prepare_dataset_window():
     #bottom place for "global" exp method file
     tk.Button(btn_frame, text="Load .exp.json", command=load_experiment_method_file).pack(side=tk.LEFT, padx=10)
     tk.Button(btn_frame, text="Save .exp.json", command=save_current_experiment_method).pack(side=tk.LEFT)
-    ttk.Button(btn_frame, text="Export Method v1 (MAS)", command=lambda: _export_method_v1("MAS")).pack(side="left", padx=4)
-    ttk.Button(btn_frame, text="Export Method v1 (CGA)", command=lambda: _export_method_v1("CGA")).pack(side="left", padx=4)
+    tk.Button(btn_frame, text="Export Method v1 (MAS)", command=lambda: _export_method_v1("MAS")).pack(side="left", padx=4)
+    tk.Button(btn_frame, text="Export Method v1 (CGA)", command=lambda: _export_method_v1("CGA")).pack(side="left", padx=4)
 
     # --- Right-click bind ---
     #tree.bind("<Button-3>", on_right_click)
     tree.bind("<ButtonPress-1>", on_drag_start)
     tree.bind("<ButtonRelease-1>", on_drag_release)
     bind_right_click(tree, on_right_click)
-
+    # Prepare dataset Window Setting ENDS
+    # ==============================
 
 def open_ml_analysis_window():
-    import json
-    import os
-    import pandas as pd
-    from tkinter import filedialog, messagebox
-    from tkinter import ttk
-    import tkinter as tk
     #20250901 add split
     from sklearn.model_selection import train_test_split
     import copy
-
+    import re
+    import numpy as np
     #v0.9923~0.9929 utilities
     from ml_ng_utils import (
         collect_ng_candidates,
@@ -6761,8 +6129,8 @@ def open_ml_analysis_window():
         build_features_from_peaks_log10_plus1,  # optional if you need it directly
     )
     from ml_ng_utils_extras import resample_by_strategy, tau_sweep_summary
-    #_ensure_ml_state()
-    #20250919 try to let live param changes apply to save/loadable field
+    # ML Utility and dict definition block
+    # Initialize _ml_state default dict (For Random Forest, in future supporting more models, edit BUILTIN_ML)
     _ml_state = {
         "current": {
             "model": {
@@ -6778,7 +6146,7 @@ def open_ml_analysis_window():
                 "test_size": 0.25,
                 "val_size": 0.10,
                 "stratify": True,
-                "real_world_test": False,
+                "real_world_test": True, # 20260418 False -> True
                 "threshold": {"enabled": False, "tau": 0.65, "margin": 0.05},
             },
             "min_samples_per_class": 5,
@@ -6789,45 +6157,86 @@ def open_ml_analysis_window():
         "preview_txt": None,
     }
 
-    def _render_effective_from_state():
-        if _ml_state["preview_txt"] is None:
-            return
-        # If you already have a merge routine, use it; otherwise just echo current:
-        eff = _ml_state["current"]  # or: _merge_ml(BUILTIN_ML, files_layer, _ml_state["current"])
-        _ml_state["preview_txt"].delete("1.0", "end")
-        _ml_state["preview_txt"].insert("1.0", json.dumps(eff, indent=2))
+    import hashlib, datetime, platform, sys
+    from typing import Optional, Dict, Any
 
-    def _write_editor_from_state():
-        """Refresh the JSON text panes if they exist (no-op otherwise)."""
+    # 20260418 Keep first BUILTIN_ML as init, and remove others, also change reading it to snapshot_train_vars(), which captures real tkinter values
+    BUILTIN_ML: Dict[str, Any] = {
+        "model": {"type": "RandomForest", "n_estimators": 401, "max_depth": None, "class_weight": "balanced"}, # was 500, others are 400
+        "split": {"test_size": 0.2, "val_size": 0.0, "random_state": 42, "stratified": True},
+        "filters": {"min_samples_per_class": 15, "drop_rare_in_test": True},
+        "negatives": {"enabled": True, "max_ratio": 3.0},
+        "features": {"exclude_cols": ["MS2scan_no", "protonatedmass"], "use_ion_suggestions": False},
+        "thresholds": {"tau": 0.60, "margin": 0.05},
+    }
+    # ML window state, grouped for better management. Duplicated are removed (lives inside ML window scope) 
+    train_csv_path = None                                                                
+    predict_input_path = None                                 
+    model_file_path = None
+    linked_exp_json = None
+    effective_ml_params = {}  # what Train uses
+    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
+
+    # tk variables storing train/test + RF tk parameters (shared between settings dialog and the rest)
+    n_estimators_var     = tk.IntVar(value=333)     # default trees number, for debug during code review session, change 400 to 333
+    class_weight_var     = tk.BooleanVar(value=True)  #  => "balanced" if True else None
+    test_split_var       = tk.DoubleVar(value=0.20)   # test set split ratio %
+    val_split_var        = tk.DoubleVar(value=0.10)   # validation set ratio %
+    min_samples_var      = tk.IntVar(value=5)         # tiny class threshold
+    use_balance_var      = tk.BooleanVar(value=True)  # enable balancing pipeline, default to True
+    majority_label_var   = tk.StringVar(value="Non-glycan") # Set Non-glycan as major labels (negatives) against other composition-fitted spectra entries
+    majority_factor_var  = tk.IntVar(value=3)      # cap = factor * max(minor)
+    use_stratify_var     = tk.BooleanVar(value=True)
+    # Cap only the training fold (leave Val/Test uncapped)
+    real_world_test_var  = tk.BooleanVar(value=True) # Only caps training sets. Default to True. 
+    # Beta versions  (include publication data) seems using False flag but the tkinter rendering issue made it unclear -- I saw it was True until we set debug prints
+    # Optional Confidence thresholding (post-prediction) 20250902
+    enable_thresh_var    = tk.BooleanVar(value=False)   # default ON # 20260418 True to False
+    thresh_val_var       = tk.DoubleVar(value=0.65)    # τ in [0,1]
+    margin_val_var       = tk.DoubleVar(value=0.05)  # δ for majority-support check
+
+    # ML live update utility block 
+    #read current values
+    def _on_change(*_):
+        # removed _write_train_ui_into_state
+        _emit_ml_state_changed_ui_refresh()
+        #_debug_print_train_params()
+    
+    # for live updating all tk values. Exactly infinite monitoring loop
+    for v in (test_split_var, val_split_var, min_samples_var, use_balance_var,
+          majority_label_var, majority_factor_var, use_stratify_var,
+          n_estimators_var, class_weight_var, real_world_test_var,
+          enable_thresh_var, thresh_val_var, margin_val_var):
+        v.trace_add("write", _on_change)
+    # ML live update utility block ends
+    # ======
+
+    # ---- ML state bootstrapper ----
+    def _ensure_ml_state():
+        """Guarantee _ml_state exists with the keys we expect."""
+        nonlocal _ml_state # 20260418 global -> nonlocal fix by Claude Code
         try:
-            import json
-        except Exception:
-            json = None
+            _ml_state  # noqa: F401
+        except NameError:
+            _ml_state = {}
 
-        ed, pv = _get_editor_preview_widgets()
+        if not isinstance(_ml_state, dict):
+            _ml_state = {}
 
-        editor_blob   = _ml_state.get("editor") or {}
-        effective_blob = _ml_state.get("effective_params") or {}
+        # 20260418 code review: add debug lines
+        if "editor" not in _ml_state:
+            print(f"[ML][DEBUG][init/fallback] editor field is empty or not exist. Copy from BUILTIN_ML")
+            _ml_state["editor"] = copy.deepcopy(BUILTIN_ML)
+        if "effective" not in _ml_state:
+            print(f"[ML][DEBUG][init/fallback] effective field is empty or not exist. Copy from editor")
+            _ml_state["effective"] = copy.deepcopy(_ml_state["editor"])
+        # 20260419 code review: I can't find any source_file related field in either BUILTIN_ML or _ml_state. Future feature?
+        #if "source_files" not in _ml_state:
+        #    print(f"[ML][DEBUG][init?] source_files do not exist, reset to empty []")
+        #    _ml_state["source_files"] = []  # paths you load/merge from
+        return _ml_state
 
-        s_editor    = json.dumps(editor_blob, indent=2) if json else str(editor_blob)
-        s_effective = json.dumps(effective_blob, indent=2) if json else str(effective_blob)
-
-        if ed:
-            try:
-                ed.configure(state="normal")
-                ed.delete("1.0", "end")
-                ed.insert("1.0", s_editor)
-            except Exception:
-                pass
-
-        if pv:
-            try:
-                pv.configure(state="normal")
-                pv.delete("1.0", "end")
-                pv.insert("1.0", s_effective)
-            except Exception:
-                pass
-
+    # Handle the refresh/editing value in ML param editor
     def _emit_ml_state_changed_ui_refresh():
         """Refresh the ML Parameters editor/preview panes if that window is open."""
         _ensure_ml_state()
@@ -6835,7 +6244,6 @@ def open_ml_analysis_window():
         t2 = _ml_state.get("preview_txt")
         if not (t1 or t2):
             return
-
         try:
             if t1:
                 t1.configure(state="normal")
@@ -6845,79 +6253,79 @@ def open_ml_analysis_window():
             if t2:
                 t2.configure(state="normal")
                 t2.delete("1.0", "end")
-                t2.insert("1.0", json.dumps(_ml_state.get("effective", _ml_state["editor"]), indent=2))
+                t2.insert("1.0", json.dumps(snapshot_train_vars(), indent=2))  # 20260418, now right window read directly
+                #json.dumps(_ml_state.get("effective", _ml_state["editor"]), indent=2))
                 t2.configure(state="normal")
         except Exception:
             pass
 
-    def _write_train_ui_into_state( 
-        test_size: float,
-        val_size: float,
-        min_per_class: int,
-        use_balance: bool,
-        majority_label: str,
-        majority_factor: int,
-        stratify: bool,
-        n_estimators: int,
-        use_class_weight: bool,
-        real_world_test: bool,
-        thr_enable: bool,
-        thr_tau: float,
-        thr_margin: float,
-    ):
-        st = _ensure_ml_state()
-        ed  = st["editor"]
-        tr  = ed.setdefault("train", {})
-        mdl = ed.setdefault("model", {})
-        bal = ed.setdefault("balance", {})
+    # handles ml dict merge, called in train_model and mostly in open_ml_params_window
+    def _merge_ml(*layers):
+        out = {}
+        for layer in layers:
+            if not layer: 
+                continue
+            for k, v in layer.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = {**out[k], **v}
+                else:
+                    out[k] = v
+        return out
 
-        # train/test
-        tr["test_size"] = float(test_size)
-        tr["val_size"]  = float(val_size)
-        tr["stratify"]  = bool(stratify)
-        tr["real_world_test"] = bool(real_world_test)
-        tr["threshold"] = {"enabled": bool(thr_enable), "tau": float(thr_tau), "margin": float(thr_margin)}
+    # For collecting training environments (not parameters)
+    def collect_versions() -> Dict[str, str]:
+        v = {
+            "python": platform.python_version(),
+            "platform": f"{platform.system()} {platform.release()}",
+        }
+        try:
+            import sklearn
+            v["sklearn"] = sklearn.__version__
+        except Exception:
+            pass
+        # add your own GUI/app version constant if you keep one
+        try:
+            from importlib.metadata import version as _v
+            v["joblib"] = _v("joblib")
+            v["numpy"] = _v("numpy")
+            v["pandas"] = _v("pandas")
+        except Exception:
+            pass
+        # If you track GUI version somewhere:
+        try:
+            v["gms_gui"] = version  # define elsewhere if available
+        except Exception:
+            pass
+        return v
 
-        # per-class minimum
-        ed["min_samples_per_class"] = int(min_per_class)
-
-        # balance
-        bal["enabled"] = bool(use_balance)
-        bal["majority_label"]  = str(majority_label).strip() if majority_label is not None else "Non-glycan"
-        bal["majority_factor"] = int(majority_factor)
-
-        # model (RF)
-        mdl["type"]          = "RandomForest"
-        mdl["n_estimators"]  = int(n_estimators)
-        mdl["class_weight"]  = "balanced" if bool(use_class_weight) else None
-
-        # recompute effective if you keep one
-        st["effective"] = copy.deepcopy(ed)
-
-    def _deep_merge(a, b):
-        if isinstance(a, dict) and isinstance(b, dict):
-            out = dict(a)
-            for k, v in b.items():
-                out[k] = _deep_merge(out.get(k), v) if k in out else v
-            return out
-        return b if b is not None else a
-
-    def _effective_params():
-        eff = BUILTIN_ML
-        for layer in _ml_state.get("file_layers", []):
-            eff = _deep_merge(eff, layer)
-        eff = _deep_merge(eff, _ml_state["editor"])
-        return eff
-
-    def _refresh_json_textboxes():
-        ed = json.dumps(_ml_state["editor"], indent=2)
-        eff = json.dumps(_effective_params(), indent=2)
-        t1 = _ml_state["widgets"]["editor_txt"]
-        t2 = _ml_state["widgets"]["preview_txt"]
-        if t1:
-            t1.config(state="normal"); t1.delete("1.0", "end"); t1.insert("1.0", ed); t1.config(state="normal")
-        if t2:
-            t2.config(state="normal"); t2.delete("1.0", "end"); t2.insert("1.0", eff); t2.config(state="normal")
+    # Saving report and enviroments to json file along with model file
+    def snapshot_training_run(artifact_dir: str,
+                            effective_params: Dict[str, Any],
+                            column_order: list[str],
+                            classes: list[str],
+                            inputs: Dict[str, Any],
+                            hashes: Dict[str, Optional[str]],
+                            versions: Dict[str, str]) -> str:
+        os.makedirs(artifact_dir, exist_ok=True)
+        payload = {
+            "training_run": {
+                "effective_params": effective_params,
+                "column_order": column_order,
+                "classes": classes,
+                "versions": versions,
+                "seeds": {"random_state": effective_params.get("split", {}).get("random_state", None)},
+                "inputs": inputs,
+                "hashes": hashes,
+                "created_at": datetime.datetime.now().astimezone().isoformat(),
+            }
+        }
+        out = os.path.join(artifact_dir, "training_run.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return out
+    # ML Utility block ends
+    # ====================
 
     #20250929
     def _drop_meta_and_get_X(df: pd.DataFrame) -> pd.DataFrame:
@@ -6926,11 +6334,11 @@ def open_ml_analysis_window():
         Drops obviously non-feature metadata columns like UID and Origin_*.
         Also attempts to coerce object columns to numeric if they are mostly numeric.
         """
-        import numpy as np
+
+        # Identify meta columns (those SHOULD NOT be features, others will be passed to model.fix(X,Y))
         meta_exact = {"uid", "predicted_label", "label_str", "class_str",
                     "origin_file", "origin_basename"}
         meta_prefix = ("origin_",)
-
         # drop meta columns
         drop_cols = []
         for c in df.columns:
@@ -6939,7 +6347,7 @@ def open_ml_analysis_window():
                 drop_cols.append(c)
         df2 = df.drop(columns=drop_cols, errors="ignore").copy()
 
-        # try to coerce mostly numeric object columns
+        # try to coerce mostly numeric object columns (if over 95% is numeric, do the conversion)
         for c in list(df2.columns):
             if df2[c].dtype == object:
                 coerced = pd.to_numeric(df2[c], errors="coerce")
@@ -6947,21 +6355,18 @@ def open_ml_analysis_window():
                 if coerced.notna().mean() >= 0.95:
                     df2[c] = coerced
 
-        # keep strictly numeric columns for X
+        # keep strictly numeric columns for X, if a string-based feature is going to be fed, tokenize it.
         X = df2.select_dtypes(include=[np.number])
         return X    
 
-    import re
-
+    # Label consistency block
+    # Always output consistent human-readable string like "F1H5N4S2" or "Non-glycan", regardless of whether the input was a tuple, a clean label, or a messy variant
     # Pure manual: FHNSGKDN order, no neg-mode extras
     _MANUAL_PURE = re.compile(r"^(?:F\d+)?H\d+N\d+(?:S\d+)?(?:G\d+)?(?:KDN\d+)?$", re.IGNORECASE)
 
     # Manual + PL extensions allowed:
-    #   optional F..., then H...N..., optional S/G/KDN, optional A..., optional trailing s/p suffixes (lowercase)
-    _MANUAL_EXT = re.compile(
-        r"^(?:F\d+)?H\d+N\d+(?:S\d+)?(?:G\d+)?(?:KDN\d+)?(?:A\d+)?(?:[sp]\d+)?$",
-        re.IGNORECASE
-    )
+    # optional F..., then H...N..., optional S/G/KDN, optional A..., optional trailing s/p suffixes (lowercase)
+    _MANUAL_EXT = re.compile(r"^(?:F\d+)?H\d+N\d+(?:S\d+)?(?:G\d+)?(?:KDN\d+)?(?:A\d+)?(?:[sp]\d+)?$", re.IGNORECASE)
 
     def _looks_tuplelike_for_structure(x) -> bool:
         # tuple/list/array or string like "(5,4,0,0,0,1)"
@@ -6977,6 +6382,7 @@ def open_ml_analysis_window():
         - If it's already manual (pure or PL-extended, e.g., includes A / trailing s/p) -> KEEP AS-IS
         - Else if it's composition-like but messy -> try parse_tuple_to_manual (it will reorder FHNSGKDN)
         - Else -> passthrough (e.g., 'Non-glycan')
+        - Notice that it calls external module. Usage example: lambda x: normalize_structure_for_training(x, normalizer.parse_structure_to_manual)
         """
         s = str(val).strip()
         if _looks_tuplelike_for_structure(val):
@@ -6984,32 +6390,35 @@ def open_ml_analysis_window():
 
         if _MANUAL_EXT.match(s) or _MANUAL_PURE.match(s):
             return s  # keep A / s / p (and normal manual) untouched
-
         # Fallback: if it looks like a composition string (any letter+digits), try parser
         if re.fullmatch(r"(?:[A-Za-z]+?\d+)+", s):
             try:
                 return parse_tuple_to_manual(s)
             except Exception:
                 return s
-
         return s
+    # Label consistency block Ends
+    # ================
 
-
-    #20250909
+    # ML utilities part 2?
+    # model loader that handles three file formats: .joblib, .pkl (both via joblib.load), and .skops (via skops.io.load). Returns (model, loader_name) 
     def load_model_any(model_path: str):
         ext = os.path.splitext(model_path)[1].lower()
+        print(f"ext {ext}") # debug 20260420
         if ext in (".joblib", ".pkl"):
             model = joblib.load(model_path)
             loader = "joblib"
         elif ext == ".skops":
+            print("loading skops model file")
             try:
-                from skops.io import load as sk_load
+                from skops.io import load as sk_load, get_untrusted_types
             except Exception as e:
                 raise ImportError(
                     "This model is a .skops file but 'skops' is not installed. "
                     "Install it in this environment: pip install skops"
                 ) from e
-            model = sk_load(model_path, trusted=True)
+            untrusted = get_untrusted_types(file=model_path)
+            model = sk_load(model_path, trusted=None)#)True)
             loader = "skops"
         else:
             raise ValueError(f"Unsupported model file extension: {ext}")
@@ -7020,6 +6429,7 @@ def open_ml_analysis_window():
             )
         return model, loader
 
+    # Recovers the exact list of feature column names that the model was trained on, avoid misalignment error
     def get_training_features(model, model_path: str):
         # 1) native sklearn attribute (best)
         feats = getattr(model, "feature_names_in_", None)
@@ -7041,7 +6451,7 @@ def open_ml_analysis_window():
                         pass
         return [str(c) for c in feats] if feats is not None else None
 
-
+    # Class Balance, Split, and Capping
     def balance_and_split(
         df: pd.DataFrame,
         label_col="Structure",
@@ -7194,6 +6604,8 @@ def open_ml_analysis_window():
             info["cap_applied_to"] = info.get("majority_cap_applied_to") or info.get("train_majority_cap_applied_to")
             info["cap_value"]      = info.get("majority_cap") or info.get("train_majority_cap")
             return X_train, y_train, X_val, y_val, X_test, y_test, info
+    # ==
+
     # --- helper: guess method-json-derived folder name for packing ---
     def _guess_method_basename_for_pack(predict_input_path: str, df: pd.DataFrame) -> str:
         """
@@ -7206,7 +6618,6 @@ def open_ml_analysis_window():
         5) CSV stem as last resort
         """
         import os, glob
-        from pathlib import Path
         folder = os.path.dirname(predict_input_path)
 
         # 1) explicit hint column
@@ -7215,6 +6626,7 @@ def open_ml_analysis_window():
                 try:
                     cand = str(df[col].dropna().iloc[0]).strip()
                     if cand and cand.lower().endswith(".method.json") and os.path.exists(cand):
+                        print(f"[ML-PACK] method basename from CSV column '{col}':{Path(cand).stem}")
                         return Path(cand).stem
                 except Exception:
                     pass
@@ -7222,6 +6634,7 @@ def open_ml_analysis_window():
         # 2) neighbors
         candidates = sorted(glob.glob(os.path.join(folder, "*.method.json")))
         if len(candidates) == 1:
+            print(f"[ML-PACK] method basename from unique neighbor: {Path(candidates[0]).stem}")
             return Path(candidates[0]).stem
 
         if len(candidates) > 1:
@@ -7236,6 +6649,7 @@ def open_ml_analysis_window():
             for c in candidates:
                 name = os.path.basename(c)
                 if any(h and (h in name) for h in hints):
+                    print(f"[ML-PACK] method basename from hint match '{hints}' → {Path(c).stem}")
                     return Path(c).stem
 
             # 4) ask user explicitly
@@ -7247,14 +6661,17 @@ def open_ml_analysis_window():
                     filetypes=[("Method JSON", "*.method.json")]
                 )
                 if sel:
+                    print(f"[ML-PACK] method basename from user dialog: {Path(sel).stem}")
                     return Path(sel).stem
             except Exception:
                 pass  # fall through to #5
 
         # 5) last resort
+        print(f"[ML-PACK] method basename fallback to CSV stem: {Path(predict_input_path).stem}")
         return Path(predict_input_path).stem
-    
-    #new safe method json & raw csv
+    # ===
+
+    # 20260418 code review: possible for CLI implementation in future. Built 20250915. Called by create_unlabeled_from_method
     def _pick_file_cli_or_gui(title="Select a file", patterns=(("CSV", "*.csv"), ("All files", "*.*"))):
         # Try GUI first
         try:
@@ -7273,186 +6690,14 @@ def open_ml_analysis_window():
             return None    
 
 
-
-
-
-    #20250918 ML method export utilities
-    # =========================
-    # ML PARAM PRESET UTILITIES
-    # =========================
-    #from __future__ import annotations
-    import json, os, hashlib, datetime, platform, sys
-    from typing import Optional, Dict, Any
-
-    # Sensible built-ins if neither exp nor method has overrides
-    BUILTIN_ML: Dict[str, Any] = {
-        "model": {"type": "RandomForest", "n_estimators": 500, "max_depth": None, "class_weight": "balanced"},
-        "split": {"test_size": 0.2, "val_size": 0.0, "random_state": 42, "stratified": True},
-        "filters": {"min_samples_per_class": 15, "drop_rare_in_test": True},
-        "negatives": {"enabled": True, "max_ratio": 3.0},
-        "features": {"exclude_cols": ["MS2scan_no", "protonatedmass"], "use_ion_suggestions": False},
-        "thresholds": {"tau": 0.60, "margin": 0.05},
-    }
-
-    def _safe_read_json(path: str) -> Optional[Dict[str, Any]]:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return None
-
-    def _safe_write_json(path: str, data: Dict[str, Any]) -> None:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-
-    def read_ml_defaults_from_exp(exp_json_path: str) -> Optional[Dict[str, Any]]:
-        data = _safe_read_json(exp_json_path)
-        if not data: return None
-        return data.get("ml_defaults")
-
-    def write_ml_defaults_to_exp(exp_json_path: str, params: Dict[str, Any]) -> bool:
-        data = _safe_read_json(exp_json_path) or {}
-        data["ml_defaults"] = params
-        try:
-            _safe_write_json(exp_json_path, data)
-            return True
-        except Exception:
-            return False
-
-    def read_ml_overrides_from_method(method_json_path: str) -> Optional[Dict[str, Any]]:
-        data = _safe_read_json(method_json_path)
-        if not data: return None
-        return data.get("ml_overrides")
-
-    def write_ml_overrides_to_method(method_json_path: str, params: Dict[str, Any]) -> bool:
-        data = _safe_read_json(method_json_path) or {}
-        data["ml_overrides"] = params
-        try:
-            _safe_write_json(method_json_path, data)
-            return True
-        except Exception:
-            return False
-
-    def load_ml_params_from_json(path: str) -> Optional[Dict[str, Any]]:
-        return _safe_read_json(path)
-
-    def save_ml_params_to_json(path: str, params: Dict[str, Any]) -> bool:
-        try:
-            _safe_write_json(path, params)
-            return True
-        except Exception:
-            return False
-
-    def _deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-        """Return new dict = a merged with b (b overrides)."""
-        out = dict(a)
-        for k, v in (b or {}).items():
-            if isinstance(v, dict) and isinstance(out.get(k), dict):
-                out[k] = _deep_merge(out[k], v)
-            else:
-                out[k] = v
-        return out
-
-    def merge_ml_params(builtins: Dict[str, Any],
-                        exp_defaults: Optional[Dict[str, Any]],
-                        method_overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        return _deep_merge(_deep_merge(builtins, exp_defaults or {}), method_overrides or {})
-
-    # ---- ML state bootstrapper -----------------------------------------------
-    def _ensure_ml_state():
-        """Guarantee _ml_state exists with the keys we expect."""
-        global _ml_state
-        try:
-            _ml_state  # noqa: F401
-        except NameError:
-            _ml_state = {}
-
-        if not isinstance(_ml_state, dict):
-            _ml_state = {}
-
-        # BUILTIN_ML must already exist here
-        if "editor" not in _ml_state:
-            _ml_state["editor"] = copy.deepcopy(BUILTIN_ML)
-        if "effective" not in _ml_state:
-            _ml_state["effective"] = copy.deepcopy(_ml_state["editor"])
-        if "source_files" not in _ml_state:
-            _ml_state["source_files"] = []  # paths you load/merge from
-
-        return _ml_state
-    #move sha256 to top
-
-    def collect_versions() -> Dict[str, str]:
-        v = {
-            "python": platform.python_version(),
-            "platform": f"{platform.system()} {platform.release()}",
-        }
-        try:
-            import sklearn
-            v["sklearn"] = sklearn.__version__
-        except Exception:
-            pass
-        # add your own GUI/app version constant if you keep one
-        try:
-            from importlib.metadata import version as _v
-            v["joblib"] = _v("joblib")
-            v["numpy"] = _v("numpy")
-            v["pandas"] = _v("pandas")
-        except Exception:
-            pass
-        # If you track GUI version somewhere:
-        try:
-            v["gms_gui"] = version  # define elsewhere if available
-        except Exception:
-            pass
-        return v
-
-    def snapshot_training_run(artifact_dir: str,
-                            effective_params: Dict[str, Any],
-                            column_order: list[str],
-                            classes: list[str],
-                            inputs: Dict[str, Any],
-                            hashes: Dict[str, Optional[str]],
-                            versions: Dict[str, str]) -> str:
-        os.makedirs(artifact_dir, exist_ok=True)
-        payload = {
-            "training_run": {
-                "effective_params": effective_params,
-                "column_order": column_order,
-                "classes": classes,
-                "versions": versions,
-                "seeds": {"random_state": effective_params.get("split", {}).get("random_state", None)},
-                "inputs": inputs,
-                "hashes": hashes,
-                "created_at": datetime.datetime.now().astimezone().isoformat(),
-            }
-        }
-        out = os.path.join(artifact_dir, "training_run.json")
-        _safe_write_json(out, payload)
-        return out
-
-    predict_input_path = None
-    train_csv_path = None
-    linked_exp_json = None
-    # ----- ML params helpers (scoped to ML window) -----
-    import json, os
-    from tkinter import filedialog, messagebox
-    from tkinter.scrolledtext import ScrolledText
-
-    BUILTIN_ML = {
-        "model": {"type": "RandomForest", "n_estimators": 400, "max_depth": None,
-                  "min_samples_split": 2, "min_samples_leaf": 1, "random_state": 42,
-                  "class_weight": "balanced"},
-    }
-
+    # read ML parameters written to json file. Field: ml_defaults
     def _read_ml_defaults_from_exp(path):
         try:
             with open(path, "r", encoding="utf-8") as f: data = json.load(f)
             return data.get("ml_defaults")
         except Exception:
             return None
-
+    # write ML parameters to json file. Field: ml_defaults
     def _write_ml_defaults_to_exp(path, params: dict) -> bool:
         try:
             data = {}
@@ -7465,177 +6710,13 @@ def open_ml_analysis_window():
         except Exception as e:
             messagebox.showerror("Save failed", str(e)); return False
 
-    def _merge_ml(builtins: dict, exp_defaults: dict|None, editor: dict|None) -> dict:
-        out = copy.deepcopy(builtins)
-        for layer in (exp_defaults or {}, editor or {}):
-            for k,v in layer.items():
-                if isinstance(v, dict) and isinstance(out.get(k), dict):
-                    out[k].update(v)
-                else:
-                    out[k] = v
-        return out
+    # ========== 20260419 start from here
 
-    # active implementation — fixed 20260305 P2-C: duplicate removed
-    def build_ml_params_panel(parent, get_current_context, on_effective_params_ready):
-        box = ttk.LabelFrame(parent, text="ML Parameters"); box.grid_columnconfigure(0, weight=1); box.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(box, text="Editor (JSON):").grid(row=0, column=0, sticky="w")
-        ttk.Label(box, text="Effective (Builtins ← Exp ← Editor):").grid(row=0, column=1, sticky="w")
-
-        editor = ScrolledText(box, height=12, wrap="none"); editor.grid(row=1, column=0, sticky="nsew", padx=(0,6))
-        effbox = ScrolledText(box, height=12, wrap="none", state="disabled"); effbox.grid(row=1, column=1, sticky="nsew")
-
-
-
-
-        def _set_eff(d):
-            effbox.configure(state="normal"); effbox.delete("1.0","end")
-            effbox.insert("1.0", json.dumps(d or {}, indent=2, ensure_ascii=False))
-            effbox.configure(state="disabled")
-
-        def _get_edit():
-            try:
-                txt = editor.get("1.0","end").strip() or "{}"
-                return json.loads(txt)
-            except Exception as e:
-                messagebox.showerror("Invalid JSON", f"Editor JSON parse error:\n{e}")
-                return None
-
-        def _refresh():
-            ctx = get_current_context() or {}
-            exp_path = ctx.get("exp_json_path")
-            exp_defs = _read_ml_defaults_from_exp(exp_path) if exp_path else None
-            ed = _get_edit() or {}
-            eff = _merge_ml(BUILTIN_ML, exp_defs, ed)
-            _set_eff(eff)
-
-        # initial load (use exp defaults if available, else builtins)
-        ctx0 = get_current_context() or {}
-        init_defs = _read_ml_defaults_from_exp(ctx0.get("exp_json_path")) if ctx0.get("exp_json_path") else None
-        editor.insert("1.0", json.dumps(init_defs or BUILTIN_ML, indent=2, ensure_ascii=False))
-        _refresh()
-
-        # buttons
-        row = 2
-        btns = ttk.Frame(box); btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6,0))
-        for i in range(5): btns.grid_columnconfigure(i, weight=1)
-
-        def _pull_from_exp():
-            ctx = get_current_context() or {}
-            exp_path = ctx.get("exp_json_path")
-            if not exp_path:
-                messagebox.showwarning("No experiment", "No .exp.json linked."); return
-            defs = _read_ml_defaults_from_exp(exp_path)
-            if defs is None:
-                messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
-                return
-            editor.delete("1.0","end"); editor.insert("1.0", json.dumps(defs, indent=2, ensure_ascii=False))
-            _refresh()
-
-        def _apply_to_exp():
-            ctx = get_current_context() or {}
-            exp_path = ctx.get("exp_json_path")
-            if not exp_path:
-                messagebox.showwarning("No experiment", "No .exp.json linked."); return
-            d = _get_edit()
-            if d is None: return
-            if _write_ml_defaults_to_exp(exp_path, d):
-                messagebox.showinfo("Saved", f"Updated ml_defaults in:\n{exp_path}")
-            _refresh()
-
-        def _load_preset():
-            path = filedialog.askopenfilename(title="Load params JSON", filetypes=[("JSON","*.json"), ("All files","*.*")])
-            if not path: return
-            try:
-                with open(path, "r", encoding="utf-8") as f: d = json.load(f)
-            except Exception as e:
-                messagebox.showerror("Load failed", str(e)); return
-            # accept whole-file payloads (exp files) or plain params
-            d2 = d.get("ml_defaults", d)
-            editor.delete("1.0","end"); editor.insert("1.0", json.dumps(d2, indent=2, ensure_ascii=False))
-            _refresh()
-
-        def _save_preset_as():
-            path = filedialog.asksaveasfilename(title="Save params JSON", defaultextension=".json",
-                                                filetypes=[("JSON","*.json"), ("All files","*.*")])
-            if not path: return
-            d = _get_edit()
-            if d is None: return
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(d, f, indent=2, ensure_ascii=False); f.write("\n")
-                messagebox.showinfo("Saved", f"Saved preset to:\n{path}")
-            except Exception as e:
-                messagebox.showerror("Save failed", str(e))
-
-        def _validate_use():
-            ctx = get_current_context() or {}
-            exp_path = ctx.get("exp_json_path")
-            exp_defs = _read_ml_defaults_from_exp(exp_path) if exp_path else None
-            d = _get_edit()
-            if d is None: return
-            eff = _merge_ml(BUILTIN_ML, exp_defs, d)
-            on_effective_params_ready(eff)
-            _set_eff(eff)
-            messagebox.showinfo("Ready", "Effective ML parameters are validated and ready to use for training.")
-
-        ttk.Button(btns, text="Load preset…", command=_load_preset).grid(row=0, column=0, sticky="ew", padx=2)
-        ttk.Button(btns, text="Save preset as…", command=_save_preset_as).grid(row=0, column=1, sticky="ew", padx=2)
-        ttk.Button(btns, text="Pull from experiment", command=_pull_from_exp).grid(row=0, column=2, sticky="ew", padx=2)
-        ttk.Button(btns, text="Apply to experiment", command=_apply_to_exp).grid(row=0, column=3, sticky="ew", padx=2)
-        ttk.Button(btns, text="Validate & Use", command=_validate_use).grid(row=0, column=4, sticky="ew", padx=2)
-
-        # live preview on edit
-        editor.bind("<<Modified>>", lambda e: (editor.edit_modified(False), _refresh()))
-        return box
-    #
-
-    # ---------- END NEW helper ----------
-
-    # state
-    model_file_path = None
-    predict_input_path = None
-    train_csv_path = None
-    linked_exp_json = None
-
-    # ---------- NEW: GUI vars for balancing/stratify ----------
-    n_estimators_var = tk.IntVar(value=400)     # default trees
-    class_weight_var = tk.BooleanVar(value=True)  # use "balanced"  
-    test_split_var   = tk.DoubleVar(value=0.20)   # test %
-    val_split_var    = tk.DoubleVar(value=0.10)   # val %
-    min_samples_var  = tk.IntVar(value=5)         # tiny class threshold
-    use_balance_var  = tk.BooleanVar(value=True)  # enable balancing pipeline
-    majority_label_var = tk.StringVar(value="Non-glycan")
-    majority_factor_var = tk.IntVar(value=3)      # cap = factor * max(minor)
-    use_stratify_var = tk.BooleanVar(value=True)
-    # Cap only the training fold (leave Val/Test uncapped)
-    real_world_test_var = tk.BooleanVar(value=False)
-    # Confidence thresholding (post-prediction) 20250902, final addition
-    enable_thresh_var = tk.BooleanVar(value=True)   # default ON
-    thresh_val_var    = tk.DoubleVar(value=0.65)    # τ in [0,1]
-    margin_val_var = tk.DoubleVar(value=0.05)  # δ for majority-support check
-    #read current values
-    def _on_change(*_):
-        _write_train_ui_into_state(
-            test_split_var.get(),
-            val_split_var.get(),
-            min_samples_var.get(),
-            use_balance_var.get(),
-            majority_label_var.get(),
-            majority_factor_var.get(),
-            use_stratify_var.get(),
-            n_estimators_var.get(),
-            class_weight_var.get(),
-            real_world_test_var.get(),
-            enable_thresh_var.get(),
-            thresh_val_var.get(),
-            margin_val_var.get(),
-        )
-    for v in (test_split_var, val_split_var, min_samples_var, use_balance_var,
-          majority_label_var, majority_factor_var, use_stratify_var,
-          n_estimators_var, class_weight_var, real_world_test_var,
-          enable_thresh_var, thresh_val_var, margin_val_var):
-        v.trace_add("write", _on_change)
+    # 20260418 code review: reliable helper debug printer to track real values for training
+    def _debug_print_train_params():                 
+        print(f"[ML-PARAMS] n_estimators={n_estimators_var.get()}, test={test_split_var.get()}, val={val_split_var.get()},", end = "")                                    
+        print(f"min_samples={min_samples_var.get()},balance={use_balance_var.get()}, majority={majority_label_var.get()}x{majority_factor_var.get()},",end ="")
+        print(f"stratify={use_stratify_var.get()}, real_world={real_world_test_var.get()}, class_weight={class_weight_var.get()}, thresh_on={enable_thresh_var.get()},tau={thresh_val_var.get()}, margin={margin_val_var.get()}")
 
     # ---------------------------------------------------------
 
@@ -7672,58 +6753,14 @@ def open_ml_analysis_window():
         origin_info.insert("end", f"Path: {path}")
         origin_info.configure(state="disabled")
 
-    #move back to avoid ref before assignment
-    # ===== Modal: ML Parameters Editor (Step 4) =====
-    def _update_ml_summary():
-        try:
-            m = effective_ml_params.get("model", {})
-            ml_summary_var.set(
-                f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
-                f'max_depth={m.get("max_depth", None)}, '
-                f'min_split={m.get("min_samples_split", 2)}, '
-                f'min_leaf={m.get("min_samples_leaf", 1)}, '
-                f'class_weight={m.get("class_weight", "balanced")}'
-            )
-        except Exception:
-            ml_summary_var.set("Params: (using built-ins)")
-
-    # ---- ML state (analysis window scope) ----
-    BUILTIN_ML = {
-        "model": {"type": "RandomForest", "n_estimators": 400, "max_depth": None,
-                "min_samples_split": 2, "min_samples_leaf": 1, "random_state": 42,
-                "class_weight": "balanced"},
-        "train": {"test_size": 0.25, "val_size": 0.10, "stratify": True,
-                "real_world_test": False,
-                "threshold": {"enabled": False, "tau": 0.5, "margin": 0.02}}
-    }
-
-    effective_ml_params = {}  # what Train uses
-    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
-
-    def _widget_alive(w):
+    # same but local scope of this exists in MetadataEditorWindow, in future we can promote it to top as generic utility (tk window checker)
+    def widget_alive(w):
         try:
             return (w is not None) and int(w.winfo_exists()) == 1
         except Exception:
             return False
 
-    def _get_editor_preview_widgets():
-        ed = _ml_state.get("editor_txt")
-        pv = _ml_state.get("preview_txt")
-        if not _widget_alive(ed):
-            ed = None
-        if not _widget_alive(pv):
-            pv = None
-        return ed, pv
-
-    def _update_ml_summary():
-        m = (effective_ml_params or {}).get("model", {})
-        ml_summary_var.set(
-            f'Params: RF n_estimators={m.get("n_estimators", 400)}, '
-            f'max_depth={m.get("max_depth", None)}, '
-            f'min_split={m.get("min_samples_split", 2)}, '
-            f'min_leaf={m.get("min_samples_leaf", 1)}, '
-            f'class_weight={m.get("class_weight", "balanced")}'
-        )
+     # ---- ML state (analysis window scope) ----
     def _read_ml_from_json(path):
         if not path or not os.path.exists(path):
             return None
@@ -7735,63 +6772,16 @@ def open_ml_analysis_window():
         except Exception:
             return None
 
-    def _merge_ml(*layers):
-        out = {}
-        for layer in layers:
-            if not layer: continue
-            for k, v in layer.items():
-                if isinstance(v, dict) and isinstance(out.get(k), dict):
-                    out[k] = {**out[k], **v}
-                else:
-                    out[k] = v
-        return out  
     # inside open_ml_analysis_window(), before you define open_ml_params_window()
     def _get_ml_context():
         # If you later want to thread in better defaults from Prepare Dataset,
         # fill these two fields there and keep this signature.
         return {"method_json": None, "exp_json": None}
-
-    # --- Shared state for ML (lives inside ML window scope) ---
-    effective_ml_params = {}                     # final dict trainer will consume
-    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
-
-    # train/test + RF tk variables (shared between settings dialog and the rest)
-    test_split_var       = tk.DoubleVar(value=0.25)
-    val_split_var        = tk.DoubleVar(value=0.10)
-    min_samples_var      = tk.IntVar(value=5)
-    use_balance_var      = tk.BooleanVar(value=True)
-    majority_label_var   = tk.StringVar(value="Non-glycan")
-    majority_factor_var  = tk.IntVar(value=3)
-    use_stratify_var     = tk.BooleanVar(value=True)
-    real_world_test_var  = tk.BooleanVar(value=False)
-    class_weight_var     = tk.BooleanVar(value=True)  # => "balanced" if True else None
-    n_estimators_var     = tk.IntVar(value=400)
-
-    # thresholding
-    enable_thresh_var    = tk.BooleanVar(value=False)
-    thresh_val_var       = tk.DoubleVar(value=0.65)
-    margin_val_var       = tk.DoubleVar(value=0.05)
+    
 
     # default model + train (used when nothing else provided)
-    BUILTIN_ML = {
-        "model": {
-            "type": "RandomForest",
-            "n_estimators": 400,
-            "max_depth": None,
-            "min_samples_split": 2,
-            "min_samples_leaf": 1,
-            "random_state": 42,
-            "class_weight": "balanced",
-        },
-        "train": {
-            "test_size": 0.25,
-            "val_size": 0.10,
-            "stratify": True,
-            "real_world_test": False,
-            "threshold": {"enabled": False, "tau": 0.50, "margin": 0.02},
-        },
-    }
-
+    # Removed BUILTIN_ML(4)
+    
     def snapshot_train_vars() -> dict:
         """Live values from the Train/Test dialog & quick RF options."""
         return {
@@ -7822,80 +6812,52 @@ def open_ml_analysis_window():
                 },
             },
         }
-
-    def _merge_ml(*layers):
-        out = {}
-        for layer in layers:
-            if not layer: 
-                continue
-            for k, v in layer.items():
-                if isinstance(v, dict) and isinstance(out.get(k), dict):
-                    out[k] = {**out[k], **v}
-                else:
-                    out[k] = v
-        return out
-
-    def _update_ml_summary():
-        m = (effective_ml_params or BUILTIN_ML).get("model", {})
-        ml_summary_var.set(
-            f'Params: RF n_estimators={m.get("n_estimators")}, '
-            f'class_weight={m.get("class_weight")}, '
-            f'test={ (effective_ml_params or BUILTIN_ML).get("train",{}).get("test_size") }, '
-            f'val={ (effective_ml_params or BUILTIN_ML).get("train",{}).get("val_size") }'
-        )
-
+    # Show live updates on Train tab Step 4
+    def _update_ml_summary(): #effective_ml_params or BUILTIN_ML -> effective_ml_params or snapshot_train_vars()
+        try:
+            src = effective_ml_params or snapshot_train_vars()
+            m = src.get("model", {})
+            t = src.get("train", {})
+            b = t.get("balance", {})
+            ml_summary_var.set(
+            f'Params: RF Trees: {m.get("n_estimators")}, '
+            f'Split test={t.get("test_size")}, val={t.get("val_size")}'
+            f'min_class_size={src.get("min_samples_per_class", 5)}, '
+            f'real_world={t.get("real_world_test")}, '
+            f'balance={b.get("enabled")}' 
+            )
+        except Exception:
+            ml_summary_var.set("Params: (using built-ins)") 
 
     def open_ml_params_window():
         win = tk.Toplevel(root)
         win.title("ML Parameters")
-        win.geometry("820x520")
+        win.geometry("1200x600")
         win.transient(root)
         win.grab_set()
 
         # --- left editor ---
         left = ttk.LabelFrame(win, text="Editor (JSON)")
         left.pack(side="left", fill="both", expand=True, padx=(10,5), pady=10)
-        editor_txt = tk.Text(left, wrap="none")
+        editor_txt = tk.Text(left, wrap="none", height=20, width=45)
         editor_txt.pack(fill="both", expand=True, padx=8, pady=8)
 
-        seed = _ensure_ml_state().get("editor") or BUILTIN_ML
+        seed = _ensure_ml_state().get("editor") or snapshot_train_vars() # Replace BUILTIN_ML to snapshot_train_vars()
         editor_txt.insert("1.0", json.dumps(seed, indent=2))
-
-        # seed the editor with current effective OR builtins
-        #seed = effective_ml_params if effective_ml_params else BUILTIN_ML
-        #editor_txt.insert("1.0", json.dumps(seed, indent=2))
 
         # --- right preview (effective after merge) ---
         right = ttk.LabelFrame(win, text="Effective (Builtins ← Files ← Editor)")
         right.pack(side="left", fill="both", expand=True, padx=(5,10), pady=10)
-        preview_txt = tk.Text(right, wrap="none", state="disabled")
+        preview_txt = tk.Text(right, wrap="none", height=20, width=45, state="disabled")
         preview_txt.pack(fill="both", expand=True, padx=8, pady=8)
         debug_var = tk.StringVar(value="")
         ttk.Label(right, textvariable=debug_var).pack(anchor="w", padx=8, pady=(0,6))
-
-        #_ml_state["widgets"]["editor_txt"] = editor_txt   # left textbox
-        #_ml_state["widgets"]["preview_txt"] = preview_txt # right textbox
-        #_refresh_json_textboxes()
-
-        # after building the two Text widgets:
-        #_ml_state["editor_txt"] = editor_txt    # <--- your left text widget
-        #_ml_state["preview_txt"] = preview_txt  # <--- your right text widget
 
         st = _ensure_ml_state()
         st["editor_txt"] = editor_txt
         st["preview_txt"] = preview_txt
         _emit_ml_state_changed_ui_refresh()
 
-        def _on_params_close():
-            # Drop dead widget refs so future updates become no-ops
-            _ml_state["editor_txt"]  = None
-            _ml_state["preview_txt"] = None
-            win.destroy()
-
-        win.protocol("WM_DELETE_WINDOW", _on_params_close)
-
-        #_write_editor_from_state()
-        # seed these panes from the current state when the window opens
 
         # --- local helpers that use the widgets above ---
         def _get_editor_json_or_empty():
@@ -7903,7 +6865,7 @@ def open_ml_analysis_window():
                 return json.loads(editor_txt.get("1.0", "end").strip() or "{}")
             except Exception:
                 return {}
-
+            
         def _read_ml_from_json(path):
             if not path or not os.path.exists(path): 
                 return None
@@ -7916,7 +6878,7 @@ def open_ml_analysis_window():
 
         def _get_ml_context():
             # If you already wrote a context getter elsewhere, you can call it here.
-            return {"exp_json": None, "method_json": None}
+            return {"exp_json": linked_exp_json, "method_json": None}
 
         def _refresh_effective():
             # ← the key: include snapshot_train_vars() in the merge
@@ -7924,7 +6886,8 @@ def open_ml_analysis_window():
             exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
             meth_defs = _read_ml_from_json(ctx.get("method_json"))
             editor    = _get_editor_json_or_empty()
-            eff = _merge_ml(BUILTIN_ML,exp_defs,meth_defs,editor,snapshot_train_vars())               # editor first…snapshot_train_vars() # …then UI snapshot overrides
+            eff = _merge_ml(snapshot_train_vars(),exp_defs,meth_defs,editor)  #removed BUILTIN_ML
+            # editor first…snapshot_train_vars() # …then UI snapshot overrides
             #eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, snapshot_train_vars(), editor)
             #test, remove if works
             try:
@@ -7945,6 +6908,73 @@ def open_ml_analysis_window():
             except Exception:
                 pass
 
+        ## adapted from build_ml_params_panel
+        def _get_edit():
+            try:
+                txt = editor_txt.get("1.0","end").strip() or "{}"
+                return json.loads(txt)
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", f"Editor JSON parse error:\n{e}")
+                return None
+            
+        # copied from build_ml_params_panel
+        def _pull_from_exp():
+            ctx = _get_ml_context()
+            exp_path = ctx.get("exp_json")
+            if not exp_path:
+                messagebox.showwarning("No .exp.json found. Select a training CSV that has an .exp.json in the same folder, or use 'Load preset' instead."); return
+            defs = _read_ml_defaults_from_exp(exp_path)
+            if defs is None:
+                messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
+                return
+            editor_txt.delete("1.0","end"); editor_txt.insert("1.0", json.dumps(defs, indent=2, ensure_ascii=False))
+            _refresh_effective()
+
+        def _apply_to_exp():
+            ctx = _get_ml_context()
+            exp_path = ctx.get("exp_json")
+            if not exp_path:
+                messagebox.showwarning("No .exp.json found. Select a training CSV that has an .exp.json in the same folder, or use 'Load preset' instead."); return
+            d = editor_txt.get("1.0","end").strip() or "{}"
+            if d is None: return
+            if _write_ml_defaults_to_exp(exp_path, d):
+                messagebox.showinfo("Saved", f"Updated ml_defaults in:\n{exp_path}")
+            _refresh_effective()
+
+        def _load_preset():
+            path = filedialog.askopenfilename(title="Load params JSON", filetypes=[("JSON","*.json"), ("All files","*.*")])
+            if not path: return
+            try:
+                with open(path, "r", encoding="utf-8") as f: d = json.load(f)
+            except Exception as e:
+                messagebox.showerror("Load failed", str(e)); return
+            # accept whole-file payloads (exp files) or plain params
+            d2 = d.get("ml_defaults", d)
+            editor_txt.delete("1.0","end"); editor_txt.insert("1.0", json.dumps(d2, indent=2, ensure_ascii=False))
+            _refresh_effective()
+
+        def _save_preset_as():
+            path = filedialog.asksaveasfilename(title="Save params JSON", defaultextension=".json",
+                                                filetypes=[("JSON","*.json"), ("All files","*.*")])
+            if not path: return
+            d = _get_edit()
+            if d is None: return
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(d, f, indent=2, ensure_ascii=False); f.write("\n")
+                messagebox.showinfo("Saved", f"Saved preset to:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e))
+
+        def _link_exp_json():                                     
+            nonlocal linked_exp_json                                                         
+            path = filedialog.askopenfilename(title="Select experiment JSON",
+        filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")])                   
+            if path:
+                linked_exp_json = path                                                       
+                messagebox.showinfo("Linked", f"Experiment linked:\n{os.path.basename(path)}") 
+        # absorbed block ends, below are native buttons/function in open_ml_params_window
+        # ===================        
         def _load_from_method():
             # prefer current method from context; otherwise ask
             path = _get_ml_context().get("method_json") or filedialog.askopenfilename(
@@ -7959,19 +6989,27 @@ def open_ml_analysis_window():
             editor_txt.insert("1.0", json.dumps(defs, indent=2))
             _refresh_effective()
 
+        # 20260419 Code review refactored
         def _validate_and_use():
             nonlocal effective_ml_params
+            try:
+                ed = json.loads(editor_txt.get("1.0", "end"))
+            except Exception as e:
+                messagebox.showerror("Invalid JSON", str(e))
+                return
             ctx = _get_ml_context()
             exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
             meth_defs = _read_ml_from_json(ctx.get("method_json"))
-            editor    = _get_editor_json_or_empty()
-            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, snapshot_train_vars(), editor)
+            eff = _merge_ml(snapshot_train_vars(), exp_defs, meth_defs, ed) #_merge_ml(BUILTIN_ML, exp_defs, meth_defs, snapshot_train_vars(), editor)
             effective_ml_params = eff
-            _ensure_ml_state()["editor"] = editor        # persist what’s in the left pane
+            _ensure_ml_state()["editor"] = ed        # persist what’s in the left pane
             _ensure_ml_state()["effective_params"] = eff # optional: keep a copy
             _update_ml_summary()
-            win.destroy()
+            _refresh_effective()
+            messagebox.showinfo("Ready", "Effective ML parameters set for training.")
+            #win.destroy() # if users prefer auto-close, just uncomment this line
 
+        # 20260419 Code review refactored
         def _save_effective_to_method():
             # pick current method or let user create one
             path = _get_ml_context().get("method_json") or filedialog.asksaveasfilename(
@@ -7979,31 +7017,23 @@ def open_ml_analysis_window():
                 filetypes=[("JSON","*.json")]
             )
             if not path: return
-
             # ensure effective is up-to-date with what’s in the editor
-            try:
-                ed = json.loads(editor_txt.get("1.0", "end"))
-            except Exception:
-                ed = {}
+            editor = _get_editor_json_or_empty()
             ctx = _get_ml_context()
             exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
             meth_defs = _read_ml_from_json(ctx.get("method_json"))
-            editor = _get_editor_json_or_empty()
-            eff = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, editor, snapshot_train_vars())
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-
+            eff = _merge_ml(snapshot_train_vars(), exp_defs, meth_defs, editor)
             # write back to method JSON
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             data = {}
             if os.path.exists(path):
                 try:
                     with open(path, "r", encoding="utf-8") as f:
-                        txt = f.read().strip()
-                        data = json.loads(txt) if txt else {}
+                        data = json.loads(f.read().strip() or "{}")
                 except Exception:
                     data = {}
             data.setdefault("ml", {})
-            data["ml"]["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-            #data["ml"]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            data["ml"]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             data["ml"]["parameters"] = eff
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -8027,109 +7057,40 @@ def open_ml_analysis_window():
         def _on_key(_evt=None): _refresh_effective()
         editor_txt.bind("<KeyRelease>", _on_key)
         # --- footer buttons ---
-        btns = ttk.Frame(win)
-        btns.pack(fill="x", padx=10, pady=(0,10))
+        btns_top = ttk.Frame(win)
+        btns_top.pack(fill="x", padx=10, pady=(0,2))     
+        btns_mid = ttk.Frame(win)
+        btns_mid.pack(fill="x", padx=10, pady=(0,6))                                     
+        btns_bot = ttk.Frame(win)
+        btns_bot.pack(fill="x", padx=10, pady=(0,10))                                        
+                                                                                            
+        # top row: core actions                                                              
+        ttk.Button(btns_mid, text="Validate & Use",                                          
+        command=_validate_and_use).pack(side="left", padx=4)                                 
+        ttk.Button(btns_top, text="Load from method…",            
+        command=_load_from_method).pack(side="left", padx=4)                                 
+        ttk.Button(btns_top, text="Save to method…",
+        command=_save_effective_to_method).pack(side="left", padx=4)                         
+        ttk.Button(btns_top, text="Close", command=_on_params_close).pack(side="right",
+        padx=4)                                                                              
+                                                                    
+        # bottom row: presets + experiment                                                   
+        ttk.Button(btns_mid, text="Load preset…", command=_load_preset).pack(side="left",
+        padx=4)                                                                              
+        ttk.Button(btns_mid, text="Save preset as…",              
+        command=_save_preset_as).pack(side="left", padx=4)                                   
+        ttk.Button(btns_bot, text="Pull from experiment",
+        command=_pull_from_exp).pack(side="left", padx=4)                                    
+        ttk.Button(btns_bot, text="Apply to experiment",          
+        command=_apply_to_exp).pack(side="left", padx=4) 
+        ttk.Button(btns_bot, text="Link exp manually",          
+        command=_link_exp_json).pack(side="left", padx=4) 
 
-        
-        ttk.Button(btns, text="Load from method…",
-                command=_load_from_method).pack(side="left", padx=4)
-
-        ttk.Button(btns, text="Validate & Use",
-                command=_validate_and_use).pack(side="left", padx=4)
-
-        ttk.Button(btns, text="Save to method…",
-                command=_save_effective_to_method).pack(side="left", padx=12)
-
-        ttk.Button(btns, text="Close",
-                command=_on_params_close).pack(side="right", padx=4)
         # live preview while typing in the left editor
         editor_txt.bind("<KeyRelease>", lambda _=None: _refresh_effective())
-
         # seed the right pane immediately on window open
         _refresh_effective()
-
-        def _ensure_effective_from_editor_if_empty():
-            """If user forgot Validate, synthesize effective from current editor + jsons."""
-            nonlocal effective_ml_params
-            if effective_ml_params:
-                return
-            ctx = _get_ml_context()  # you already have this getter
-            exp_defs   = _read_ml_from_json(ctx.get("exp_json"))
-            meth_defs  = _read_ml_from_json(ctx.get("method_json"))
-            editor_now = _get_editor_json_or_empty()  # defined inside the ML modal; fallback to {}
-            effective_ml_params = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, editor_now)
-            _update_ml_summary()    
-
-        # --- editor widgets you already have ---
-        # editor_txt = tk.Text(...); preview_txt = tk.Text(...)
-
-        def _get_editor_json_or_empty():
-            try:
-                return json.loads(editor_txt.get("1.0", "end").strip() or "{}")
-            except Exception:
-                return {}
-
-        def _refresh_effective_preview():
-            _refresh_effective()  # keep one code path
-
-        def _load_from_method():
-            # prefer currently-linked method; else let user pick
-            p = _get_ml_context().get("method_json") or filedialog.askopenfilename(
-                title="Choose method JSON", filetypes=[("JSON","*.json")])
-            if not p:
-                return
-            defs = _read_ml_from_json(p)
-            if not defs:
-                messagebox.showwarning("ML Parameters", "No ML block found in that JSON.")
-                return
-            editor_txt.delete("1.0", "end")
-            editor_txt.insert("1.0", json.dumps(defs, indent=2))
-            _refresh_effective_preview()
-
-        def _validate_and_use():
-            nonlocal effective_ml_params
-            try:
-                ed = json.loads(editor_txt.get("1.0", "end"))
-            except Exception as e:
-                messagebox.showerror("Invalid JSON", str(e))
-                return
-            ctx = _get_ml_context()
-            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
-            meth_defs = _read_ml_from_json(ctx.get("method_json"))
-            effective_ml_params = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, ed)
-            _update_ml_summary()
-            _refresh_effective_preview()
-            messagebox.showinfo("Ready", "Effective ML parameters set for training.")
-
-        def _save_effective_to_method():
-            ctx = _get_ml_context()
-            path = ctx.get("method_json")
-            if not path:
-                path = filedialog.asksaveasfilename(
-                    title="Save or choose method JSON",
-                    defaultextension=".json",
-                    filetypes=[("JSON","*.json")])
-            if not path:
-                return
-            # ensure we have something to save
-            _ensure_effective_from_editor_if_empty()
-            data = {}
-            if os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        txt = f.read().strip()
-                        data = json.loads(txt) if txt else {}
-                except Exception:
-                    data = {}
-            data.setdefault("ml", {})
-            data["ml"]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            data["ml"]["parameters"] = effective_ml_params
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            messagebox.showinfo("Saved", f"ML parameters written to:\n{os.path.basename(path)}")
-
-        # ===== Step 4 (existing controls) =====
-
+    # =======================
 
     # ---------- UPDATED: parameters window ----------
     def open_train_settings():
@@ -8154,71 +7115,37 @@ def open_ml_analysis_window():
         split_pct_lbl = tk.Label(settings, text="", font=("TkDefaultFont", 9, "bold"))
         split_pct_lbl.pack(pady=(2,6))
 
-        def _commit_and_close():
-            # Generate a fresh effective preview by merging BUILTIN + live train vars
-            # (Editor JSON / files will still be merged inside the ML-params window)
-            nonlocal effective_ml_params
-            eff_local = _merge_ml(BUILTIN_ML, snapshot_train_vars())
-            # Don’t overwrite global effective here; we only show a summary hint.
-            # The real commit is done by ML Parameters → "Validate & Use".
-            _update_ml_summary()
-            settings.destroy()
-
-        def _pull_state_into_vars():
-            s = _ml_state["current"]
-            t = s.get("train", {})
-            b = s.get("balance", {})
-            m = s.get("model", {})
-
-            # sliders/spinboxes/checks/entries you already have:
-            test_split_var.set(float(t.get("test_size", 0.20)))
-            val_split_var.set(float(t.get("val_size", 0.0)))
-            use_stratify_var.set(1 if t.get("stratify", True) else 0)
-            real_world_test_var.set(1 if t.get("real_world_test", False) else 0)
-
-            thr = t.get("threshold", {})
-            enable_thresh_var.set(1 if thr.get("enabled", False) else 0)
-            thresh_val_var.set(float(thr.get("tau", 0.65)))
-            margin_val_var.set(float(thr.get("margin", 0.05)))
-
-            min_samples_var.set(int(s.get("min_samples_per_class", 5)))
-
-            use_balance_var.set(1 if b.get("enabled", True) else 0)
-            majority_label_var.set(b.get("majority_label", "Non-glycan"))
-            majority_factor_var.set(int(b.get("majority_factor", 3)))
-
-            n_estimators_var.set(int(m.get("n_estimators", 400)))
-            class_weight_var.set(1 if (m.get("class_weight") == "balanced") else 0)
 
         def _push_vars_into_state(*_):
-            _write_train_ui_into_state(
-                test_size       = float(test_split_var.get()),
-                val_size        = float(val_split_var.get()),
-                min_per_class   = int(min_samples_var.get()),
-                use_balance     = bool(use_balance_var.get()),
-                majority_label  = str(majority_label_var.get()),
-                majority_factor = int(majority_factor_var.get()),
-                stratify        = bool(use_stratify_var.get()),
-                n_estimators    = int(n_estimators_var.get()),
-                use_class_weight= bool(class_weight_var.get()),
-                real_world_test = bool(real_world_test_var.get()),
-                thr_enable      = bool(enable_thresh_var.get()),
-                thr_tau         = float(thresh_val_var.get()),
-                thr_margin      = float(margin_val_var.get()),
-            )
-            _emit_ml_state_changed_ui_refresh()  # safe no-op if editor window isn’t open
+            # 20260418 _write_train_ui_into_state is removed
+            if _settings_initializing:                                                       
+                return  
+            _emit_ml_state_changed_ui_refresh()  # now it updates directly from tk values
+            _debug_print_train_params()
 
-        # 1) seed the controls when the dialog opens
-        _pull_state_into_vars()
+        def _on_settings_close():                                 
+            for var, tid in trace_ids:                                                       
+                try:                                              
+                    var.trace_remove("write", tid)
+                except Exception:                                                            
+                    pass
+            print(f"[DEBUG][WindowClose]", end="")
+            _debug_print_train_params()
+            settings.destroy()     
 
         # 2) wire all variables for live updates
+        trace_ids = []
         for var in (
             test_split_var, val_split_var, use_stratify_var, real_world_test_var,
             enable_thresh_var, thresh_val_var, margin_val_var,
             min_samples_var, use_balance_var, majority_label_var, majority_factor_var,
             n_estimators_var, class_weight_var,
         ):
-            var.trace_add("write", _push_vars_into_state)
+            tid = var.trace_add("write", _push_vars_into_state)                              
+            trace_ids.append((var, tid))
+
+        # Call _on_settings_close when window closes
+        settings.protocol("WM_DELETE_WINDOW", _on_settings_close) 
 
         # 3) also bind Scales so dragging updates continuously
         def _scale_cb(_val):
@@ -8231,6 +7158,11 @@ def open_ml_analysis_window():
                 pass
 
         def _update_split_labels(*_):
+            try:
+                if not split_pct_lbl.winfo_exists():
+                    return
+            except Exception:
+                return
             ts = float(test_split_var.get())
             vs = float(val_split_var.get())
             tr = 1.0 - (ts + vs)
@@ -8250,23 +7182,20 @@ def open_ml_analysis_window():
         val_split_var.trace_add("write", _update_split_labels)
         _update_split_labels()
         # ---------------------------------------------------------------
-
-        # tiny class
+        _settings_initializing = True #prevent debug print fires during button loading
+        # Min class size (drop below this value)
         tk.Label(settings, text="Minimum samples per class").pack(pady=(12,0))
         tk.Spinbox(settings, from_=1, to=50, textvariable=min_samples_var, width=6).pack()
-
         # balancing block
-        tk.Checkbutton(settings, text="Enable class balancing (cap majority)", variable=use_balance_var).pack(pady=(12,0))
+        ttk.Checkbutton(settings, text="Enable class balancing (cap majority)", variable=use_balance_var).pack(pady=(12,0)) #to ttk
         row = tk.Frame(settings); row.pack(pady=2)
         tk.Label(row, text="Majority label:").pack(side="left")
         tk.Entry(row, textvariable=majority_label_var, width=16).pack(side="left", padx=6)
         row2 = tk.Frame(settings); row2.pack(pady=2)
         tk.Label(row2, text="Majority factor (×max minor):").pack(side="left")
         tk.Spinbox(row2, from_=1, to=20, textvariable=majority_factor_var, width=6).pack(side="left", padx=6)
-
         # stratify
-        tk.Checkbutton(settings, text="Stratify by label", variable=use_stratify_var).pack(pady=(12,0))
-
+        ttk.Checkbutton(settings, text="Stratify by label", variable=use_stratify_var).pack(pady=(12,0)) #tk to ttk
         # --- Random Forest options ---
         sep = ttk.Separator(settings, orient="horizontal"); sep.pack(fill="x", padx=10, pady=(12,6))
         tk.Label(settings, text="Random Forest Options").pack()
@@ -8275,20 +7204,17 @@ def open_ml_analysis_window():
         tk.Label(row_rf, text="n_estimators (trees):").pack(side="left")
         tk.Spinbox(row_rf, from_=50, to=2000, increment=50, textvariable=n_estimators_var, width=7).pack(side="left", padx=6)
 
-        tk.Checkbutton(settings, text='Use class_weight = "balanced"', variable=class_weight_var).pack(pady=2)
-        tk.Checkbutton(settings, text="Real-world test (cap training only)",
-               variable=real_world_test_var).pack(pady=(4,0))
-        
+        ttk.Checkbutton(settings, text='Use class_weight = "balanced"', variable=class_weight_var).pack(pady=2)#tk to ttk
+        ttk.Checkbutton(settings, text="Real-world test (cap training only)", variable=real_world_test_var).pack(pady=(4,0)) #tk to ttk
 
         sep3 = ttk.Separator(settings, orient="horizontal"); sep3.pack(fill="x", padx=10, pady=(12,6))
         tk.Label(settings, text="Prediction Thresholding").pack()
 
-        tk.Checkbutton(
+        ttk.Checkbutton(
             settings,
             text="Enable confidence threshold → fallback to Majority label",
-            variable=enable_thresh_var
-        ).pack(pady=(2,2))
-
+            variable=enable_thresh_var).pack(pady=(2,2))
+        
         row_thr = tk.Frame(settings); row_thr.pack(pady=2)
         tk.Label(row_thr, text="Threshold τ (0.00–0.99):").pack(side="left")
         tk.Spinbox(row_thr, from_=0.00, to=0.99, increment=0.01,
@@ -8298,59 +7224,32 @@ def open_ml_analysis_window():
         tk.Label(row_margin, text="Majority support margin δ (0.00–0.20):").pack(side="left")
         tk.Spinbox(row_margin, from_=0.00, to=0.20, increment=0.01,
                 textvariable=margin_val_var, width=6).pack(side="left", padx=6)
-
-        # ... all your Step 4 widgets ...
+        _settings_initializing = False
+        # Extra json-like editor panel button
         tk.Button(settings, text="Edit ML Parameters…",
                 command=open_ml_params_window).pack(pady=(8, 0))
-        
-        tk.Button(settings, text="Apply to ML Param[if not reflect]", command=_push_vars_into_state).pack(pady=(8,0))
-
-        # (a) define tk variables: test_split_var, val_split_var, ... margin_val_var
-        # (b) define _on_change(...) that writes the current widget values into _ml_state["editor"]
-        # (c) build all the widgets that bind to those variables
-        # ---- PASTE THE SEED BLOCK RIGHT HERE ----
-        # (d) Close button, settings.mainloop/deiconify/return
-        # ---- seed UI from current editor state ----
-        ed = _ml_state.get("editor", {})
-        tv = ed.get("train", {}) or {}
-        bv = ed.get("balance", {}) or {}
-        mv = ed.get("model", {}) or {}
-
-        test_split_var.set(tv.get("test_size", 0.20))
-        val_split_var.set(tv.get("val_size", 0.0))
-        min_samples_var.set(tv.get("min_samples_per_class", 5))
-
-        use_balance_var.set(bv.get("enabled", True))
-        majority_label_var.set(bv.get("majority_label", "Non-glycan"))
-        majority_factor_var.set(bv.get("majority_factor", 3))
-
-        use_stratify_var.set(tv.get("stratify", True))
-
-        n_estimators_var.set(mv.get("n_estimators", 400))
-        class_weight_var.set((mv.get("class_weight") or "balanced") == "balanced")
-        #real world change to True as default #20251006
-        real_world_test_var.set(tv.get("real_world_test", True))#False))
-
-        th = tv.get("threshold", {}) or {}
-        enable_thresh_var.set(th.get("enabled", False))
-        thresh_val_var.set(th.get("tau", 0.65))
-        margin_val_var.set(th.get("margin", 0.05))
+        # Force update, should be useless after code review in 20260419 (validated everything works)
+        tk.Button(settings, text="Force current params", command=_push_vars_into_state).pack(pady=(8,0))
 
         # push once so editors / preview reflect these values
         _on_change()
+        # 20260419 code review: once user click the button to open train settings, show params regardless of user edit or not. Unsealed status notification.
+        _update_ml_summary()
 
+        tk.Button(settings, text="Close", command=_on_settings_close).pack(pady=8)
+    # ---------- UPDATED: parameters window ----------
 
-        tk.Button(settings, text="Close", command=settings.destroy).pack(pady=8)
+    def train_model(): #RF
 
-
-    def train_model():
         try:
             from sklearn.ensemble import RandomForestClassifier
             from sklearn.metrics import classification_report
+            from sklearn.metrics import confusion_matrix
             from sklearn.preprocessing import LabelEncoder
             from sklearn.utils.multiclass import unique_labels
             import joblib
             import pretrain_normalizer as normalizer
+            from sklearn.metrics import precision_recall_fscore_support, accuracy_score
         except ImportError:
             messagebox.showerror("Missing Dependencies",
                                  "Please install scikit-learn and joblib.")
@@ -8358,23 +7257,27 @@ def open_ml_analysis_window():
         #20251005
         use_mass_feature = bool(include_mass_train_var.get())
 
-        if not effective_ml_params:
-            ctx = _get_ml_context()
-            exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
-            meth_defs = _read_ml_from_json(ctx.get("method_json"))
-            effective = _merge_ml(BUILTIN_ML, exp_defs, meth_defs, {})
+        # 20260419 code review: if user clicks Validate&Use, effective_ml_params gets not {}, cfg capture effective live params, otherwise call from tk values
+        if effective_ml_params:
+            cfg = effective_ml_params
+            print(f"[ML-DEBUG] cfg from: effective_ml_params,n_estimators={cfg.get('model',{}).get('n_estimators')}")                             
         else:
-            effective = effective_ml_params
-        cfg = effective_ml_params or _merge_ml(BUILTIN_ML, snapshot_train_vars())
+            cfg = snapshot_train_vars() 
+            print(f"[ML-DEBUG] cfg from: snapshot_train_vars(), n_estimators={cfg.get('model',{}).get('n_estimators')}")
         rf = cfg.get("model", {})
-        tr = cfg.get("train", {})
+        #tr = cfg.get("train", {})  # Need to think about the params from advanced panel, current split doens't catch that tho
+        # 20260418 Code review Debug prints
+        print(f"[ML-DEBUG] cfg source: {'effective_ml_params' if effective_ml_params else 'BUILTIN_ML+snapshot'}")                                                             
+        print(f"[ML-DEBUG] cfg keys: {list(cfg.keys())}")
+        print(f"[ML-DEBUG] cfg.model: {cfg.get('model', {})}")                               
+        print(f"[ML-DEBUG] cfg.train: {cfg.get('train', {})}")  
 
-        #rf = effective.get("model", {})
-        #train_cfg = effective.get("train", {})
-
+        # check if trainable csv to train is there
         if not train_csv_path:
             messagebox.showwarning("No File", "Please select a training CSV first.")
             return
+        else:
+            logger.log(f"[ML][train][info] Using {train_csv_path} to train model")
 
         label_col = label_dropdown.get().strip()
         if label_col not in ['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID']:
@@ -8385,42 +7288,48 @@ def open_ml_analysis_window():
         try:
             df = pd.read_csv(train_csv_path)
         except Exception as e:
+            logger.log(f"[ML][train][ERROR 1] Trainable csv can't be read:{e}")
             messagebox.showerror("Read Error", str(e)); return
+        # if trainable csv don't have the selected label for training
         if label_col not in df.columns:
-            messagebox.showerror("Missing Column", f"{label_col} not found."); return
+            logger.log(f"[ML][train][ERROR 1] Label column: {label_col} not in trainable csv")
+            messagebox.showerror("[ML][train][ERROR 1]Missing Column", f"{label_col} not in trainable csv"); return
 
         #20250929 ver to accept SO3(s), HexA and PO3H(p)
         # convert the composition to manual-style ONLY when needed
-        print("[MLdebug] labels before:", sorted(set(df[label_col].astype(str)))[:10], "...")
+        print("[ML][train][DEBUG] labels before:", sorted(set(df[label_col].astype(str)))[:10], "...")
 
-        # Normalize ONLY when needed (do not strip A / s / p!)
+        # Normalize ONLY when needed (do not strip A / s / p!), need to take a review in future at normalizer
         try:
             if label_col == "Structure":
                 before = sorted(set(df[label_col].astype(str)))[:10]
                 df[label_col] = df[label_col].map(
                     lambda x: normalize_structure_for_training(x, normalizer.parse_structure_to_manual)
                 )
-                after  = sorted(set(df[label_col].astype(str)))[:10]
-                print("[MLdebug] labels before:", before, "...")
-                print("[MLdebug] labels after:",  after,  "...")
-            # For GlyToucan/IUPAC, leave as-is.
+                print("[ML][train][DEBUG][\"Structure\"] labels preview before normalization:", before, "...")
+            # For GlyToucan/IUPAC, leave as-is. 20260419 code review: add string conversion so at least in can be fed into RF trainer
+            else:
+                before = df[label_col][:10]
+                df[label_col] = df[label_col].astype(str).str.strip() 
+                print("[ML][train][DEBUG] Other labels that will be turned into string for training:", before, "...")
         except Exception as e:
-            print("[dev] structure normalization warning:", e)
+            logger.log(f"[ML][train][ERROR 1] structure normalization failed {e}")
+            print("[ML][train][ERROR 1] structure normalization failed due to:", e)
             messagebox.showerror(
-                "Structure normalization failed",
-                "Can't normalize labels. See console for details."
-            )
+                "Structure normalization failed. See console/log for details.")
             return
-        print("[MLdebug] labels after:",  sorted(set(df[label_col].astype(str)))[:10], "...")
+        
+        print("[ML][train][DEBUG] labels preview after normalization:",  sorted(set(df[label_col].astype(str)))[:10], "...")
 
         # encode label AFTER any string/tuple harmonization (if needed)
-        y_raw = df[label_col].astype(str)
+        y_labels = df[label_col].astype(str) # y_raw -> y_labels
 
-        # run balancing + split
+        # run balancing + split, cfg getting bypassed if someone edits json-like with n_estimators, other values there may not been reflected (need investigation)
+        # consider adding debug print in future tracing this potential design/logic weakness
         try:
             if use_balance_var.get():
                 X_train, y_train, X_val, y_val, X_test, y_test, info = balance_and_split(
-                    df.assign(**{label_col: y_raw}),
+                    df.assign(**{label_col: y_labels}),
                     label_col=label_col,
                     majority_label=majority_label_var.get(),
                     min_count=int(min_samples_var.get()),
@@ -8434,9 +7343,9 @@ def open_ml_analysis_window():
             else:
                 # no balancing — just use helper with factor=0 & no cap
                 X_train, y_train, X_val, y_val, X_test, y_test, info = balance_and_split(
-                    df.assign(**{label_col: y_raw}),
+                    df.assign(**{label_col: y_labels}),
                     label_col=label_col,
-                    majority_label="__no_cap__",  # won't match → no cap
+                    majority_label="__no_cap__",  # won't match in balance_and_split against labels existing → no cap
                     min_count=int(min_samples_var.get()),
                     majority_factor=1,
                     test_size=float(test_split_var.get()),
@@ -8446,6 +7355,8 @@ def open_ml_analysis_window():
                     random_state=42
                 )
         except Exception as e:
+            logger.log(f"[ML][train][ERROR 2] Split/Balancing Failed: {str(e)}")
+            print(f"[ML][train][ERROR 2] Split/Balancing Failed: {str(e)}")
             messagebox.showerror("Split/Balancing Failed", str(e)); return
 
         #20251005
@@ -8453,7 +7364,7 @@ def open_ml_analysis_window():
         # use_mass_feature already read above: use_mass_feature = bool(include_mass_train_var.get())
 
         def _prep_ms1_block(X, y, use_mass):
-            #import pandas as _pd
+
             X = X.copy()
             if use_mass:
                 if "protonatedmass" in X.columns:
@@ -8484,14 +7395,16 @@ def open_ml_analysis_window():
         # LabelEncoder (consistent across splits)
         le = LabelEncoder()
         y_train_enc = le.fit_transform(y_train)
-        y_val_enc   = le.transform(y_val)
+        y_val_enc   = le.transform(y_val) # 20260419 code review: in future curated libary having enough data, consider GridSearchCV or RandomizedSearchCV for looped optimization
         y_test_enc  = le.transform(y_test)
 
 
         # model (consume panel params if available; otherwise fallback to current UI/defaults)
-        rf = effective_ml_params.get("model", {}) if effective_ml_params else {}
+        print(f"[ML][Train][finalcall] RF params: n_estimators={rf.get('n_estimators')},max_depth={rf.get('max_depth')}, class_weight={rf.get('class_weight')}")
+        if not rf.get('n_estimators'):
+            print("[ML][Train][WARN] n_estimators is empty/None — using hardcoded fallback (is cfg broken?)")
         model = RandomForestClassifier(
-            n_estimators      = int(rf.get("n_estimators", 400)),
+            n_estimators      = int(rf.get("n_estimators", 666)),  # for debug, change 400 to 666
             max_depth         = rf.get("max_depth", None),
             min_samples_split = int(rf.get("min_samples_split", 2)),
             min_samples_leaf  = int(rf.get("min_samples_leaf", 1)),
@@ -8509,36 +7422,29 @@ def open_ml_analysis_window():
         X_val_num  = _drop_meta_and_get_X(X_val).reindex(columns=cols, fill_value=0)
         X_test_num = _drop_meta_and_get_X(X_test).reindex(columns=cols, fill_value=0)
 
-        # replace originals
+        # replace originals, make sure only numeric columns enters the train process (or it will throw error)
         X_train, X_val, X_test = X_train_num, X_val_num, X_test_num
 
-        # --- END NEW ---
-        train_feats = list(X_train.columns)
-
+        # 20260419 code review: recovered the tags so now models show if it include protonatedmass as feature or not, not only showing the source csv status
         mass_suffix = "_withMass" if use_mass_feature else ""
 
         if X_train.isna().any().any():
             raise RuntimeError("[Train] NaNs remain in X_train after MS1 prep — unexpected")
         
-        #model = RandomForestClassifier(n_estimators=100, random_state=42)
+        # Call RF to deal with numeric X feature matrices and Y (label mapped to integer)
         model.fit(X_train, y_train_enc)
-        from sklearn.metrics import classification_report, confusion_matrix
-        from sklearn.utils.multiclass import unique_labels
-        import numpy as np
-        # evaluate with proba
-        # raw predictions
+        # Call RF to run prediction on test split, so we get performance evaluation later
         y_pred = model.predict(X_test)
 
         #extra binary glycan-vs-non-glycan report (print in terminal only)
-        from sklearn.metrics import precision_recall_fscore_support, accuracy_score
-
-        maj_idx = list(le.classes_).index(majority_label_var.get())
-        y_true_bin = (y_test_enc != maj_idx).astype(int)   # 1=glycan, 0=non
-        y_pred_bin = (y_pred      != maj_idx).astype(int)
+        maj_idx = list(le.classes_).index(majority_label_var.get()) # find the major class index mapping integer
+        y_true_bin = (y_test_enc != maj_idx).astype(int)   # Convert test labels -not majority(glycans) = 1, majority (Non-glycan) = 0
+        y_pred_bin = (y_pred      != maj_idx).astype(int)  # Convert predetion from models - same logic
 
         p,r,f,_ = precision_recall_fscore_support(y_true_bin, y_pred_bin, average="binary", zero_division=0)
         acc = accuracy_score(y_true_bin, y_pred_bin)
-        print(f"[ML] Binary glycan-vs-non :: P={p:.2f} R={r:.2f} F1={f:.2f} Acc={acc:.2f}")
+        logger.log(f"[ML][train][report] Binary glycan vs non-glycan summary : Precison={p:.2f} Recall={r:.2f} F1 score={f:.2f} Accuracy={acc:.2f}")
+        print(f"[ML][train][report] Binary glycan vs non-glycan summary : Precison={p:.2f} Recall={r:.2f} F1 score={f:.2f} Accuracy={acc:.2f}")
 
         # --- NEW: glycan-only confidence threshold -> fallback to majority label ---
         if enable_thresh_var.get():
@@ -8576,23 +7482,25 @@ def open_ml_analysis_window():
         # --- END NEW ---
         
         # evaluate on test
-        #y_pred = model.predict(X_test)
-        used = unique_labels(y_test_enc, y_pred)
-        used_names = [le.classes_[i] for i in used]
+        used = unique_labels(y_test_enc, y_pred)  # finds all class indices that appear in either the true labels OR the predictions
+        used_names = [le.classes_[i] for i in used] #converts those integer indices back to human-readable labels using the encoder. So [0, 2, 5] becomes ["F1H5N4S2", "H5N4S2", "Non-glycan"].
         # quiet, deterministic handling of 0/0 cases 20250902
         report = classification_report(y_test_enc, y_pred, target_names=used_names, zero_division=0)
+        #avoids cluttering the report with classes that have 0 samples in both true and predicted, which would show 0.00 across all metrics. 
         # (optional) flag classes with no predicted or no true samples
         labels_all = list(le.classes_)
         cm = confusion_matrix(y_test_enc, y_pred, labels=np.arange(len(labels_all)))
         no_pred = [labels_all[j] for j, s in enumerate(cm.sum(axis=0)) if s == 0]
         no_true = [labels_all[i] for i, s in enumerate(cm.sum(axis=1)) if s == 0]
 
-        if no_pred or no_true:
-            print(f"[ML] No predicted samples for: {no_pred}")
-            print(f"[ML] No true samples in test for: {no_true}")
-        #report = classification_report(y_test_enc, y_pred, target_names=used_names)
+        if no_pred: #never being assigned to these labels, since too similar to other labels (structures)
+            logger.log(f"[ML][train][summary] No predicted samples for these classes: {no_pred}")
+            print(f"[ML][train][summary] No predicted samples for these classes: {no_pred}")
+        if no_true: #The class was in training but the random split put zero samples in the test set — happens with rare classes.
+            logger.log(f"[ML][train][summary] (lost from splitting) No true samples for: {no_true}")
+            print(f"[ML][train][summary] (lost from splitting) No true samples in test for: {no_true}")
 
-        #glycan only report (maybe wont export as report, need screenshot?)
+        # Glycan only report by excluding the majority (Assume the majority label is Non-glycan)
         try:
             maj_idx = labels_all.index(majority_label_var.get())
         except ValueError:
@@ -8623,31 +7531,70 @@ def open_ml_analysis_window():
 
         msg = [
             "Random Forest trained successfully.",
+            f"Mode: {'Cap training only' if real_world_test_var.get() else 'Cap before split'}",
+            f"RF: {int(n_estimators_var.get())} trees, class_weight={'balanced' if class_weight_var.get() else 'none'}", 
+            f"Thresholding: {'ON tau=' + format(thresh_val_var.get(), '.2f') + ', margin=' + format(margin_val_var.get(), '.2f') + ' -> ' + majority_label_var.get() if enable_thresh_var.get() else 'OFF'}",
             f"Classes kept: {len(info['kept_label_counts'])}",
             cap_line,
-            f"Dropped tiny classes (< {min_samples_var.get()}): {sum(info['dropped_rare_counts'].values())}",
-            "",
-            report,
+            f"Dropped tiny classes (< {min_samples_var.get()}):{sum(info['dropped_rare_counts'].values())}",
+            "",                                                                                                                          
         ]
-
-        #new lines, comment if I feel it annoying
-        msg.insert(1, f"RF: {int(n_estimators_var.get())} trees, class_weight="
-               f"{'balanced' if class_weight_var.get() else 'none'}")
-        msg.insert(1, f"Mode: {'Cap training only' if real_world_test_var.get() else 'Cap before split'}")
-        msg.insert(1, f"Thresholding: {'ON τ=' + format(thresh_val_var.get(), '.2f') + ' → ' + majority_label_var.get() if enable_thresh_var.get() else 'OFF'}")
-        msg.insert(1, f"Thresholding: {'ON τ=' + format(thresh_val_var.get(), '.2f') + ', δ=' + format(margin_val_var.get(), '.2f') + ' → ' + majority_label_var.get() if enable_thresh_var.get() else 'OFF'}")
         messagebox.showinfo("Training Complete", "\n".join(msg))
-
+        logger.log(f"[ML][Train][summary] {msg}")
         # save artifacts
-        base = os.path.splitext(train_csv_path)[0]
+        base = os.path.splitext(train_csv_path)[0] + mass_suffix # add mass_suffix, which is real value of if model get trained with mass or not
+        # if user feels the double mass indicator annoying, or if we can wrap information into dataset explorer, we can make it tidied then.
+        """
+        for old_suffix in ("_withMass", "_noMass"):
+            if base.endswith(old_suffix):
+                base = base[:-len(old_suffix)]
+                break
+        base = base + mass_suffix
+        """
         model_path  = base + "_rf_model.joblib"
         enc_path    = base + "_labelencoder.joblib"
         report_path = base + "_rf_performance.txt"
-        joblib.dump(model, model_path)
+        features_path = base + "_features.json"    
+        # 20260418 skops first, joblib as fallback, no more same model in 2 different extension
+        try:                                                                                 
+            from skops.io import dump as sk_dump
+            sk_dump(model, base + "_rf_model.skops")                                         
+            logger.log(f"[ML][Train] Model saved (skops): {base}_rf_model.skops")
+        except ImportError:                                                                  
+            joblib.dump(model, model_path)         
+            logger.log(f"[ML][Train][fallback] Model saved (joblib): {base}_rf_model.joblib")  
+
         joblib.dump(le, enc_path)
+        logger.log(f"[ML][Train] Model label encoder saved (joblib): {base}_labelencoder.joblib")  
+
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report)
+            logger.log(f"[ML][Train] Model performance report saved (txt): {base}_rf_performance.txt")  
+            if maj_idx is not None:
+                f.write(glycan_report)
+                logger.log(f"[ML][Train] Glycan-only (excluding the majority) report is appended.")  
+            print(f"[ML][Train] Model performance report saved (txt): {base}_rf_performance.txt") 
 
+        with open(features_path, "w", encoding="utf-8") as f:                                
+            json.dump(list(X_train.columns), f, indent=2)                                    
+        logger.log(f"[ML] Feature list saved: {features_path}")    
+
+        # 20260418 code review to activate train environment json save
+        try:
+            snapshot_training_run(                                                           
+                artifact_dir=os.path.dirname(base),           
+                effective_params=cfg,                                                        
+                column_order=list(X_train.columns),
+                classes=list(le.classes_),                                                   
+                inputs={"train_csv": train_csv_path, "linked_exp": linked_exp_json},
+                hashes={"train_csv": file_sha256(train_csv_path) if train_csv_path else      
+        None},                                                                               
+                versions=collect_versions(),                                                 
+            )         
+            logger.log(f"[ML][Train] records save at {base} ")                                                                       
+        except Exception as e:                                    
+            logger.log(f"[ML] snapshot_training_run failed: {e}")
+        # 20260419 code review: note that exp json may not be in the scope (nothing to do with current workflow)
         # persist params back to exp.json if present
         if linked_exp_json and os.path.exists(linked_exp_json):
             try:
@@ -8675,44 +7622,12 @@ def open_ml_analysis_window():
                     json.dump(exp_data, f, indent=4)
             except Exception as e:
                 print("Failed to write training parameters to exp.json:", e)
+    # end of RF model train section
 
-    def train_with_optional_ng(
-    positives_df,            # trainable (≥0.07 or ≥0.06 or salvage)
-    df_pseudo_full,          # long-form pseudolabel TSV
-    ion_masses, ppm=20.0,
-    include_ng=True,
-    low_score_col="ion score",
-    low_score_cut=0.03,
-    ng_strategy="cap_ng",    # or 'undersample' or 'none'
-    max_ng_ratio=1.0,
-    class_weight_balanced=True,):
-        train_df = positives_df.copy()
-
-        if include_ng:
-            ng_df = collect_ng_candidates(
-                df_pseudo_full=df_pseudo_full,
-                df_pseudo_filtered_pos=positives_df,
-                ion_masses=ion_masses,
-                ppm=ppm,
-                low_score_col=low_score_col,
-                low_score_cut=low_score_cut,
-                use_low_score=True,
-                use_no_hit=True,
-                manual_unknown_df=None,  # or your MSlist slice if available
-                scan_col="MS2scan_no",
-            )
-            if ng_strategy in ("cap_ng", "undersample"):
-                comb = pd.concat([train_df, ng_df], ignore_index=True)
-                train_df = resample_by_strategy(
-                    comb, label_col="Structure", strategy=ng_strategy, max_ng_ratio=max_ng_ratio
-                )
-            else:
-                train_df = pd.concat([train_df, ng_df], ignore_index=True)
 
     def select_model_file():
         nonlocal model_file_path
         path = filedialog.askopenfilename(title="Select Model File",filetypes=[("Model files", "*.joblib *.pkl *.skops"), ("All files", "*.*")])
-        #path = filedialog.askopenfilename(filetypes=[("Model files", "*.joblib *.pkl")])
         if path:
             model_file_path = os.path.abspath(path)
             messagebox.showinfo("Model Loaded", f"Model loaded from:\n{model_file_path}")
@@ -8722,35 +7637,10 @@ def open_ml_analysis_window():
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if path:
             predict_input_path = os.path.abspath(path)
-            messagebox.showinfo("Input File Selected", f"Data loaded from:\n{predict_input_path}")
-
-    #def create_unlabeled_dataset():
-    #    messagebox.showinfo("Not Yet Implemented", "This feature will allow you to select an experiment and automatically create a feature-matched dataset from its annotation and early raw-converted CSV.")
-    
-    def _read_any_table(p):
-        # try TSV first, then CSV with common settings
-        try:
-            return pd.read_csv(p, sep="\t", engine="python")
-        except Exception:
-            return pd.read_csv(p, engine="python")
-
-    import re
-    _comp_pat = re.compile(r'(KDN|F|H|N|S|G|A|s|p)\s*([0-9]+)', re.I)
-    def _canon_comp(s: str) -> str:
-        counts = {"F":0,"H":0,"N":0,"S":0,"G":0,"KDN":0,"A":0,"s":0,"p":0}
-        for k,v in _comp_pat.findall(s or ""):
-            k = "KDN" if k.upper()=="KDN" else k
-            counts[k] = counts.get(k,0) + int(v)
-        parts=[]
-        for key in ("F","H","N","S","G","KDN","A","s","p"):
-            n=counts.get(key,0)
-            if n>0: parts.append(f"{key}{n}")
-        return "".join(parts)
-    #20251001 safeguard
-    out_gate = None
+            messagebox.showinfo("Prediction file selected", f"Data loaded from:\n{predict_input_path}")
 
     def run_prediction():
-        import numpy as np
+
         try:
             import joblib
         except ImportError:
@@ -8758,24 +7648,40 @@ def open_ml_analysis_window():
             return
 
         if not model_file_path or not predict_input_path:
+            print(f"[ML][Predict]: missing either model file {model_file_path} or prediction table {predict_input_path}")
             messagebox.showwarning("Missing Info", "Please select both a model file and an input CSV file.")
             return
 
         #20250909 add import for prediction report
         from prediction_report import (ReportParams, summarize_predictions,write_prediction_report, show_prediction_summary_popup)
-
+        # 20260421 am 3:17 fixed the skops error (label encoder is not correctly parsed. Added loader condition to get correct le_path)
         try:
             model, loader = load_model_any(model_file_path)
-            #model = joblib.load(model_file_path)
             df = pd.read_csv(predict_input_path)
-
+            logger.log(f"[ML][Predict] Model loaded via {loader}")
             # Try loading label encoder if available
-            le_path = model_file_path.replace("_rf_model.joblib", "_labelencoder.joblib")
-            if os.path.exists(le_path):
-                le = joblib.load(le_path)
-            else:
-                le = None
+            if loader == "joblib":
+                logger.log(f"[ML][Predict] loading label encoder (joblib model)")
+                try:
+                    le_path = model_file_path.replace("_rf_model.joblib", "_labelencoder.joblib")
+                    if os.path.exists(le_path):
+                        le = joblib.load(le_path)
+                    else:
+                        le = None
+                except:
+                    logger.log(f"label encoder can't be loaded")
+            elif loader == "skops":
+                logger.log(f"[ML][Predict] loading label encoder (skops model)")
+                try:
+                    le_path = model_file_path.replace("_rf_model.skops", "_labelencoder.joblib")
+                    if os.path.exists(le_path):
+                        le = joblib.load(le_path)
+                    else:
+                        le = None
+                except:
+                    logger.log(f"label encoder can't be loaded")
         except Exception as e:
+            logger.log(f"[ML][Predict][ERROR 0] exception in loading model {e}")
                 # Suggestion to user if it's a version mismatch crash
             if ".joblib" in model_file_path and "InconsistentVersionWarning" in str(e) or "dtype" in str(e):
                 messagebox.showerror(
@@ -8784,20 +7690,25 @@ def open_ml_analysis_window():
                     "Fix: re-export as .skops on the training machine (or retrain), then load the .skops here."
                 )
                 return
+            elif ".skops" in model_file_path:
+                messagebox.showerror("Model load failed", f"Failed to load .skops model.\n\nReason:\n{e}")
+                return
             else:
                 messagebox.showerror("Load Error", str(e))
             return
-
+        # 20260419 code review: Stage 2 Feature Alignment
         #20251006 ver
         try:
             # 1) Get the model's training feature list first
             train_feats = get_training_features(model, model_file_path)
             if train_feats is None:
+                logger.log(f"[ML][Predict][ERROR 0] Failed to determine training feature list. If you have *_features.json for this file, put in the same folder.")
                 raise RuntimeError("Cannot determine training feature list. "
                                 "Re-export with embedded features or provide *_features.json.")
 
             # 2) If the model expects MS1 but input lacks it, add placeholder NOW (before X)
             if "protonatedmass" in train_feats and "protonatedmass" not in df.columns:
+                logger.log(f"[ML][Predict][WARN] This model supports mass feature, input is missing mass column so it will be set to 0 (lower prediction performance expected)")
                 messagebox.showwarning(
                     "Model expects MS1",
                     "This model was trained with 'protonatedmass', but the input has no such column. "
@@ -8807,6 +7718,7 @@ def open_ml_analysis_window():
 
             # (optional) if it expects delta_ppm too
             if "delta_ppm" in train_feats and "delta_ppm" not in df.columns:
+                logger.log(f"[ML][Predict][WARN] This model supports delta_ppm, but it is missing in input file")
                 df["delta_ppm"] = 0.0
 
             # 3) Now build X (after placeholders exist)
@@ -8814,37 +7726,41 @@ def open_ml_analysis_window():
 
             # 4) Align to training features
             missing = sorted(set(train_feats) - set(X.columns))
+            if missing:
+                logger.log(f"[ML][Predict][WARN] {len(missing)} features missing from input, filled with 0: {missing[:10]}{'...' if len(missing) > 10 else ''}")
             extra   = sorted(set(X.columns) - set(train_feats))
+            if extra:
+                logger.log(f"[ML][Predict][info] {len(extra)} extra columns in input (ignored): {extra[:10]}{'...' if len(extra) > 10 else ''}")
+
             for c in missing:
                 X[c] = 0.0
             X = X[list(train_feats)]  # enforce order
 
-            # 5) (optional) detect for UI
-            #ms1_used = ("protonatedmass" in train_feats) or ("delta_ppm" in train_feats)
-
-            # Predict
+            # 20260419 code review: Stage 3 predict (only this line)
+            # Predict row by row, the order is not changed so we can make sure the predictions can be filled correctly to original MS2_scan or whatever
             y_pred = model.predict(X)
 
-            # Optional probabilities & margin
-
-            #X = df.drop(columns=["MS2scan_no"], errors="ignore")
-            #y_pred = model.predict(X)
-
-            #applying same filter to prediction model
-            # --- optional: apply the same margin-aware demotion in prediction ---
-            try:
-                tau = float(thresh_val_var.get())
-            except Exception:
-                tau = 0.60  # sensible fallback
-            #similar to tau, use same pattern on margin
-            try:
-                margin = float(margin_val_var.get())
-            except Exception:
-                margin = 0.05
-
+            # init proba for later demotion and reporter
             proba = None
             if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)
+                proba = model.predict_proba(X) #(keep this BEFORE gating and summarization)
+            # Optional probabilities & margin
+            #applying same filter to prediction model
+            # --- optional: apply the same margin-aware demotion in prediction ---
+            # 20260419 code review: tau and margin was applied always until 20260419
+            # now it is bound with parameters in train/test parameter, need to add a button back here locally (probably changing the value itself and sync would be fine though)
+            if enable_thresh_var.get():
+                try:
+                    tau = float(thresh_val_var.get())
+                except Exception:
+                    tau = 0.60  # sensible fallback
+                #similar to tau, use same pattern on margin
+                try:
+                    margin = float(margin_val_var.get())
+                except Exception:
+                    margin = 0.05
+                logger.log(f"[ML][Predict] Enable thresholding, tau = {tau}, margin = {margin}")
+
                 # work in encoded-space (ints). If y_pred are strings because of a prior transform, re-encode temporarily.
                 if le is not None and (len(y_pred) > 0 and isinstance(y_pred[0], str)):
                     y_pred_enc = le.transform(y_pred)
@@ -8869,43 +7785,34 @@ def open_ml_analysis_window():
                         y_pred = le.inverse_transform(y_pred_enc)
                     else:
                         y_pred = y_pred_enc
-            # --- end optional demotion at prediction ---
-
-            # If encoder available, decode
-            if le is not None:
+                # --- end optional demotion at prediction ---
+            else:
+                logger.log(f"[ML][Predict] Thresholding is disabled in this prediction.")
+            # If encoder available, decode label
+            if le is not None: # LabelEncoder was loaded from the _labelencoder.joblib sidecar file.
                 try:
-                    y_pred = le.inverse_transform(y_pred)
+                    y_pred = le.inverse_transform(y_pred) #convert integer predictions back to string labels (e.g., 2 → "F1H5N4S2")
                 except:
                     pass
             elif hasattr(model, 'classes_'):
                 y_pred = [model.classes_[i] if isinstance(i, int) else i for i in y_pred]
-
+            else:
+                logger.log("[ML][Predict][WARN] No label decoder available — predictions are raw integers") 
+            # Append prediction labels back to original dataframe
             df['Predicted_Label'] = y_pred
 
-            #safe guard
-            # --- ensure gate columns always exist ---
-            import numpy as _np
+            # 20260420 code review Stage 6 - make sure columns are there
+            # --- ensure gate columns always exist --- (If we don't want this to show when gate is off, remove it.)
             if "ppm_precursor" not in df.columns:
-                df["ppm_precursor"] = _np.nan
+                df["ppm_precursor"] = np.nan
             if "pred_ok" not in df.columns:
                 df["pred_ok"] = True     # default: keep all rows
 
-            #add prediction reports
+            # 20260420 code review Stage 7 - moved to stage 9
             # --- START: Prediction summary integration ---
-
-            # 1) Collect class names (for readable labels in the report)
-            try:
-                class_names = list(le.classes_) if le is not None else list(getattr(model, "classes_", []))
-            except Exception:
-                class_names = list(getattr(model, "classes_", []))
-
-            # 2) If available, get probabilities for margins/entropy
-            #already declaired before, with more functionality?
-
-            # --- composition helpers (for precursor gate) ---
-            import re
+            # 
+            # 20260420 code review Stage 8 --- composition helpers (for precursor gate) ---
             _comp_pat = re.compile(r'(KDN|F|H|N|S|G|A|s|p)\s*([0-9]+)', re.I)
-
             def _canon_comp(s: str) -> str:
                 """Turn any comp string into canonical 'F,H,N,S,G,KDN,A,s,p' order; omit zeros."""
                 if not isinstance(s, str) or not s.strip():
@@ -8922,151 +7829,8 @@ def open_ml_analysis_window():
                     if n > 0:
                         parts.append(f"{key}{n}")
                 return "".join(parts)
+            # ===============
 
-            #new precursor gate maybe
-            import re
-
-
-            def _find_col(df: pd.DataFrame, candidates):
-                """Return the first existing column from candidates (case-insensitive)."""
-                cols = {c.lower(): c for c in df.columns}
-                for name in candidates:
-                    if name.lower() in cols:
-                        return cols[name.lower()]
-                return None
-
-            _LABEL_RE = re.compile(r"""
-                (?:F(?P<F>\d+))?      # Fuc
-                (?:H(?P<H>\d+))?      # Hex
-                (?:N(?P<N>\d+))?      # HexNAc
-                (?:S(?P<S>\d+))?      # NeuAc (Sialic acid)
-                (?:G(?P<G>\d+))?      # NeuGc
-                (?:KDN(?P<KDN>\d+))?  # KDN (explicit token)
-            """, re.VERBOSE)
-
-            def _canon_label(s: str) -> str:
-                """Normalize labels to FHNSGKDN order; keep only nonzero terms.
-                Accepts variants like 'H5N2', 'F1H5N2S1', 'H5N2KDN1', etc."""
-                if not isinstance(s, str) or not s:
-                    return ""
-                m = _LABEL_RE.fullmatch(s)
-                if not m:
-                    # Try to expand bare 'K1' -> 'KDN1', or tolerate lowercase
-                    s2 = s.upper().replace("K", "KDN")
-                    m = _LABEL_RE.fullmatch(s2)
-                    if not m:
-                        return ""
-                parts = []
-                F = int(m.group("F") or 0)
-                H = int(m.group("H") or 0)
-                N = int(m.group("N") or 0)
-                S = int(m.group("S") or 0)
-                G = int(m.group("G") or 0)
-                KDN = int(m.group("KDN") or 0)
-                if F:   parts.append(f"F{F}")
-                if H:   parts.append(f"H{H}")
-                if N:   parts.append(f"N{N}")
-                if S:   parts.append(f"S{S}")
-                if G:   parts.append(f"G{G}")
-                if KDN: parts.append(f"KDN{KDN}")
-                return "".join(parts)
-
-            def _label_from_counts(row: pd.Series) -> str:
-                """Construct FHNSGKDN label from count columns if no label string exists."""
-                # Common column names (case-insensitive)
-                def g(name): 
-                    for cand in [name, name.capitalize()]:
-                        if cand in row:
-                            return int(row[cand]) if pd.notna(row[cand]) else 0
-                    return 0
-                F   = g("F") or g("Fuc")
-                H   = g("H") or g("Hex")
-                N   = g("N") or g("HexNAc")
-                S   = g("S") or g("NeuAc")
-                G   = g("G") or g("NeuGc")
-                KDN = g("KDN")
-                parts = []
-                if F:   parts.append(f"F{F}")
-                if H:   parts.append(f"H{H}")
-                if N:   parts.append(f"N{N}")
-                if S:   parts.append(f"S{S}")
-                if G:   parts.append(f"G{G}")
-                if KDN: parts.append(f"KDN{KDN}")
-                return "".join(parts)
-
-            def apply_mass_gate(df_pred: pd.DataFrame,
-                                df_lib: pd.DataFrame,
-                                ppm_threshold: float = 10.0,
-                                logger=None) -> pd.DataFrame:
-
-                log = (logger.info if logger else print)
-
-                # --- find columns (case-insensitive) ---
-                pred_lab_col = _find_col(df_pred, ["Predicted","Predicted_Label","label","pred_label"])
-                obs_mz_col   = _find_col(df_pred, ["protonatedmass","precursor_mz","mz"])
-                if not pred_lab_col or not obs_mz_col:
-                    log("[gate] ERROR: missing required columns in predictions "
-                        f"(label? {bool(pred_lab_col)}, mass? {bool(obs_mz_col)}). Skipping gate.")
-                    df_pred = df_pred.copy()
-                    df_pred["ppm_precursor"] = pd.NA
-                    df_pred["pred_ok"] = False
-                    return df_pred
-
-                theo_mass_col = _find_col(df_lib, ["Mass","mass","theoretical_mass"])
-                lib_label_col = _find_col(df_lib, ["Label","label","Predicted","composition","Comp","Glycan"])
-                if not theo_mass_col:
-                    log("[gate] ERROR: library has no theoretical mass column (Mass/mass/theoretical_mass). Skipping gate.")
-                    df_pred = df_pred.copy()
-                    df_pred["ppm_precursor"] = pd.NA
-                    df_pred["pred_ok"] = False
-                    return df_pred
-
-                # --- prepare library: ensure a canonical label column ---
-                lib = df_lib.copy()
-                if lib_label_col:
-                    lib["__label__"] = lib[lib_label_col].astype(str).map(_canon_label)
-                else:
-                    lib["__label__"] = lib.apply(_label_from_counts, axis=1).map(_canon_label)
-
-                # Drop library rows that still have empty labels or missing masses
-                lib = lib[pd.notna(lib[theo_mass_col])]
-                lib = lib[lib["__label__"] != ""]
-                lib = lib.drop_duplicates(subset="__label__", keep="first")
-
-                # --- prepare predictions: canonicalize labels ---
-                out = df_pred.copy()
-                out["__label__"] = out[pred_lab_col].astype(str).map(_canon_label)
-
-                # --- join ---
-                merged = out.merge(lib[["__label__", theo_mass_col]],
-                                on="__label__", how="left", suffixes=("", "_lib"))
-
-                # compute ppm only where theoretical mass is available
-                theo = merged[theo_mass_col]
-                obs  = merged[obs_mz_col]
-                with pd.option_context("mode.use_inf_as_na", True):
-                    ppm = (obs - theo) / theo * 1e6
-                merged["ppm_precursor"] = ppm.where(pd.notna(theo))
-
-                # determine pass/fail
-                merged["pred_ok"] = merged["ppm_precursor"].abs() <= ppm_threshold
-
-                # warn if nothing matched
-                n_labels_matched = merged[theo_mass_col].notna().sum()
-                if n_labels_matched == 0:
-                    uniq_preds = sorted(set(out["__label__"]) - {""})
-                    log(f"[gate] WARNING: 0 compositions matched between predictions and library. "
-                        f"Pred labels example: {uniq_preds[:8]} ... "
-                        "Check label format and library columns (Label/F/H/N/S/G/KDN + Mass).")
-
-                # clean up temp column
-                merged.drop(columns=["__label__"], inplace=True)
-                return merged            
-
-
-            # --- Precursor gate (optional) ---
-            out_path_gate = None                    # make sure this exists for later UI messages
-            gate_on = bool(apply_pred_precursor_gate_var.get())  # <- use the SAME var name you used in the UI
             # --- START: reporter-friendly table (unchanged from v10) ---
             # 1) class names
             try:
@@ -9074,19 +7838,15 @@ def open_ml_analysis_window():
             except Exception:
                 class_names = list(getattr(model, "classes_", []))
 
-            # 2) proba (keep this BEFORE gating and summarization)
-            proba = None
-            if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)
-
+            
             pred_df = df.copy()
             pred_df = pred_df.rename(columns={"Predicted_Label": "pred_label"})  # reporter expects 'pred_label'
 
+            # 2) proba  3way-monitoring and appends to pred_df: 1. return something 2. Python list/tuple (unlikely but defensive) 3. numpy array (what fires from sklearn)                               
             proba_cols = None
             if proba is not None and (isinstance(proba, (list, tuple)) or hasattr(proba, "shape")):
                 try:
-                    import numpy as _np
-                    pred_df["proba_vector"] = [_np.asarray(row, dtype=float) for row in proba]
+                    pred_df["proba_vector"] = [np.asarray(row, dtype=float) for row in proba]
                 except Exception:
                     if class_names:
                         proba_cols = [f"proba_{c}" for c in class_names]
@@ -9097,87 +7857,65 @@ def open_ml_analysis_window():
             # --- END: reporter-friendly table ---
 
             # --- Packaging suffixes (so folders/files tell you MS1/gate) ---
-            train_feats = get_training_features(model, model_file_path) or []
+            train_feats = train_feats or []
             ms1_used    = ("protonatedmass" in train_feats) or ("delta_ppm" in train_feats)
             ms1_suffix  = "_MS1feat" if ms1_used else "_noMS1"
 
             gate_on = bool(apply_pred_precursor_gate_var.get())
             try:
-                gate_ppm = float(pred_precursor_ppm_var.get() or 10)
+                gate_ppm = float(pred_precursor_ppm_var.get())  # 20260420 flood exceptions so we can log properly   #or 10)
+                logger.log(f"[ML][Predict] Precursor gate ppm = {gate_ppm}")
+                print(f"[ML][Predict] Precursor gate ppm = {gate_ppm}")
             except Exception:
                 gate_ppm = 10.0
+                logger.log(f"[ML][Predict][fallback] invalid Precursor gate ppm, set to default = {gate_ppm}")
+                print(f"[ML][Predict][fallback] invalid Precursor gate ppm, set to default = {gate_ppm}")
+
             gate_suffix = f"_PG{int(gate_ppm)}ppm" if gate_on else "_noPG"
             method_suffix = ms1_suffix + gate_suffix
 
-            from pathlib import Path
             method_base = _guess_method_basename_for_pack(predict_input_path, df)
             out_dir = Path(os.path.dirname(predict_input_path)) / f"{method_base}{method_suffix}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
+            # 20260420 code review: Stage 10 
             # --- Precursor gate (robust & optional) ---
             out_path_gate = None
-            import pandas as _pd
-            import numpy as np
             if gate_on:
                 try:
-
                     # read in-silico and derive composition→[masses]
                     insilico_path = (insilico_csv_var.get() or "").strip()
                     if not insilico_path:
                         raise RuntimeError("No in-silico CSV selected.")
-                    lib = _read_any_table(insilico_path)
-
-                    # --- robust reparse / header clean for in-silico CSV ---
-                    def _clean_cols(cols):
-                        out = []
-                        for c in cols:
-                            s = str(c).replace("\uFEFF", "").strip()  # strip BOM + spaces
-                            out.append(s)
-                        return out
-
+                    if logger: logger.log(f"[ML][Predict][info] Precursor gate uses in silico glycan library: {insilico_path}")
+                    # 20260413 code review: change to existing main function call
+                    # in silico file is not tsv, so prefer_tab is False (Claude Code suggests True). Need tests
+                    lib = robust_read_csv(insilico_path, prefer_tab=False)
                     # 1) clean current headers
-                    lib.columns = _clean_cols(lib.columns)
-
+                    lib = clean_cols(lib) # line 7875: was lib.columns = clean_cols(lib.columns)
                     # 2) if it looks like a single-column read, try common delimiters
                     if len(lib.columns) == 1:
                         _one = lib.columns[0]
                         # log for debugging
-                        if logger: logger.log(f"[Predict] in-silico looked single-col header: {_one!r}; reparsing…")
+                        if logger: logger.log(f"[ML][Predict][WARN] Detected in-silico looked single-col header: {_one!r}; reparsing…")
                         # try comma, semicolon (EU Excel), then tab
                         for _sep in (",", ";", "\t"):
                             try:
-                                _tmp = _pd.read_csv(insilico_path, sep=_sep, engine="python")
-                                _tmp.columns = _clean_cols(_tmp.columns)
+                                _tmp = pd.read_csv(insilico_path, sep=_sep, engine="python")
+                                _tmp = clean_cols(_tmp) # line 7885: was _tmp.columns = clean_cols(_tmp.columns)
                                 if len(_tmp.columns) > 1:
                                     lib = _tmp
-                                    if logger: logger.log(f"[Predict] reparsed with sep='{_sep}': {lib.columns.tolist()}")
+                                    if logger: logger.log(f"[ML][Predict][WARN][auto] reparsed with sep='{_sep}': {lib.columns.tolist()}")
                                     break
                             except Exception as _e:
+                                if logger: logger.log(f"[ML][Predict][ERROR 0] reparsed failed on '{_e}")
                                 pass
-
+                    if logger: logger.log(f"[ML][Predict][auto] in-silico columns (cleaned): {lib.columns.tolist()}")
                     # 3) build a case-insensitive lookup AFTER cleaning
-                    norm = {c.lower(): c for c in lib.columns}
-
-                    # pick mass column robustly
-                    mass_col = None
-                    for key in ("theoretical_mass", "mass"):
-                        if key in norm:
-                            mass_col = norm[key]
-                            break
-                    # extra tolerance (e.g., stray spaces/case)
-                    if mass_col is None:
-                        for c in lib.columns:
-                            if c.strip().lower() in ("mass", "theoretical_mass"):
-                                mass_col = c
-                                break
-
-                    if logger:
-                        logger.log(f"[Predict] in-silico columns (cleaned): {lib.columns.tolist()}")
-                        logger.log(f"[Predict] chosen mass_col: {mass_col}")
-
-
                     # normalize headers
-                    norm = {c.lower().strip(): c for c in lib.columns}
+                    norm = {c.lower(): c for c in lib.columns}
+                    logger.log(f"[ML][Predict][DEBUG][gate] norm keys: {list(norm.keys())}")                        
+                    logger.log(f"[ML][Predict][DEBUG][gate] SO3 mapped to: {norm.get('so3')}, PO3H mapped to: {norm.get('po3h')}") 
                     # prefer string comp if present
                     comp_col = None
                     for cand in ("composition", "structure", "label", "comp_str"):
@@ -9194,13 +7932,22 @@ def open_ml_analysis_window():
                             if c.strip().lower() in ("mass","theoretical_mass"):
                                 mass_col = c; break
                     if mass_col is None:
+                        if logger: logger.log(f"[ML][Predict][ERROR 2]In-silico CSV must have a Mass or theoretical_mass column.")
                         raise RuntimeError("In-silico CSV must have a Mass or theoretical_mass column.")
-
+                    if logger: logger.log(f"[ML][Predict][info] pick the glycan library precursor mass column: {mass_col}")
                     # if no comp string, synthesize from counts
                     # If no composition string, synthesize one from monomer counts (FHN with modifiers A/s/p, plus G/K if present)
+                                                            
+                    # ADD: canonicalize library strings even if the CSV already has a composition column
+                    def _canon_safe(x):
+                        try:
+                            return _canon_comp(str(x))
+                        except Exception:
+                            return str(x).strip()
+                        
                     if comp_col is None:
                         def _get(row, key):
-                            col = norm.get(key)
+                            col = norm.get(key.lower()) #col = norm.get(key)
                             if col is None:
                                 return 0
                             v = row.get(col, 0)
@@ -9227,35 +7974,21 @@ def open_ml_analysis_window():
                             if N:     parts.append(f"N{N}")
                             if NeuAc: parts.append(f"S{NeuAc}")   # use 'S' for NeuAc if your label set uses it; otherwise remove this line
                             if NeuGc: parts.append(f"G{NeuGc}")
-                            if KDN:   parts.append(f"K{KDN}")
+                            if KDN:   parts.append(f"K{KDN}")     # + _get(row, "K") if we acknowledge K as KDN
                             if HexA:  parts.append(f"A{HexA}")    # <-- HexA is 'A' in your schema
                             if SO3:   parts.append(f"s{SO3}")
                             if PO3H:  parts.append(f"p{PO3H}")
                             return "".join(parts)
 
                         lib = lib.copy()
-                        lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
-                        comp_col = "__comp"
-
-                    #new patch
-                                        
-                    # ADD: canonicalize library strings even if the CSV already has a composition column
-                    def _canon_safe(x):
-                        try:
-                            return _canon_comp(str(x))
-                        except Exception:
-                            return str(x).strip()
-
-                    if comp_col is None:
-                        # (your existing counts→string code stays as-is)
-                        ...
-                        lib = lib.copy()
-                        lib["__comp"] = lib.apply(_counts_to_comp, axis=1)
-                        comp_col = "__comp"
+                        lib["countedcomp"] = lib.apply(_counts_to_comp, axis=1)  # __comp -> countedcomp (for Python, it's not a class so no name mangling)
+                        comp_col = "countedcomp"
+                        logger.log(f"[ML][Predict][info] calculation finished. String composition is located at '{comp_col}', first 2:  {lib[comp_col].head(2).tolist()}") 
                     else:
                         # <<< NEW: canonicalize provided composition strings so they match prediction labels
                         lib = lib.copy()
                         lib[comp_col] = lib[comp_col].astype(str).map(_canon_safe)
+                        logger.log(f"[Predict][gate] comp source: '{comp_col}', first 2:  {lib[comp_col].head(2).tolist()}") 
 
                     # build lookup composition → list of masses  (unchanged)
                     comp2masses = {}
@@ -9265,161 +7998,52 @@ def open_ml_analysis_window():
                         comp_key = _canon_safe(comp)
                         comp2masses.setdefault(comp_key, []).append(float(mass))
 
-                    # build lookup composition → list of masses
-                    #comp2masses = {}
-                    #for comp, mass in zip(lib[comp_col].astype(str), pd.to_numeric(lib[mass_col], errors="coerce")):
-                    #    if pd.isna(mass) or not comp:
-                    #        continue
-                    #    comp2masses.setdefault(comp, []).append(float(mass))
-
                     # apply gate (skip Non-glycan)
-                    is_ng = pred_df["pred_label"].astype(str).eq("Non-glycan")
-                    pred_df["ppm_precursor"] = np.nan
-                    # CHANGE: default to False; only set True for glycans that pass
-                    pred_df["pred_ok"] = False
-                    #pred_df["pred_ok"] = True
-
-                    #debug lines
-                    # --- GATE DIAGNOSTICS ---
-                    try:
-                        # same canonicalizer for both sides
-                        def _canon(x):
-                            try:    return _canon_comp(x)
-                            except: return str(x).strip()
-
-                        # build a quick "masses found?" map
-                        # If you created comp2masses above, reuse it; otherwise reconstruct it here:
-                        # comp2masses = {...}  # already built earlier
-
-                        gly = pred_df[ pred_df["pred_label"].astype(str) != "Non-glycan" ].copy()
-                        gly["canon_pred"]  = gly["pred_label"].astype(str).map(_canon)
-                        gly["masses_found"] = gly["canon_pred"].map(lambda c: len(comp2masses.get(c, [])))
-                        gly["has_pm"]      = pd.to_numeric(gly["protonatedmass"], errors="coerce").notna()
-                        gly["kept"]        = gly["pred_ok"].fillna(False)
-
-                        kept  = int(gly["kept"].sum())
-                        total = int(len(gly))
-                        dropped = total - kept
-                        no_lut = int((gly["masses_found"] == 0).sum())
-                        no_pm  = int((~gly["has_pm"]).sum())
-                        bad_ppm = int(((gly["masses_found"] > 0) & gly["has_pm"] & ~gly["kept"]).sum())
-
-                        if logger:
-                            logger.log(f"[Predict][gate] glycan rows total={total}, kept={kept}, dropped={dropped}, "
-                                    f"no_lut={no_lut}, no_pm={no_pm}, ppm_exceeded={bad_ppm}")
-
-                        # write a small debug file of dropped glycans
-                        debug_cols = ["MS2scan_no","pred_label","canon_pred","protonatedmass",
-                                    "ppm_precursor","masses_found","kept"]
-                        gate_dbg = gly[~gly["kept"]][debug_cols].head(1000)  # cap size
-                        dbg_path = (out_dir / (Path(predict_input_path).stem + "_gate_debug.csv")).as_posix()
-                        gate_dbg.to_csv(dbg_path, index=False)
-                        if logger: logger.log(f"[Predict][gate] wrote debug rows → {dbg_path}")
-                    except Exception as _e:
-                        if logger: logger.log(f"[Predict][gate] diagnostics failed: {_e}")
-
-                    # --- EXTRA DIAGNOSTICS: for no_lut rows, fetch Mass candidates by counts-match ---
-                    try:
-                        import re
-
-                        # 1) Normalize + numericize in-silico counts once
-                        lib_counts = lib.copy()
-
-                        def _nz_int(colname):
-                            if colname in lib_counts.columns:
-                                lib_counts[colname] = pd.to_numeric(lib_counts[colname], errors="coerce").fillna(0).astype(int)
-                            else:
-                                lib_counts[colname] = 0
-
-                        # standard headers we saw in your file
-                        _nz_int("Hex")
-                        _nz_int("HexNAc")
-                        _nz_int("Fuc")
-                        _nz_int("NeuAc")
-                        _nz_int("NeuGc")
-                        _nz_int("KDN")
-                        _nz_int("HexA")
-                        _nz_int("SO3")
-                        _nz_int("PO3H")
-
-                        # Mass column (we already picked mass_col earlier)
-                        lib_counts["__Mass__"] = pd.to_numeric(lib_counts[mass_col], errors="coerce")
-
-                        # 2) Parse a predicted label like "F1H4N3A1s1p1" → counts
-                        def _parse_counts(label: str):
-                            d = {"F":0,"H":0,"N":0,"S":0,"G":0,"K":0,"A":0,"s":0,"p":0}
-                            for m in re.finditer(r'([FHNSGKAsp])(\d+)', str(label)):
-                                ch, num = m.group(1), int(m.group(2))
-                                if ch in d:
-                                    d[ch] += num
-                            return d
-                        #fix GPT's loop, you forgot sialic acid, that's mandatory, not optional okay?
-                        # 3) Build a finder: from counts → candidate Mass list
-                        def _find_masses_by_counts(cnt):
-                            m = lib_counts.loc[
-                                (lib_counts["Fuc"]   == cnt["F"]) &
-                                (lib_counts["Hex"]   == cnt["H"]) &
-                                (lib_counts["HexNAc"]== cnt["N"]) &
-                                (lib_counts["NeuAc"]   == cnt["S"]) &
-                                (lib_counts["NeuGc"]   == cnt["G"]) &
-                                (lib_counts["KDN"]   == cnt["K"]) &
-                                (lib_counts["HexA"]  == cnt["A"]) &
-                                (lib_counts["SO3"]   == cnt["s"]) &
-                                (lib_counts["PO3H"]  == cnt["p"]),
-                                "__Mass__"
-                            ].dropna()
-                            return sorted(m.unique().tolist())
-
-                        # 4) Take the first 30 no-lut rows and attach candidate Masses
-                        no_lut_head = gly[gly["masses_found"] == 0].copy().head(30)
-                        if not no_lut_head.empty:
-                            no_lut_head["counts"] = no_lut_head["canon_pred"].map(_parse_counts)
-                            no_lut_head["Mass_candidates"] = no_lut_head["counts"].map(_find_masses_by_counts)
-
-                            # print to logger
-                            if logger:
-                                logger.log(f"[Predict][gate][no_lut] sample {len(no_lut_head)} rows with Mass candidates:")
-                                for r in no_lut_head[["MS2scan_no","pred_label","canon_pred","protonatedmass","Mass_candidates"]].itertuples(index=False):
-                                    logger.log("[no_lut] "
-                                            f"scan={getattr(r,'MS2scan_no',None)}, "
-                                            f"pred='{getattr(r,'pred_label',None)}' "
-                                            f"canon='{getattr(r,'canon_pred',None)}' "
-                                            f"pm={getattr(r,'protonatedmass',None)} "
-                                            f"MassCandidates={getattr(r,'Mass_candidates',None)}")
-
-                            # save a CSV so you can compare in Excel
-                            nolut_bycounts_path = (out_dir / (Path(predict_input_path).stem + "_gate_nolut_bycounts_debug.csv")).as_posix()
-                            no_lut_head[["MS2scan_no","pred_label","canon_pred","protonatedmass","Mass_candidates"]].to_csv(nolut_bycounts_path, index=False)
-                            if logger: logger.log(f"[Predict][gate] wrote by-counts no-lut debug → {nolut_bycounts_path}")
-
-                    except Exception as _e:
-                        if logger: logger.log(f"[Predict][gate] counts-mass diagnostics failed: {_e}")
-
+                    is_ng = pred_df["pred_label"].astype(str).eq("Non-glycan")  # ["pred_label"] becomes True for Non-glycan. Will be skipped later
+                    pred_df["ppm_precursor"] = np.nan  #initialize the column to NaN always
+                    pred_df["pred_ok"] = False # defaults to False, only when ppm passes, this column becomes true of that row.
+                    
+                    # ========================
                     # --- compute ppm for glycan rows only (robust: string LUT + counts fallback) ---
-                    import numpy as _np
-                    import pandas as _pd
-
                     # 1) Canonical prediction strings, but keep the raw too for logging
                     pred_df["__canon_pred__"] = pred_df["pred_label"].astype(str).map(_canon_safe)
-
                     gly_mask = (~is_ng).to_numpy()
-                    idx = _np.nonzero(gly_mask)[0]
-
+                    idx = np.nonzero(gly_mask)[0]
                     labels = pred_df.loc[gly_mask, "__canon_pred__"].astype(str).to_numpy()
-                    obs    = _pd.to_numeric(pred_df.loc[gly_mask, "protonatedmass"], errors="coerce").to_numpy()
+                    obs    = pd.to_numeric(pred_df.loc[gly_mask, "protonatedmass"], errors="coerce").to_numpy()
+                    best_ppm = np.full(labels.shape[0], np.nan, dtype=float)
+                    keep     = np.zeros(labels.shape[0], dtype=bool)
 
-                    best_ppm = _np.full(labels.shape[0], _np.nan, dtype=float)
-                    keep     = _np.zeros(labels.shape[0], dtype=bool)
-
-                    # Reuse your counts parser and finder from diagnostics
+                    # Create lib_counts for later comparison and extra report
+                    lib_counts = lib.copy()
+                    # Mass column (we already picked mass_col earlier)
+                    lib_counts["__Mass__"] = pd.to_numeric(lib_counts[mass_col], errors="coerce")
+                    # Parse a predicted label like "F1H4N3A1s1p1" → counts
                     def _parse_counts(label: str):
-                        import re
                         d = {"F":0,"H":0,"N":0,"S":0,"G":0,"K":0,"A":0,"s":0,"p":0}
                         for m in re.finditer(r'([FHNSGKAsp])(\d+)', str(label)):
                             ch, num = m.group(1), int(m.group(2))
                             if ch in d:
                                 d[ch] += num
                         return d
+
+                    #1) Normalize + numericize in-silico counts once
+                    def _nz_int(colname):
+                        if colname in lib_counts.columns:
+                            lib_counts[colname] = pd.to_numeric(lib_counts[colname], errors="coerce").fillna(0).astype(int)
+                        else:
+                            lib_counts[colname] = 0
+
+                    # standard headers to int, only on compositional field, DO NOT DO THIS ON MASS
+                    _nz_int("Hex")
+                    _nz_int("HexNAc")
+                    _nz_int("Fuc")
+                    _nz_int("NeuAc")
+                    _nz_int("NeuGc")
+                    _nz_int("KDN")
+                    _nz_int("HexA")
+                    _nz_int("SO3")
+                    _nz_int("PO3H")
 
                     def _masses_by_counts(lbl: str):
                         cnt = _parse_counts(lbl)
@@ -9436,58 +8060,110 @@ def open_ml_analysis_window():
                             "__Mass__"
                         ].dropna()
                         return sorted(m.unique().tolist())
-
-                    def _masses_for_label(lbl: str):
-                        # try string LUT first
-                        m = comp2masses.get(lbl, [])
-                        if m:
-                            return m
-                        # fallback to counts-based match
-                        return _masses_by_counts(lbl)
-
+                    
+                    lut_hits = 0
+                    counts_hits = 0
+                    misses = 0
                     gppm = float(gate_ppm)
                     for j, (lbl, pm) in enumerate(zip(labels, obs)):
-                        if not lbl or _np.isnan(pm):
+                        if not lbl or np.isnan(pm):
                             continue
-                        masses = _masses_for_label(lbl)
-                        if not masses:
-                            # verbose log once for the first few misses
-                            if logger and j < 5:
-                                logger.log(f"[gate][miss] no library masses for label '{lbl}' (pm={pm:.6f})")
-                            continue
+                        masses = comp2masses.get(lbl, [])
+                        if masses:
+                            lut_hits += 1
+                        else:
+                            masses = _masses_by_counts(lbl)
+                            if masses:
+                                counts_hits += 1
+                            else:
+                                misses += 1
+                                continue
 
-                        m = _np.asarray(masses, dtype=float)
-                        diffs = (pm - m) / m * 1e6
-                        k = _np.nanargmin(_np.abs(diffs))
-                        best_ppm[j] = float(diffs[k])
+                        m = np.asarray(masses, dtype=float)
+                        diffs = (pm - m) / m * 1e6  # PPM error against each candidate mass
+                        k = np.nanargmin(np.abs(diffs)) # index of closest match
+                        best_ppm[j] = float(diffs[k]) # store best PPM
+                        passed = abs(best_ppm[j]) <= gppm # within tolerance?
+                        keep[j] = passed # mark pass/fail
 
-                        passed = abs(best_ppm[j]) <= gppm
-                        keep[j] = passed
-
-                        # DEBUG: log every hit (so we can see matches in the terminal)
-                        try:
-                            scan_no = pred_df.loc[idx[j], "MS2scan_no"]
-                        except Exception:
-                            scan_no = None
-                        if logger:
-                            logger.log(
-                                f"[gate][hit] scan={scan_no} label='{lbl}' pm={pm:.6f} "
-                                f"bestTheo={m[k]:.6f} ppm={best_ppm[j]:.2f} → {'PASS' if passed else 'FAIL'}"
-                            )
-
+                    # 20260420 code review: update the report output as summary
+                    logger.log(f"[ML][Predict][info] Precursor gate lookup summary: string_match={lut_hits}, counts_fallback={counts_hits}, no_match={misses}")
                     # write back only for glycan rows
                     pred_df.loc[idx, "ppm_precursor"] = best_ppm
                     pred_df.loc[idx, "pred_ok"]       = keep
 
-                    # gated copy for disk & for report
+
+                    # --- GATE DIAGNOSTICS ---
+                    try:
+                        # same canonicalizer for both sides
+                        # build a quick "masses found?" map
+                        # If you created comp2masses above, reuse it; otherwise reconstruct it here:
+                        # comp2masses = {...}  # already built earlier
+
+                        gly = pred_df[ pred_df["pred_label"].astype(str) != "Non-glycan" ].copy()
+                        gly["canon_pred"]  = gly["pred_label"].astype(str).map(_canon_safe)
+                        gly["masses_found"] = gly["canon_pred"].map(lambda c: len(comp2masses.get(c, [])))
+                        gly["has_pm"]      = pd.to_numeric(gly["protonatedmass"], errors="coerce").notna()
+                        gly["kept"]        = gly["pred_ok"].fillna(False)
+
+                        kept  = int(gly["kept"].sum())
+                        total = int(len(gly))
+                        dropped = total - kept
+                        no_lut = int((gly["masses_found"] == 0).sum())
+                        no_pm  = int((~gly["has_pm"]).sum())
+                        bad_ppm = int(((gly["masses_found"] > 0) & gly["has_pm"] & ~gly["kept"]).sum())
+
+                        if logger:
+                            logger.log(f"[Predict][gate] glycan rows total={total}, kept={kept}, dropped={dropped}, "
+                                    f"no_lut={no_lut}, no_pm={no_pm}, ppm_exceeded={bad_ppm}")
+
+                        # 20260420 code review: write both debug -> rename to dropped csv (1000 -> full) to reveal dropped columns (and we know reasons) and a pure passed csv
+                        debug_cols = ["MS2scan_no","pred_label","canon_pred","protonatedmass",
+                                    "ppm_precursor","masses_found","kept"]
+                        gate_dropped = gly[~gly["kept"]][debug_cols]
+                        gate_passed = gly[gly["kept"]][debug_cols]
+                        dropped_path = (out_dir / (Path(predict_input_path).stem + "_gate_debug.csv")).as_posix()
+                        gate_dropped.to_csv(dropped_path, index=False)
+                        passed_path = (out_dir / (Path(predict_input_path).stem + "_gate_passed.csv")).as_posix()
+                        gate_passed.to_csv(passed_path, index=False)
+                        if logger: logger.log(f"[ML][Predict][info] After precursor gating, dropped rows summary is saved to → {dropped_path}")
+                        if logger:logger.log(f"[ML][Predict][info] After precursor gating, passed rows summary is saved to → {passed_path} (count = {len(gate_passed)})")   
+                    # --- EXTRA DIAGNOSTICS: for no_lut rows, fetch Mass candidates by counts-match ---
+                        # 4) Take the first 30 no-lut rows and attach candidate Masses
+                        no_lut_head = gly[gly["masses_found"] == 0].copy().head(30)
+                        if not no_lut_head.empty:
+                            no_lut_head["counts"] = no_lut_head["canon_pred"].map(_parse_counts)
+                            no_lut_head["Mass_candidates"] = no_lut_head["counts"].map(_masses_by_counts)
+                            # print to logger
+                            if logger:
+                                logger.log(f"[Predict][gate][no_lut] sample {len(no_lut_head)} rows with Mass candidates:")
+                                for r in no_lut_head[["MS2scan_no","pred_label","canon_pred","protonatedmass","Mass_candidates"]].itertuples(index=False):
+                                    logger.log("[no_lut] "
+                                            f"scan={getattr(r,'MS2scan_no',None)}, "
+                                            f"pred='{getattr(r,'pred_label',None)}' "
+                                            f"canon='{getattr(r,'canon_pred',None)}' "
+                                            f"pm={getattr(r,'protonatedmass',None)} "
+                                            f"MassCandidates={getattr(r,'Mass_candidates',None)}")
+                            # save a CSV so you can compare in Excel
+                            nolut_bycounts_path = (out_dir / (Path(predict_input_path).stem + "_gate_nolut_bycounts_debug.csv")).as_posix()
+                            no_lut_head[["MS2scan_no","pred_label","canon_pred","protonatedmass","Mass_candidates"]].to_csv(nolut_bycounts_path, index=False)
+                            if logger: logger.log(f"[ML][Predict][gate] wrote by-counts no-lut debug → {nolut_bycounts_path}")
+
+                    except Exception as _e:
+                        if logger: logger.log(f"[ML][Predict][ERROR 0] Post-precursor gating diagnostic collection failed: {_e}")
+
+                    # Add prediction ok or not (dropped or not) and ppm final values to full table
+                    df["pred_ok"] = pred_df["pred_ok"].values
+                    df["ppm_precursor"] = pred_df["ppm_precursor"].values 
+                    
+                    # Export Gate report
                     out_path_gate = (out_dir / (Path(predict_input_path).stem + f"_predicted{ms1_suffix}_PG{int(gate_ppm)}ppm_only.csv")).as_posix()
-                    df["pred_ok"] = pred_df["pred_ok"].values  # keep in the full table too
-                    #now ppm falls to csv, not in logger or terminal only
-                    df["ppm_precursor"] = pred_df["ppm_precursor"].values   # <<< add this
-                    df.to_csv(out_dir / (Path(predict_input_path).stem + f"_predicted{method_suffix}.csv"), index=False)
+                    if out_path_gate: # 20260420 Export the Gate-passed only list, so no need to dig into full df output
+                        gated_df = df[df["pred_ok"] == True].copy()
+                        gated_df.to_csv(out_path_gate, index=False)
+                        logger.log(f"[Predict][gate] Scans passed gated predictions is saved → {out_path_gate} ,( count = {len(gated_df)} )")
+                    # For generating simple gated count table: composition, n (convenient passed class count)
                     pred_df_for_report = pred_df[pred_df["pred_ok"]].copy()
-                    #convenient passed class count
-                    # Save a simple gated count table: composition, n
                     gate_counts = (pred_df_for_report
                                 .groupby("pred_label", dropna=False)
                                 .size()
@@ -9495,8 +8171,7 @@ def open_ml_analysis_window():
                                 .sort_values("count", ascending=False))
                     gate_counts_path = (out_dir / (Path(predict_input_path).stem + "_PG_counts.csv")).as_posix()
                     gate_counts.to_csv(gate_counts_path, index=False)
-                    if logger: logger.log(f"[Predict][gate] wrote gated counts → {gate_counts_path}")
-
+                    if logger: logger.log(f"[ML][Predict][gate] Summary of passed class count is saved → {gate_counts_path}")
 
                 except Exception as _e:
                     # Gate skipped → just report everything
@@ -9505,9 +8180,8 @@ def open_ml_analysis_window():
             else:
                 pred_df_for_report = pred_df.copy()
 
-            #
             # --- Harmonize probability vectors so all rows have same length ---
-            import json, ast
+            import ast
             def _parse_vec(x):
                 s = str(x).strip()
                 if s in ("", "nan", "None"):
@@ -9537,7 +8211,18 @@ def open_ml_analysis_window():
                             pred_df_for_report[c] = 0.0
 
             # --- Reporter: summarize & write (keep run_sum as dict) ---
-            params = ReportParams(tau=0.60, margin=0.05, topk=5, sample_cols=("experiment_title", "sample_name"))
+            if not enable_thresh_var.get():
+                logger.log(f"[ML][Predict] Thresholding is disabled by default")
+                print(f"[ML][Predict] Thresholding disabled by default")
+            else:
+                logger.log(f"[ML][Predict] Thresholding is enabled: tau {thresh_val_var.get()}, margin {margin_val_var.get()}")
+                print(f"[ML][Predict] Thresholding is enabled: tau {thresh_val_var.get()}, margin {margin_val_var.get()}")
+            params = ReportParams(
+                tau=float(thresh_val_var.get()) if enable_thresh_var.get() else 0.0,
+                margin=float(margin_val_var.get()) if enable_thresh_var.get() else 1.0,
+                topk=5,
+                sample_cols=("experiment_title", "sample_name")
+            )   
             pred_rows, class_sum, by_sample_sum, run_sum = summarize_predictions(
                 pred_df_for_report,
                 class_names=class_names if class_names else None,
@@ -9557,64 +8242,34 @@ def open_ml_analysis_window():
             )
 
             # Save tables (all rows; gated-only if present) + user popup
+            # This one is intact prediction table
             out_path_all = (out_dir / (Path(predict_input_path).stem + f"_predicted{method_suffix}.csv")).as_posix()
             df.to_csv(out_path_all, index=False)
             if out_path_gate and "pred_ok" in df.columns and df["pred_ok"].any():
                 # already written above when gate ran; keep this guard for safety
                 pass
-
             ms1_line  = f"MS1 feature (expected by model): {'YES' if ms1_used else 'NO'}"
             gate_line = f"Precursor gate: {'ON' if gate_on else 'OFF'}" + (f" ({int(gate_ppm)} ppm)" if gate_on else "")
             try:
                 show_prediction_summary_popup(root, run_summary=run_sum, artifacts=arts, class_summary_df=class_sum)
             except Exception as _e:
                 print("[warn] Failed to show summary popup:", _e)
-
             extra = f"\nGated table:\n{out_path_gate}" if (out_path_gate and os.path.exists(out_path_gate)) else ""
-            messagebox.showinfo("Prediction Complete", f"{ms1_line}\n{gate_line}\n\nPacked into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra}")
-            messagebox.showinfo("Prediction Complete",
-                f"MS1 feature (expected by model): {'YES' if ms1_used else 'NO'}\n"
-                f"Precursor gate: {'ON' if gate_on else 'OFF'}{(' ('+str(gate_ppm)+' ppm)') if gate_on else ''}\n\n"
-                f"Packed into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra}"
-            )
-
             ## --- END: Prediction summary integration ---
-            #out_path = os.path.splitext(predict_input_path)[0] + "_predicted.csv"
-            #df.to_csv(out_path, index=False)
-            messagebox.showinfo("Prediction Complete", f"Predictions saved to:\n{out_path_all}")
+            if logger: logger.log(f"[ML][Predict][info] Prediction Complete. {ms1_line} {gate_line} {out_dir}")
+            messagebox.showinfo("Prediction Complete", f"{ms1_line}\n{gate_line}\n\nPacked into folder:\n{out_dir}\n\nMain table:\n{out_path_all}{extra}")
+
         except Exception as e:
+            if logger: logger.log(f"[ML][Predict][Failed] Prediction Failed due to {str(e)}")
             messagebox.showerror("Prediction Failed", str(e))
-
-    #20250915 replace extract_fragment_masses for csv-only ion list
-    # --- replace extract_fragment_masses(...) with this ---
-    def read_fragment_masses_any(ion_path: str, sheet_name: str = "ionlist"):
-        """
-        Load fragment masses from either CSV/TSV (expects a 'mass' column)
-        or from an Excel sheet (default 'ionlist').
-        """
-        if not ion_path or not os.path.exists(ion_path):
-            raise FileNotFoundError(f"Ion list not found: {ion_path}")
-
-        ext = os.path.splitext(ion_path)[1].lower()
-        if ext in (".csv", ".tsv", ".txt"):
-            # try TSV if it looks like one; else default to CSV
-            sep = "\t" if ext == ".tsv" else ","
-            df = pd.read_csv(ion_path, sep=sep)
-            if "mass" not in df.columns:
-                raise ValueError(f"Ion list '{ion_path}' must contain a 'mass' column.")
-            return df["mass"].dropna().astype(float).tolist()
-        else:
-            xls = pd.ExcelFile(ion_path, engine="openpyxl")
-            ion_df = xls.parse(sheet_name or "ionlist")
-            if "mass" not in ion_df.columns:
-                raise ValueError(f"Ion sheet '{sheet_name}' missing 'mass' column.")
-            return ion_df["mass"].dropna().astype(float).tolist()
+    # Run prediction block ends
+    # ==========================
 
     def _short_id(s: str) -> str:
         import hashlib
         return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:8]
 
-    #20250915 
+    # 20260418 code review: possible for CLI implementation in future. Built 20250915 
     def create_unlabeled_from_method(method_path: str, default_ppm: int | None = None) -> str:
         import json, hashlib, pandas as pd, os
         with open(method_path, "r", encoding="utf-8") as f:
@@ -9629,33 +8284,33 @@ def open_ml_analysis_window():
         ppm       = default_ppm or ionblock.get("ppm_tolerance") or 20
 
         # If converted_csv missing or file not found -> ask user and persist back
-        raw_csv_p = to_native_path(raw_csv_s) if raw_csv_s else None
+        raw_csv_p = pathcanon.to_native_path(raw_csv_s) if raw_csv_s else None
         if not raw_csv_p or not raw_csv_p.exists():
             picked = _pick_file_cli_or_gui("Select the *converted* CSV (ms2_*.csv)")
             if not picked:
                 raise FileNotFoundError("No converted CSV provided.")
-            raw_csv_p = to_native_path(picked)
+            raw_csv_p = pathcanon.to_native_path(picked)
             # write back to method.json in POSIX form
-            parents["converted_csv"] = to_posix_str(raw_csv_p)
+            parents["converted_csv"] = pathcanon.to_posix_str(raw_csv_p)
             m["parents"] = parents
             with open(method_path, "w", encoding="utf-8") as f:
                 json.dump(m, f, indent=2, ensure_ascii=False)
 
         # Validate ion list path
-        ion_path_p = to_native_path(ion_path_s)
+        ion_path_p = pathcanon.to_native_path(ion_path_s)
         if not ion_path_p.exists():
             picked = _pick_file_cli_or_gui("Select ion list (CSV/XLSX)",
                                         (("CSV", "*.csv"), ("Excel", "*.xlsx;*.xls"), ("All files", "*.*")))
             if not picked:
                 raise FileNotFoundError("No ion list provided.")
-            ion_path_p = to_native_path(picked)
-            ionblock["path"] = to_posix_str(ion_path_p)
+            ion_path_p = pathcanon.to_native_path(picked)
+            ionblock["path"] = pathcanon.to_posix_str(ion_path_p)
             m["ionlist"] = ionblock
             with open(method_path, "w", encoding="utf-8") as f:
                 json.dump(m, f, indent=2, ensure_ascii=False)
 
         # Load fragments (your existing smart loader)
-        frags = read_fragment_masses_any(ion_path_p.as_posix(), sheet_name=ion_sheet)
+        frags = extract_fragment_masses(ion_path_p.as_posix(), sheet_name=ion_sheet)
 
         # Use your existing extractor
         feature_df = extract_ion_intensities(raw_csv_p.as_posix(), frags, ppm=float(ppm))
@@ -9677,20 +8332,20 @@ def open_ml_analysis_window():
         feature_df.to_csv(out_path, index=False)
         return out_path.as_posix()
 
-    #20250929 ver
+    # 20260420 Code review
     # --- creating unlabeled datasets (PL or manual) ---
 
-    def extract_fragment_masses(path, sheet_name="ionlist"):
+    def extract_fragment_masses(ion_path: str, sheet_name : str ="ionlist"):
         """
         Load a column of fragment masses from either:
         • Excel: prefers a sheet named 'ionlist' (or the provided sheet_name)
         • CSV:   uses a column named 'mass' (case-insensitive)
         Returns: list[float]
         """
-        import pandas as pd
-        p = (path or "").strip()
-        if not p:
-            return []
+
+        p = (ion_path or "").strip()
+        if not p or not os.path.exists(p):
+            raise FileNotFoundError(f"Ion list not found: {p}") 
 
         if p.lower().endswith((".xlsx", ".xls")):
             xls = pd.ExcelFile(p, engine="openpyxl")
@@ -9728,10 +8383,8 @@ def open_ml_analysis_window():
         Read converted MS2 file (tab-separated but *.csv) and
         return a DataFrame with: protonatedmass, MS2scan_no, and one column per ion.
         """
-        import numpy as np
-        import pandas as pd
-
-        df = pd.read_csv(tsv_like_path, sep="\t")  # your converter writes TSV
+        #20260413 code review: use main function for reading tsv. Need test
+        df = robust_read_csv(tsv_like_path, prefer_tab=True) #read sep="\t" first 
         # tolerate either literal lists or python-literal strings in peaklist/peakintensity
         def _parse_list(x):
             if isinstance(x, (list, tuple)):
@@ -9775,130 +8428,23 @@ def open_ml_analysis_window():
                     feature_row[str(target)] = 1.0  # keep "1.0" default you were using
 
             out_rows.append(feature_row)
-
         return pd.DataFrame(out_rows)
-
-    #20251001 extra fix of insilico csv gate
-    # --- [PREDICTION: precursor-gate helpers] ------------------------------------
-    import re
-    import pandas as _pd
-    import numpy as _np
-
-    def _ppm_delta(obs, theo):
-        if theo == 0 or _np.isnan(theo) or _np.isnan(obs): 
-            return _np.nan
-        return (float(obs) - float(theo)) / float(theo) * 1e6
-
-    # Parse flexible composition strings e.g. "H7N2F1S1A1s1p0", "F1H7N2S1A1", case-insensitive,
-    # order-agnostic; missing parts -> 0. Supports A (HexA), s (SO3), p (PO3H).
-    _comp_pat = re.compile(r'(F|H|N|S|G|KDN|A|s|p)\s*([0-9]+)', re.I)
-
-    def _canonicalize_comp_string(s: str) -> str:
-        if not isinstance(s, str) or not s.strip():
-            return ""
-        counts = {"F":0,"H":0,"N":0,"S":0,"G":0,"KDN":0,"A":0,"s":0,"p":0}
-        for k,v in _comp_pat.findall(s):
-            k = "KDN" if k.upper()=="KDN" else k  # keep KDN token
-            counts[k] = counts.get(k, 0) + int(v)
-        # canonical short form: F,H,N,S,G,KDN,A,s,p (omit zeros)
-        parts = []
-        for key in ("F","H","N","S","G","KDN","A","s","p"):
-            n = counts.get(key,0)
-            if n>0: parts.append(f"{key}{n}")
-        return "".join(parts)
-
-    def _load_insilico_for_gate(path: str) -> pd.DataFrame:
-        """
-        Accepts:
-        - New wide CSV: Hex,HexNAc,NeuAc,NeuGc,KDN,Fuc[,HexA,SO3,PO3H], Mass
-        - Legacy 2-col: comp_str, Mass
-        - Already-canonical: composition, theoretical_mass
-        Returns a DataFrame with at least: composition (canonical str), theoretical_mass (float)
-        """
-        df = pd.read_csv(path)
-        cols = {c.lower(): c for c in df.columns}
-
-        # Case 1: already has 'composition' + 'theoretical_mass' (or 'mass')
-        if "composition" in cols and ("theoretical_mass" in cols or "mass" in cols):
-            comp_col = cols["composition"]
-            mass_col = cols.get("theoretical_mass", cols.get("mass"))
-            out = pd.DataFrame({
-                "composition": df[comp_col].astype(str).map(_canonicalize_comp_string),
-                "theoretical_mass": pd.to_numeric(df[mass_col], errors="coerce")
-            })
-            return out.dropna(subset=["theoretical_mass"])
-
-        # Case 2: wide numeric columns
-        wide_keys = ["hex","hexnac","neuac","neugc","kdn","fuc"]
-        if all(k in cols for k in wide_keys) and ("mass" in cols or "theoretical_mass" in cols):
-            mass_col = cols.get("theoretical_mass", cols.get("mass"))
-            # optional modifiers
-            hexA = df[cols.get("hexa","HexA")] if "hexa" in cols else 0
-            so3  = df[cols.get("so3","SO3")]   if "so3"  in cols else 0
-            po3h = df[cols.get("po3h","PO3H")] if "po3h" in cols else 0
-            # build canonical label
-            def _build_row(row):
-                parts = []
-                if row["Fuc"]>0:    parts.append(f"F{int(row['Fuc'])}")
-                if row["Hex"]>0:    parts.append(f"H{int(row['Hex'])}")
-                if row["HexNAc"]>0: parts.append(f"N{int(row['HexNAc'])}")
-                if row["NeuAc"]>0:  parts.append(f"S{int(row['NeuAc'])}")
-                if row["NeuGc"]>0:  parts.append(f"G{int(row['NeuGc'])}")
-                if row["KDN"]>0:    parts.append(f"KDN{int(row['KDN'])}")
-                A = int(row.get("HexA",0)); s = int(row.get("SO3",0)); p = int(row.get("PO3H",0))
-                if A>0: parts.append(f"A{A}")
-                if s>0: parts.append(f"s{s}")
-                if p>0: parts.append(f"p{p}")
-                return "".join(parts)
-            tmp = df.rename(columns={
-                cols["hex"]:"Hex", cols["hexnac"]:"HexNAc", cols["neuac"]:"NeuAc",
-                cols["neugc"]:"NeuGc", cols["kdn"]:"KDN", cols["fuc"]:"Fuc"
-            }).copy()
-            tmp["HexA"] = pd.to_numeric(hexA, errors="coerce").fillna(0).astype(int)
-            tmp["SO3"]  = pd.to_numeric(so3,  errors="coerce").fillna(0).astype(int)
-            tmp["PO3H"] = pd.to_numeric(po3h, errors="coerce").fillna(0).astype(int)
-            out = pd.DataFrame({
-                "composition": tmp.apply(_build_row, axis=1),
-                "theoretical_mass": pd.to_numeric(tmp[mass_col], errors="coerce")
-            })
-            return out.dropna(subset=["theoretical_mass"])
-
-        # Case 3: legacy 2-column like "(H,N,S,G,KDN,F),Mass"
-        if len(df.columns) == 2:
-            comp_col, mass_col = df.columns[0], df.columns[1]
-            comp = df[comp_col].astype(str).map(_canonicalize_comp_string)
-            mass = pd.to_numeric(df[mass_col], errors="coerce")
-            return pd.DataFrame({"composition": comp, "theoretical_mass": mass}).dropna(subset=["theoretical_mass"])
-
-        # Fallback → raise a clear message the UI can show
-        raise ValueError("In-silico CSV must have composition/theoretical_mass OR standard wide columns.")
-
-
-    #20251001 fix unbound error and etc
+    # ===
+    # 20260420 code review, refactored by Claude Code with supervision from Henry.  
     def create_unlabeled_dataset():
         """
         Builds unlabeled feature CSVs for each eligible sample in an experiment JSON.
-        Eligibility:
-        - has a converted MS2 file at samples[*].csv
-        - AND has either samples[*].excel OR samples[*].ionlist_path (+ optional ion_sheet)
+        Supports both v1 (samples as list) and legacy (samples as dict) formats.
+        Eligibility per sample:
+        - has a converted MS2 file (csv key or from method JSON inputs)
+        - AND has an ion source (excel, ionlist_path, or from method JSON inputs)
         """
-        import re
-        from pathlib import Path
+        import hashlib
 
+        # --- Feature: Input source (experiment JSON via file dialog) ---
         exp_path = filedialog.askopenfilename(filetypes=[("Experiment JSON", "*.json")])
         if not exp_path:
             return
-
-        def _sample_in_filename(sample_id, path):
-            if not path:
-                return False
-            name = os.path.basename(path).lower()
-            must_have = []
-            for tok in sample_id.lower().split("_"):
-                if tok in {"u937", "cells", "ng"}:
-                    continue
-                must_have.append(tok)
-            return all(tok in name for tok in must_have)
 
         try:
             with open(exp_path, "r", encoding="utf-8") as f:
@@ -9907,217 +8453,244 @@ def open_ml_analysis_window():
             messagebox.showerror("Failed to Load JSON", str(e))
             return
 
+        # --- Feature: PPM source (ask user explicitly) ---
         ppm_value = simpledialog.askinteger(
             "PPM Tolerance", "Enter PPM tolerance (e.g., 20):", minvalue=1, maxvalue=200
         )
         if ppm_value is None:
             return
 
+        # --- Feature: JSON format (support both v1 list and legacy dict) ---
+        raw_samples = exp.get("samples") or {}
+        exp_base_dir = os.path.dirname(exp_path)
+
+        if isinstance(raw_samples, list):
+            # v1 format: list of dicts with "sample_name" and optionally "methods"
+            samples = {}
+            for s in raw_samples:
+                if not isinstance(s, dict):
+                    continue
+                sname = s.get("sample_name")
+                if not sname:
+                    continue
+                # start with any flat keys present
+                info = {}
+                for k in ("csv", "excel", "ionlist_path", "ion_sheet"):
+                    if s.get(k):
+                        info[k] = s[k]
+                # v1: try to resolve file paths from method JSON if flat keys are missing
+                if (not info.get("csv") or not (info.get("excel") or info.get("ionlist_path"))):
+                    methods = s.get("methods") or []
+                    for m in methods:
+                        mref = m.get("method_ref") or {}
+                        mpath = mref.get("path") or m.get("path")
+                        if not mpath or not isinstance(mpath, str):
+                            continue
+                        # resolve relative to experiment JSON folder
+                        if not os.path.isabs(mpath):
+                            mpath = os.path.normpath(os.path.join(exp_base_dir, mpath))
+                        if not os.path.exists(mpath):
+                            continue
+                        try:
+                            md = load_typed_json(mpath, expected_type=JSON_TYPE_METHOD, allow_legacy=True, context="[Unlabeled] ")
+                            _, _, tree_entry, _ = normalize_method_json(md, mpath, base_dir=os.path.dirname(mpath))
+                            if not info.get("csv") and tree_entry.get("csv"):
+                                info["csv"] = tree_entry["csv"]
+                            if not (info.get("excel") or info.get("ionlist_path")):
+                                info["ionlist_path"] = tree_entry.get("ionlist_path")
+                                info["excel"] = tree_entry.get("excel")
+                            if tree_entry.get("ion_sheet"):
+                                info["ion_sheet"] = tree_entry["ion_sheet"]
+                        except Exception as e:
+                            logger.log(f"[Unlabeled] Failed to load method for {sname}: {e}")
+                        break  # use first valid method
+                info["_v1_entry"] = s  # keep reference for writeback
+                samples[sname] = info
+        else:
+            # legacy format: dict keyed by sample name
+            samples = raw_samples
+
+        # --- Feature: UID helper ---
+        def _short_id(s: str) -> str:
+            return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:8]
+
+        exp_title = ""
+        if isinstance(exp.get("experiment"), dict):
+            exp_title = exp["experiment"].get("title", "")
+        elif isinstance(exp.get("experiment"), str):
+            exp_title = exp["experiment"]
+        exp_id = _short_id(exp_title)
+
+        # --- Batch processing ---
         made = 0
         missing = []
         seen_out = set()
         made_paths = []
 
-        for sample_id, sample_info in (exp.get("samples") or {}).items():
+        for sample_id, sample_info in samples.items():
             raw_csv   = sample_info.get("csv")
             ion_src   = sample_info.get("excel") or sample_info.get("ionlist_path")
             ion_sheet = sample_info.get("ion_sheet") or "ionlist"
 
-            # 1) presence check first (avoids calling basename on None)
+            # --- Feature: Missing file handling (skip and report) ---
             if not raw_csv or not ion_src:
-                missing.append(sample_id)
+                missing.append(f"{sample_id} (csv={'yes' if raw_csv else 'no'}, ion={'yes' if ion_src else 'no'})")
+                logger.log(f"[Unlabeled] Skipped {sample_id}: csv={bool(raw_csv)}, ion={bool(ion_src)}")
                 continue
 
-            # 2) filename sanity check (optional)
-            if not _sample_in_filename(sample_id, raw_csv):
-                missing.append(f"{sample_id} (csv looks mismatched: {os.path.basename(raw_csv)})")
+            if not os.path.exists(raw_csv):
+                missing.append(f"{sample_id} (csv not found: {os.path.basename(raw_csv)})")
+                logger.log(f"[Unlabeled] Skipped {sample_id}: csv not found at {raw_csv}")
+                continue
+
+            if not os.path.exists(ion_src):
+                missing.append(f"{sample_id} (ion list not found: {os.path.basename(ion_src)})")
+                logger.log(f"[Unlabeled] Skipped {sample_id}: ion list not found at {ion_src}")
                 continue
 
             try:
-                # fragment list
+                # --- Feature: Ion loader (extract_fragment_masses — flexible) ---
                 ion_list = extract_fragment_masses(ion_src, sheet_name=ion_sheet)
                 if not ion_list:
                     raise ValueError(f"No 'mass' column found in {os.path.basename(ion_src)}")
+                logger.log(f"[Unlabeled] {sample_id}: loaded {len(ion_list)} fragment masses")
 
-                # features
+                # --- Feature: Feature extractor (extract_ion_intensities) ---
                 feats = extract_ion_intensities(raw_csv, ion_list, ppm=ppm_value)
 
-                # 3) output next to CSV (define out_dir/base *inside* the loop)
+                # --- Feature: UID generation (exp:sample:scan provenance) ---
+                samp_id = _short_id(sample_id)
+                if "MS2scan_no" in feats.columns:
+                    feats = feats.copy()
+                    scan_str = feats["MS2scan_no"].astype(str).str.zfill(6)
+                    feats.insert(0, "UID", scan_str.map(lambda x: f"{exp_id}:{samp_id}:{x}"))
+
+                # --- Feature: Output naming ({csv_stem}_unlabeled_ppm{ppm}.csv) ---
                 out_dir = Path(raw_csv).resolve().parent
                 base    = Path(raw_csv).stem
                 out_path = out_dir / f"{base}_unlabeled_ppm{ppm_value}.csv"
 
-                # collision guard (two samples may share same CSV)
+                # --- Feature: Collision guard (append sample_id if path reused) ---
                 if str(out_path) in seen_out:
                     safe_id = re.sub(r'[^A-Za-z0-9._-]+', '_', sample_id)
                     out_path = out_dir / f"{base}__{safe_id}_unlabeled_ppm{ppm_value}.csv"
 
                 # write
                 feats.to_csv(str(out_path), index=False, encoding="utf-8")
+                logger.log(f"[Unlabeled] {sample_id}: saved → {out_path} ({len(feats)} rows)")
 
-                # remember for this sample and for duplicate guard
+                # --- Feature: Write back to JSON (record unlabeled_csv path) ---
                 sample_info["unlabeled_csv"] = str(out_path)
+                # for v1 format, also update the original list entry
+                if "_v1_entry" in sample_info:
+                    sample_info["_v1_entry"]["unlabeled_csv"] = str(out_path)
+
                 seen_out.add(str(out_path))
                 made_paths.append(str(out_path))
                 made += 1
 
             except Exception as e:
-                print(f"[ERROR] Unlabeled build failed for '{sample_id}': {e}")
+                missing.append(f"{sample_id} (error: {e})")
+                logger.log(f"[Unlabeled] {sample_id} failed: {e}")
 
-        # tell user what happened
+        # --- Feature: Completion report (messagebox + logger) ---
         if made == 0:
             messagebox.showwarning(
                 "No Samples Processed",
                 "No eligible samples were found in this experiment file.\n"
-                "Tip: each sample needs 'csv' + ('excel' or 'ionlist_path')."
+                "Tip: each sample needs a converted CSV + an ion list (Excel or CSV)."
             )
+            logger.log(f"[Unlabeled] 0 samples processed from {exp_path}")
         else:
             # persist updated experiment file with recorded unlabeled paths
             try:
+                # clean up internal keys before saving
+                if isinstance(raw_samples, list):
+                    for s in raw_samples:
+                        if isinstance(s, dict):
+                            s.pop("_v1_entry", None)
                 with open(exp_path, "w", encoding="utf-8") as f:
                     json.dump(exp, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
+                logger.log(f"[Unlabeled] Updated experiment JSON: {exp_path}")
+            except Exception as e:
+                logger.log(f"[Unlabeled] Failed to update experiment JSON: {e}")
+
             msg = [f"Created {made} unlabeled dataset(s)."]
             if missing:
-                msg.append(f"Skipped (missing/mismatch): {', '.join(missing)}")
+                msg.append(f"\nSkipped ({len(missing)}):")
+                for m in missing[:10]:
+                    msg.append(f"  - {m}")
+                if len(missing) > 10:
+                    msg.append(f"  ... and {len(missing) - 10} more")
             messagebox.showinfo("Done", "\n".join(msg))
+            logger.log(f"[Unlabeled] Done: {made} created, {len(missing)} skipped")
 
-    # Predict tab state
-    model_file_path = None
-    predict_input_path = None
-
-
-
-    train_csv_path = None
-    linked_exp_json = None
-    test_split_var = tk.DoubleVar(value=0.25)
-    min_samples_var = tk.IntVar(value=5)
-
+    # ML Analysis window init
     subwin = tk.Toplevel(root)
     subwin.title("ML Analysis")
-    subwin.geometry("680x560")
-
+    subwin.geometry("640x496")
     notebook = ttk.Notebook(subwin)
     notebook.pack(fill="both", expand=True)
 
-    # ... [no changes below this line: GUI layout remains as-is]
-
-
-    
     # --- Tab 1: Train Model ---
     train_tab = ttk.Frame(notebook)
     notebook.add(train_tab, text="Train Model")
-
+    # Step 1: load trainable dataset
     tk.Label(train_tab, text="Step 1: Load Trainable Dataset (.csv)").grid(row=0, column=0, sticky="w", padx=10, pady=5)
     train_load_button = tk.Button(train_tab, text="Select CSV File", command=select_train_csv)
     train_load_button.grid(row=0, column=1, padx=5, pady=5)
-    # flags (keep existing variables; only move the widgets)
-    is_pseudolabel_var = tk.BooleanVar(value=False)
-    include_mass_train_var = tk.BooleanVar(value=False)
-
-    # --- NEW: options row between Step 1 and Step 2 ---
+    # options rows, init the value here
+    is_pseudolabel_var = tk.BooleanVar(value=False) #default to False
+    include_mass_train_var = tk.BooleanVar(value=False) #default to False
+    # option rows: CGA dataset / Use mass feature for training
     options_row = ttk.Frame(train_tab)
     options_row.grid(row=1, column=0, columnspan=6, sticky="w", padx=10, pady=(0, 5))
-
-    ttk.Checkbutton(
-        options_row,
-        text="CGA dataset?",
-        variable=is_pseudolabel_var
-    ).pack(side="left", padx=(0, 16))
-
-    ttk.Checkbutton(
-        options_row,
-        text="Use protonated mass as a model feature (Non-glycan = 0)",
-        variable=include_mass_train_var
-    ).pack(side="left", padx=(0, 16))
-
-
-
+    #CGA checker, does nothing for now
+    tk.Checkbutton(options_row, text="CGA dataset?", variable=is_pseudolabel_var).pack(side="left", padx=(0, 16))
+    #mass feature training
+    tk.Checkbutton(options_row, text="Use protonated mass as a model feature (Non-glycan = 0)", variable=include_mass_train_var).pack(side="left", padx=(0, 16))
+    # Step 2: choose label column
     tk.Label(train_tab, text="Step 2: Select Label Column").grid(row=2, column=0, sticky="w", padx=10, pady=5)
     label_dropdown = ttk.Combobox(train_tab, values=['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID'])
     label_dropdown.set("Structure")
     label_dropdown.grid(row=2, column=1, padx=5, pady=5)
-
+    # Step 3: choose classifier 
     tk.Label(train_tab, text="Step 3: Choose Classifier").grid(row=3, column=0, sticky="w", padx=10, pady=5)
-    classifier_var = tk.StringVar(value="rf")
-    rf_button = tk.Radiobutton(train_tab, text="Random Forest (✔ functional)", variable=classifier_var, value="rf")
-    xgb_button = tk.Radiobutton(train_tab, text="XGBoost (placeholder)", variable=classifier_var, value="xgb")
-    #svm_button = tk.Radiobutton(train_tab, text="SVM (placeholder)", variable=classifier_var, value="svm")
-    #knn_button = tk.Radiobutton(train_tab, text="KNN (placeholder)", variable=classifier_var, value="knn")
-
-    rf_button.grid(row=3, column=1, sticky="w")
-    xgb_button.grid(row=4, column=1, sticky="w")
+    label_dropdown = ttk.Combobox(train_tab, values=['Random Forest', ' Coming soon'])
+    label_dropdown.set("Random Forest")
+    label_dropdown.grid(row=3, column=1, padx=5, pady=5)
+    # old tk button for model selection - buggy : I'd rather changing it to dropdown
+    #classifier_var = tk.IntVar(value=0)
+    #rf_button = tk.Radiobutton(train_tab, text="Random Forest (✔ functional)",variable=classifier_var, value=0)       
+    #xgb_button = tk.Radiobutton(train_tab, text="XGBoost (placeholder)",variable=classifier_var, value=1) 
+    #svm_button = ttk.Radiobutton(train_tab, text="SVM (placeholder)", variable=classifier_var, value="svm")
+    #knn_button = ttk.Radiobutton(train_tab, text="KNN (placeholder)", variable=classifier_var, value="knn")
+    # 20260418 code review: Set default button status. Tkinter can't automatically bind. Change from stringvar to intvar to see if it fixes
+    #classifier_var.set(0)     
+    #rf_button.grid(row=3, column=1, sticky="w")
+    #xgb_button.grid(row=4, column=1, sticky="w")
     #svm_button.grid(row=5, column=1, sticky="w")
     #knn_button.grid(row=6, column=1, sticky="w")
-
-
-
-
-
-
-   # ---- ML PARAM PANEL (paste under Step 3, before Step 4) ----
-    effective_ml_params = {}  # nonlocal capture so train_model() can see it if desired
-
-    def _get_current_context():
-        # We prefer the .exp.json that was auto-detected when the user picked the CSV
-        exp_json_path = linked_exp_json  # may be None until a CSV has been picked
-
-        # Derive a friendly experiment title if we have the exp json
-        exp_title = None
-        try:
-            if exp_json_path and os.path.exists(exp_json_path):
-                with open(exp_json_path, "r", encoding="utf-8") as _f:
-                    _exp = json.load(_f)
-                exp_title = _exp.get("experiment")
-        except Exception:
-            pass
-
-        # We don’t strictly need a method_json here; keep None (panel can still load from any file)
-        method_json_path = None
-
-        return {
-            "experiment_title": exp_title,
-            "exp_json_path": exp_json_path,
-            "method_json_path": method_json_path,
-        }
-
-    def _on_effective_params_ready(merged):
-        # Capture for use by train_model() or anywhere else in this window
-        nonlocal effective_ml_params
-        effective_ml_params = merged
-        print("[ML PARAMS] effective parameters now in memory:", effective_ml_params)
-
-    # Build the panel into the Train tab (it creates its own labeled frame)
-    build_ml_params_panel(
-        parent=train_tab,
-        get_current_context=_get_current_context,
-        on_effective_params_ready=_on_effective_params_ready,
-    )
-
-    ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
-
-
-    # then bump your existing "Step 4: Train/Test Parameters" and below down to start at row=7 or 8
-    
+    # Step 4: Train/Test Parameters
     tk.Label(train_tab, text="Step 4: Train/Test Parameters").grid(row=7, column=0, sticky="w", padx=10, pady=5)
-    ttk.Label(train_tab, textvariable=ml_summary_var).grid(row=8, column=0, sticky="w", padx=10, pady=(0,6))
+    ttk.Label(train_tab, textvariable=ml_summary_var, wraplength=400).grid(row=8,column=0, columnspan=6, sticky="w", padx=10, pady=(0,6))  
     tk.Button(train_tab, text="Set Parameters / Train the Model", command=open_train_settings).grid(row=7, column=1, padx=5, pady=5)
-
+    # Step 5: Train model
     train_button = tk.Button(train_tab, text="Train Model", command=train_model, bg="#CCE5FF")
     train_button.grid(row=9, column=0, columnspan=2, pady=10)
-
+    # Info field, a intermediate plan before ML workflow is integrated to prepare dataset window (version 1.2+)
     tk.Label(train_tab, text="Trainable File Info (Origin Tracking)").grid(row=10, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
     origin_info = tk.Text(train_tab, height=4, width=70, state="disabled", wrap="word")
     origin_info.grid(row=11, column=0, columnspan=2, padx=10, pady=5)
-    # -- Training tab and prediction tab UI (end reminder buttons) --
+    # Extra: pool datasets for training
     tk.Label(train_tab, text="Combine Datasets for Training").grid(row=12, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
     tk.Button(train_tab, text="Select Datasets", command=lambda: combine_trainable_datasets_ui(root)).grid(row=12, column=1, columnspan=2, padx=10, pady=5)
+
     # --- Tab 2: Predict ---
     predict_tab = ttk.Frame(notebook)
     notebook.add(predict_tab, text="Predict")
 
-    tk.Label(predict_tab, text="Step 1: Load Trained Model (.joblib/.pkl)").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+    tk.Label(predict_tab, text="Step 1: Load Trained Model (.skops/.joblib/.pkl)").grid(row=0, column=0, sticky="w", padx=10, pady=5)
     predict_model_button = tk.Button(predict_tab, text="Select Model File", command=select_model_file)
     predict_model_button.grid(row=0, column=1, padx=5, pady=5)
 
@@ -10161,22 +8734,30 @@ def open_ml_analysis_window():
         .grid(row=2, column=2, padx=(8,0), sticky="w")
 
     pred_gate.columnconfigure(0, weight=1)
-
     # Run button goes AFTER the gate
     _next = predict_tab.grid_size()[1]
     predict_button = tk.Button(predict_tab, text="Run Prediction", bg="#D5F5E3", command=run_prediction)
     predict_button.grid(row=_next, column=0, columnspan=2, pady=10)
-
     # Combine section follows
     _next = predict_tab.grid_size()[1]
-    tk.Label(predict_tab, text="(🔜) Combine Datasets for Prediction").grid(row=_next, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
-    tk.Button(predict_tab, text="[Placeholder] Combine Datasets").grid(row=_next+1, column=0, columnspan=2, padx=10, pady=5)
-    
-
+    # Future plan: for lazy guys doing 1 prediction on many datasets (need to share same feature matrix columns)
+    #tk.Label(predict_tab, text="(🔜) Combine Datasets for Prediction").grid(row=_next, column=0, columnspan=2, sticky="w", padx=10, pady=(15, 5))
+    #tk.Button(predict_tab, text="[Placeholder] Combine Datasets").grid(row=_next+1, column=0, columnspan=2, padx=10, pady=5)
     close_button = tk.Button(subwin, text="Close", command=subwin.destroy)
     close_button.pack(pady=5)
 
+# main GUI
+#icon
+ico_path = os.path.join(os.path.dirname(__file__), 'GlycoMSPlogo.ico')
+png_path = os.path.join(os.path.dirname(__file__), 'GlycoMSPlogo.png')
 
+# Initialize GUI
+root = tk.Tk()
+if platform.system() == "Windows" and os.path.exists(ico_path):
+    root.iconbitmap(default=ico_path)
+elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
+    icon_img = tk.PhotoImage(file=png_path)
+    root.iconphoto(True, icon_img)
 
 def on_closing():
     if messagebox.askokcancel("Quit", "Do you really want to quit?"):
@@ -10192,58 +8773,7 @@ def save_log_to_file():
         logger.save(filename, include_debug=True)
         messagebox.showinfo("Log Saved", f"Log saved to:\n{filename}")
 
-
-#icon
-ico_path = os.path.join(os.path.dirname(__file__), 'GlycoMSPlogo.ico')
-png_path = os.path.join(os.path.dirname(__file__), 'GlycoMSPlogo.png')
-
-
-
-
-# Initialize GUI
-root = tk.Tk()
-#root.iconbitmap(default=ico_path)
-if platform.system() == "Windows" and os.path.exists(ico_path):
-    root.iconbitmap(default=ico_path)
-elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
-    icon_img = tk.PhotoImage(file=png_path)
-    root.iconphoto(True, icon_img)
-    
-root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.09 Build 20260330 core v1.1")
-root.geometry("800x480")
-root.minsize(800, 480)
-
-
-
-# Buttons
-button_frame = tk.Frame(root)
-button_frame.pack(pady=10)
-
-tk.Button(button_frame, text="Select Raw File", command=lambda: select_file("raw")).grid(row=0, column=0, padx=5)
-tk.Button(button_frame, text="Select mzML File", command=lambda: select_file("mzml")).grid(row=0, column=1, padx=5)
-#move csv and excel selection to data explorer
-#tk.Button(button_frame, text="Select CSV File", command=lambda: select_file("csv")).grid(row=0, column=2, padx=5)
-#tk.Button(button_frame, text="Select Excel File", command=lambda: select_file("excel")).grid(row=0, column=3, padx=5)
-tk.Button(button_frame, text="Clear All", command=clear_files).grid(row=0, column=2, padx=5)
-tk.Button(button_frame, text="About", command=open_about_window).grid(row=0, column=3, padx=5)
-tk.Button(root, text="Save Log", command=save_log_to_file).pack(pady=5)
-#tk.Button(root, text="About", command=open_about_window).pack(pady=5)
-# Text widget to log selected files
-text_widget = tk.Text(root, height=15, width=80)
-text_widget.pack(pady=10)
-
-
-#status bar?
-status_var = tk.StringVar()
-status_var.set("Idle")
-status_label = tk.Label(root, textvariable=status_var, fg="blue")
-status_label.pack(pady=5)
-#progress bar?
-progress = ttk.Progressbar(root, orient="horizontal", mode="indeterminate", length=250)
-progress.pack(pady=5)
-
-# NEW: helper to update main window status safely
+# Fancy status bar but hasn't been wired to all places
 def set_main_status(text, fg=None):
     status_var.set(text)
     if fg is not None:
@@ -10252,12 +8782,39 @@ def set_main_status(text, fg=None):
         except Exception:
             pass
 
+    
+root.protocol("WM_DELETE_WINDOW", on_closing)
+root.title("GlycoMSP File Manager GUI v1.093 Build 20260421 core v1.1 --code review version")
+root.geometry("800x480")
+root.minsize(800, 480)
 
-# --- Add Analysis Tools Frame ---
+# Buttons
+button_frame = tk.Frame(root)
+button_frame.pack(pady=10)
 
+tk.Button(button_frame, text="Add Raw File", command=lambda: select_file("raw")).grid(row=0, column=0, padx=5)
+tk.Button(button_frame, text="Add mzML File", command=lambda: select_file("mzml")).grid(row=0, column=1, padx=5)
+tk.Button(button_frame, text="Clear", command=clear_files).grid(row=0, column=2, padx=5)
+tk.Button(button_frame, text="About", command=open_about_window).grid(row=0, column=3, padx=5)
+tk.Button(button_frame, text="Save Log", command=save_log_to_file).grid(row=0, column=4, padx=5)
+#tk.Button(root, text="Save Log", command=save_log_to_file).pack(pady=5)
+# Text widget to log selected files
+text_widget = tk.Text(root, height=20, width=80)
+text_widget.pack(pady=10)
+
+# Status bar
+status_var = tk.StringVar()
+status_var.set("Idle")
+status_label = tk.Label(root, textvariable=status_var, fg="blue")
+status_label.pack(pady=5)
+
+progress = ttk.Progressbar(root, orient="horizontal", mode="indeterminate", length=250)
+progress.pack(pady=5)
+
+
+# --- Analysis Tools Frame ---
 analysis_frame = tk.LabelFrame(root, text="Analysis Tools", padx=10, pady=10)
 analysis_frame.pack(padx=10, pady=10, fill="x")
-
 convert_button = tk.Button(analysis_frame, text="Convert Raw to CSV",command=launch_metadata_batch)
 convert_button.pack(side="left", padx=5)
 tk.Button(analysis_frame, text="Prepare Dataset", command=open_prepare_dataset_window).pack(side="left", padx=5)

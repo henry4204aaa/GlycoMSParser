@@ -1,6 +1,6 @@
 import os
 version = "1.09i"
-last_update = 20260407
+last_update = 20260414
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -1568,11 +1568,9 @@ class MetadataEditorWindow:
                 # fallback: construct likely locations
                 raw_stem = os.path.splitext(os.path.basename(raw_path))[0] if raw_path != "not linked" else "no_raw"
                 if not temp_ms2:
-                    cand = os.path.join(self.output_dir, f"ms2tmp_{raw_stem}.csv")
-                    temp_ms2 = cand if os.path.exists(cand) else os.path.abspath(f"ms2tmp_{raw_stem}.csv")
+                    temp_ms2 = os.path.join(self.output_dir, f"ms2tmp_{raw_stem}.csv")
                 if not temp_ms3:
-                    cand = os.path.join(self.output_dir, f"ms3tmp_{raw_stem}.csv")
-                    temp_ms3 = cand if os.path.exists(cand) else os.path.abspath(f"ms3tmp_{raw_stem}.csv")
+                    temp_ms3 = os.path.join(self.output_dir, f"ms3tmp_{raw_stem}.csv")
 
                 # promote temps → finals
                 try:
