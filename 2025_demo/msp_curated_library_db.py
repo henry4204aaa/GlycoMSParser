@@ -184,18 +184,54 @@ def _semicolons_to_list_string(text: str | None) -> str:
     return "[" + ", ".join(parts) + "]"
 
 
+# Fragment-name column variants, priority 1 (highest) to 9 (lowest).
+# `structural_identifier` is Khoo's canonical term and always wins when present;
+# `glycotope_name` is the immediate fallback. Remaining variants run from
+# most-specific (`glycotope`, `fragment_name`) to most-generic (`name`, `label`).
+# Lookup key is whitespace-trimmed, spaces-to-underscores, case-insensitive —
+# so `ion name` and `ion_name` collapse to the same variant.
+_FRAGMENT_NAME_VARIANTS = [
+    "structural_identifier",
+    "glycotope_name",
+    "glycotope",
+    "fragment_name",
+    "fragment",
+    "ion_name",
+    "annotation",
+    "name",
+    "label",
+]
+
+
+def _normalize_header(name: str) -> str:
+    """Normalize a column header for variant matching.
+
+    Trims surrounding whitespace, collapses internal whitespace to a single
+    underscore, and lowercases the result.
+    """
+    return "_".join(str(name).strip().lower().split())
+
+
 def _load_ion_df(path: str | Path):
-    """Load an ion list from CSV or Excel and return a DataFrame with a ``mass`` column.
+    """Load an ion list from CSV or Excel and return a normalized DataFrame.
+
+    Returned DataFrame always has:
+    - ``mass`` (float): ion m/z. Rows with missing mass are dropped.
+    - ``fragment_name`` (str): resolved per row via priority-ranked fallback
+      across the nine accepted header variants (see
+      ``_FRAGMENT_NAME_VARIANTS``). Empty string when no variant yields a
+      non-empty value for that row.
 
     Supports:
-    - CSV / TSV files with a ``mass`` (or ``mz``, ``ion_mz``, ``m/z``) column
+    - CSV / TSV files with a mass-like column (``mass``, ``fragmentation_mass``,
+      ``mz``, ``ion_mz``, ``m/z``)
     - Excel files (.xlsx / .xls) — prefers a sheet named ``ionlist``
 
     Args:
         path: File path to the ion list.
 
     Returns:
-        pandas DataFrame with a single ``mass`` column of floats.
+        pandas DataFrame with ``mass`` and ``fragment_name`` columns.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -229,7 +265,7 @@ def _load_ion_df(path: str | Path):
         sep = "\t" if ext == ".tsv" else ","
         df = pd.read_csv(str(p), sep=sep, encoding="utf-8")
 
-    # Normalize mass column name
+    # Normalize mass column name (accepts several aliases)
     col_map = {c.strip().lower(): c for c in df.columns}
     for key in ("mass", "fragmentation_mass", "mz", "ion_mz", "m/z"):
         if key in col_map:
@@ -240,7 +276,173 @@ def _load_ion_df(path: str | Path):
     if "mass" not in df.columns:
         raise ValueError(f"No mass-like column found in: {p} (columns: {list(df.columns)})")
 
-    return df[["mass"]].dropna().astype(float)
+    # Resolve fragment name via priority-ranked row-level fallback.
+    # Build the present set: variants that appear as headers in this sheet.
+    norm_to_actual: dict[str, str] = {_normalize_header(c): c for c in df.columns}
+    present_in_priority: list[str] = [
+        norm_to_actual[v] for v in _FRAGMENT_NAME_VARIANTS if v in norm_to_actual
+    ]
+
+    if present_in_priority:
+        def _resolve(row) -> str:
+            for src_col in present_in_priority:
+                val = row.get(src_col)
+                if val is None:
+                    continue
+                try:
+                    if isinstance(val, float) and pd.isna(val):
+                        continue
+                except Exception:
+                    pass
+                text = str(val).strip()
+                if text and text.lower() != "nan":
+                    return text
+            return ""
+        fragment_series = df.apply(_resolve, axis=1)
+    else:
+        fragment_series = pd.Series([""] * len(df), index=df.index)
+
+    result = pd.DataFrame({
+        "mass": pd.to_numeric(df["mass"], errors="coerce"),
+        "fragment_name": fragment_series.astype(str),
+    })
+    result = result.dropna(subset=["mass"]).reset_index(drop=True)
+    result["mass"] = result["mass"].astype(float)
+    return result
+
+
+def filter_import_rows(
+    rows: list[dict],
+    *,
+    composition_present: bool = False,
+    score_a_min: float | None = None,
+    score_b_min: float | None = None,
+    ppm_max: float | None = None,
+    sample: str | None = None,
+) -> list[int]:
+    """Apply the import-preview filter bar and return passing row indices.
+
+    Used by the import preview dialog (all three import modes share it). The
+    filter silently skips any criterion whose source column is absent from a
+    given row — per v0.4 spec, a missing column passes through as a no-op
+    rather than raising. Score A is read from ``ion score`` or ``score_a``
+    (CGA vs. generic); Score B from ``score_b``; ppm from ``ppm_error``;
+    composition from ``composition`` or ``selected_composition``; sample
+    from ``sample_id``, ``Sample ID``, or ``sample``.
+
+    Args:
+        rows: Raw rows from the import source (list of dicts from CSV/TSV).
+        composition_present: If True, drops rows whose composition cell is
+            empty / whitespace only.
+        score_a_min: Minimum Score A (inclusive). Rows without a parseable
+            Score A value fail this filter. ``None`` disables the check.
+        score_b_min: Minimum Score B (inclusive). Rows without a parseable
+            Score B value fail this filter. ``None`` disables the check.
+        ppm_max: Maximum |ppm_error| (inclusive). Rows without a parseable
+            ppm_error fail this filter. ``None`` disables the check.
+        sample: If non-empty, require ``sample_id`` equal to this value.
+            Rows with no sample_id field pass (no-op for files lacking the
+            column).
+
+    Returns:
+        Sorted list of row indices (into ``rows``) that pass every active
+        filter. Inactive filters contribute no restriction.
+    """
+
+    def _row_has_column(row: dict, *candidates: str) -> bool:
+        return any(c in row for c in candidates)
+
+    def _read_float(row: dict, *candidates: str) -> float | None:
+        for c in candidates:
+            if c in row:
+                try:
+                    v = row[c]
+                    if v is None or str(v).strip() == "":
+                        continue
+                    return float(v)
+                except (ValueError, TypeError):
+                    continue
+        return None
+
+    out: list[int] = []
+    for i, row in enumerate(rows):
+        if composition_present:
+            comp = str(
+                row.get("composition") or row.get("selected_composition") or ""
+            ).strip()
+            if not comp:
+                continue
+
+        if score_a_min is not None and _row_has_column(row, "ion score", "score_a"):
+            val = _read_float(row, "ion score", "score_a")
+            if val is None or val < score_a_min:
+                continue
+
+        if score_b_min is not None and _row_has_column(row, "score_b"):
+            val = _read_float(row, "score_b")
+            if val is None or val < score_b_min:
+                continue
+
+        if ppm_max is not None and _row_has_column(row, "ppm_error", "ppm"):
+            val = _read_float(row, "ppm_error", "ppm")
+            if val is None or abs(val) > ppm_max:
+                continue
+
+        if sample:
+            if _row_has_column(row, "sample_id", "Sample ID", "sample"):
+                sv = str(
+                    row.get("sample_id")
+                    or row.get("Sample ID")
+                    or row.get("sample")
+                    or ""
+                ).strip()
+                if sv != sample:
+                    continue
+            # File lacks a sample column → pass (no-op).
+
+        out.append(i)
+    return out
+
+
+def lookup_fragment_names(
+    ion_df,
+    target_mzs: list[float],
+    tolerance: float = 0.5,
+) -> list[str]:
+    """Look up fragment names for observed ion-hit m/z values.
+
+    For each m/z in ``target_mzs``, finds the closest row in ``ion_df`` within
+    ``tolerance`` and returns its ``fragment_name``. Returns empty string if
+    no match or if the matched row has no fragment name.
+
+    Args:
+        ion_df: DataFrame from ``_load_ion_df`` (must contain ``mass`` and
+            ``fragment_name`` columns).
+        target_mzs: Observed m/z values to name.
+        tolerance: Absolute m/z window for matching (default 0.5, matches the
+            display tolerance used by the preview plot).
+
+    Returns:
+        List of fragment-name strings aligned with ``target_mzs`` (empty
+        string where no name is available).
+    """
+    if ion_df is None or len(target_mzs) == 0:
+        return ["" for _ in target_mzs]
+    if "fragment_name" not in ion_df.columns:
+        return ["" for _ in target_mzs]
+    masses = ion_df["mass"].tolist()
+    names = ion_df["fragment_name"].tolist()
+    result: list[str] = []
+    for mz in target_mzs:
+        best_name = ""
+        best_diff = tolerance
+        for ref_mz, ref_name in zip(masses, names):
+            diff = abs(mz - ref_mz)
+            if diff <= best_diff:
+                best_diff = diff
+                best_name = ref_name or ""
+        result.append(best_name)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +747,75 @@ class CuratedLibraryDB:
                 pdf_path.unlink()
         with self._connect() as conn:
             conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
+
+    def delete_entries_batch(self, entry_ids: list[str]) -> int:
+        """Delete multiple entries and their associated PDFs.
+
+        Collects each entry's ``pdf_reference`` first (so the list is stable
+        after the DB rows disappear), performs a single-transaction batch
+        DELETE, then unlinks each referenced PDF from disk.
+
+        Args:
+            entry_ids: List of entry IDs to delete.
+
+        Returns:
+            Number of DB rows deleted.
+        """
+        if not entry_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in entry_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT entry_id, pdf_reference FROM entries "
+                f"WHERE entry_id IN ({placeholders})",
+                entry_ids,
+            ).fetchall()
+            pdf_refs = [r["pdf_reference"] for r in rows if r["pdf_reference"]]
+            cur = conn.execute(
+                f"DELETE FROM entries WHERE entry_id IN ({placeholders})",
+                entry_ids,
+            )
+            deleted = cur.rowcount
+        # Disk side-effect runs after the DB transaction commits.
+        for rel in pdf_refs:
+            pdf_path = self.db_path.parent / rel
+            if pdf_path.exists():
+                try:
+                    pdf_path.unlink()
+                except OSError:
+                    pass
+        return deleted
+
+    def update_entries_confidence_batch(
+        self,
+        entry_ids: list[str],
+        confidence: str,
+        last_modified_by: str,
+    ) -> int:
+        """Update ``confidence`` and ``last_modified_by`` for many rows at once.
+
+        ``last_modified_at`` is refreshed automatically by the existing
+        ``update_modified_timestamp`` trigger — we do not set it explicitly here.
+
+        Args:
+            entry_ids: Entry IDs to update.
+            confidence: One of ``confirmed`` / ``probable`` / ``tentative``.
+                Enforced by the schema CHECK constraint.
+            last_modified_by: Reviewer value written into ``last_modified_by``.
+
+        Returns:
+            Number of rows updated.
+        """
+        if not entry_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in entry_ids)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE entries SET confidence = ?, last_modified_by = ? "
+                f"WHERE entry_id IN ({placeholders})",
+                [confidence, last_modified_by, *entry_ids],
+            )
+            return cur.rowcount
 
     def get_entry(self, entry_id: str) -> dict | None:
         """Fetch a single entry by ID."""

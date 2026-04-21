@@ -10,8 +10,9 @@ All database operations go through CuratedLibraryDB — no direct sqlite3 usage.
 
 from __future__ import annotations
 
-version = "1.02"
-last_update = 20260409
+version = "1.04"
+last_update = 20260421
+# 20260421: 1.04 (20260421) aggregated functional update based on user feedback. Version up to v0.4 (labeled as 1.04)
 # I decided the spec and needed components from GlycoMSP, then let the Claude Code (opus4.6) do the vibe coding
 # QA and user tests are performed manually beside cli tests, and the code review has been done by author to confirm the behaviors as expected
 # Fixed several issues - overflow full peaklists in man add (clipboard_decoder) and reading csv not parsing properly issue
@@ -27,8 +28,17 @@ from pathlib import Path
 
 from msp_curated_library_db import (
     CuratedLibraryDB, DuplicateEntryError,
-    compute_scores_batch, _load_ion_df,
+    compute_scores_batch, _load_ion_df, lookup_fragment_names,
+    filter_import_rows,
 )
+
+# Graceful matplotlib import: the module as a whole must remain usable when
+# matplotlib is missing; only the spectrum preview dialog depends on it.
+try:  # pragma: no cover - import-time check
+    import matplotlib  # noqa: F401
+    _HAS_MATPLOTLIB = True
+except ImportError:  # pragma: no cover - only exercised without matplotlib
+    _HAS_MATPLOTLIB = False
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +171,7 @@ class CuratedLibraryWindow(tk.Toplevel):
         self._prompt_session_user()
 
         # Build UI
+        self._build_header()
         self._build_toolbar()
         self._build_settings_bar()
         self._build_filter_bar()
@@ -222,19 +233,46 @@ class CuratedLibraryWindow(tk.Toplevel):
             cfg.write(f)
 
     # ------------------------------------------------------------------
+    # Header row (v0.4 Item 2: Stats + User indicator live here)
+    # ------------------------------------------------------------------
+
+    def _build_header(self) -> None:
+        """Build the top-most header row: title, Stats button, User indicator.
+
+        v0.4 moves ``Stats`` out of the toolbar (which now hosts the
+        destructive ``Delete Selected`` button) into this header row,
+        immediately to the left of the session-user indicator.
+        """
+        header = ttk.Frame(self)
+        header.pack(fill="x", padx=8, pady=(8, 0))
+
+        ttk.Label(
+            header,
+            text="Curated Spectrum Library",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(side="left", padx=(4, 0))
+
+        # Right side: User (rightmost), then Stats to its left.
+        self._user_label = ttk.Label(header, text=f"User: {self.session_user}")
+        self._user_label.pack(side="right", padx=(4, 4))
+        ttk.Button(header, text="Stats", command=self._on_stats).pack(
+            side="right", padx=4,
+        )
+
+    # ------------------------------------------------------------------
     # Toolbar
     # ------------------------------------------------------------------
 
     def _build_toolbar(self) -> None:
         toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", padx=8, pady=(8, 4))
+        toolbar.pack(fill="x", padx=8, pady=(4, 4))
 
         ttk.Button(
             toolbar, text="Open/Create DB", command=self._on_open_create_db
         ).pack(side="left", padx=4)
 
         # Import dropdown
-        import_btn = ttk.Menubutton(toolbar, text="Import \u25bc")
+        import_btn = ttk.Menubutton(toolbar, text="Import\u25bc")
         import_menu = tk.Menu(import_btn, tearoff=False)
         import_menu.add_command(
             label="From converted CSV (fresh, no annotation)",
@@ -261,13 +299,14 @@ class CuratedLibraryWindow(tk.Toplevel):
         )
         self._export_btn.pack(side="left", padx=4)
 
-        ttk.Button(toolbar, text="Stats", command=self._on_stats).pack(
-            side="left", padx=4
+        # v0.4 Item 2: batch delete. Disabled until the user selects rows.
+        self._delete_selected_btn = ttk.Button(
+            toolbar,
+            text="Delete Selected",
+            command=self._on_delete_selected,
+            state="disabled",
         )
-
-        # User label on the right
-        self._user_label = ttk.Label(toolbar, text=f"User: {self.session_user}")
-        self._user_label.pack(side="right", padx=8)
+        self._delete_selected_btn.pack(side="left", padx=4)
 
     # ------------------------------------------------------------------
     # Settings bar (ion list + Score B workbook)
@@ -427,6 +466,7 @@ class CuratedLibraryWindow(tk.Toplevel):
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-2>", self._on_right_click)  # macOS
         self.tree.bind("<Button-3>", self._on_right_click)  # Windows/Linux
+        self.tree.bind("<<TreeviewSelect>>", self._on_table_selection_changed)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -603,26 +643,38 @@ class CuratedLibraryWindow(tk.Toplevel):
     def _on_right_click(self, event: tk.Event) -> None:
         row_id = self.tree.identify_row(event.y)
         if row_id:
-            # Only change selection if clicked row is not already selected
-            # (preserves multi-select for batch operations like scoring)
+            # Only change selection if the clicked row is not already
+            # selected — preserves multi-select for batch operations.
             if row_id not in self.tree.selection():
                 self.tree.selection_set(row_id)
         else:
             return
 
+        sel = list(self.tree.selection())
+        multi_sel = len(sel) > 1
+        delete_label = f"Delete ({len(sel)})" if multi_sel else "Delete"
+        single_state = "disabled" if multi_sel else "normal"
+
         menu = tk.Menu(self, tearoff=False)
         menu.add_command(
+            state=single_state,
             label="Edit\u2026", command=lambda: self._on_context_edit(row_id)
         )
         menu.add_command(
-            label="Delete", command=lambda: self._on_context_delete(row_id)
+            label=delete_label, command=self._on_delete_selected,
+        )
+        menu.add_command(
+            label="Set Confidence for Selected...",
+            command=self._on_set_confidence_selected,
         )
         menu.add_separator()
         menu.add_command(
+            state=single_state,
             label="Attach PDF\u2026",
             command=lambda: self._on_context_attach_pdf(row_id),
         )
         menu.add_command(
+            state=single_state,
             label="Copy composition",
             command=lambda: self._on_context_copy_comp(row_id),
         )
@@ -632,6 +684,7 @@ class CuratedLibraryWindow(tk.Toplevel):
             command=self._on_compute_scores,
         )
         menu.add_command(
+            state=single_state,
             label="Spectrum Preview\u2026",
             command=lambda: self._on_spectrum_preview(row_id),
         )
@@ -647,6 +700,9 @@ class CuratedLibraryWindow(tk.Toplevel):
             )
 
     def _on_context_delete(self, entry_id: str) -> None:
+        # Legacy single-row delete helper, retained for callers that pass
+        # an explicit entry_id. New UI paths go through
+        # ``_on_delete_selected`` which is batch-aware.
         if self.db is None:
             return
         if messagebox.askyesno(
@@ -657,6 +713,65 @@ class CuratedLibraryWindow(tk.Toplevel):
             self.db.delete_entry(entry_id)
             self._populate_table()
             self._populate_filter_dropdowns()
+            self._on_table_selection_changed(None)
+    # 20260421 code review: Claude Code missed definition
+    def _on_table_selection_changed(self, event=None) -> None:
+        """Enable or disable row-scoped actions based on current Treeview selection.
+
+        Called by:
+        - <<TreeviewSelect>> binding (Tkinter passes an event object)
+        - _populate_table / filter refresh paths (call with None)
+        """
+        has_selection = bool(self.tree.selection())
+        self._delete_selected_btn.configure(state="normal" if has_selection else "disabled")
+
+    def _on_delete_selected(self) -> None:
+        """Batch-delete every currently selected entry (v0.4 Item 2).
+
+        Confirms with the total count, then calls
+        ``CuratedLibraryDB.delete_entries_batch`` which removes the rows
+        and their attached PDFs under a single SQL transaction.
+        """
+        if self.db is None:
+            return
+        sel = list(self.tree.selection())
+        if not sel:
+            return
+        n = len(sel)
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Delete {n} entr{'y' if n == 1 else 'ies'}? This cannot be "
+            f"undone. Associated PDFs in pdf_references/ will also be "
+            f"removed.",
+            parent=self,
+        ):
+            return
+        self.db.delete_entries_batch(sel)
+        self._populate_table()
+        self._populate_filter_dropdowns()
+        self._on_table_selection_changed(None)
+
+    def _on_set_confidence_selected(self) -> None:
+        """Batch-update ``confidence`` + ``last_modified_by`` (v0.4 Item 2)."""
+        if self.db is None:
+            return
+        sel = list(self.tree.selection())
+        if not sel:
+            return
+
+        def _apply(confidence: str, reviewer: str) -> None:
+            effective_reviewer = reviewer.strip() or self.session_user
+            self.db.update_entries_confidence_batch(
+                sel, confidence, effective_reviewer,
+            )
+            self._populate_table()
+            self._populate_filter_dropdowns()
+
+        BatchConfidenceDialog(
+            self, n_selected=len(sel),
+            session_user=self.session_user,
+            on_apply=_apply,
+        )
 
     def _on_context_attach_pdf(self, entry_id: str) -> None:
         if self.db is None:
@@ -1005,10 +1120,18 @@ class CuratedLibraryWindow(tk.Toplevel):
     def _on_spectrum_preview(self, entry_id: str) -> None:
         if self.db is None:
             return
+        if not _HAS_MATPLOTLIB:
+            messagebox.showwarning(
+                "Spectrum preview unavailable",
+                "matplotlib is not installed. Install it with "
+                "`pip install matplotlib` and restart the app to enable preview.",
+                parent=self,
+            )
+            return
         entry = self.db.get_entry(entry_id)
         if not entry:
             return
-        SpectrumPreviewDialog(self, entry)
+        SpectrumPreviewDialog(self, entry, ion_list_path=self._ion_list_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1073,7 +1196,7 @@ class ImportPreviewDialog(tk.Toplevel):
             "mas": "MAS Annotation",
         }
         self.title(f"Import Preview \u2014 {mode_labels.get(import_mode, import_mode)}")
-        self.geometry("700x460")
+        self.geometry("780x560")
         self.resizable(True, True)
         self.transient(master)
         self.grab_set()
@@ -1082,19 +1205,26 @@ class ImportPreviewDialog(tk.Toplevel):
             r.get("score_b") for r in rows
         )
 
+        # Default: all rows shown, none selected. The selection set is
+        # authoritative across filter changes: rows hidden by a later
+        # filter change do NOT drop out of the import.
+        self._shown_indices: list[int] = list(range(len(rows)))
+        self._selected_indices: set[int] = set()
+
         self._build_ui()
 
     def _build_ui(self) -> None:
         info = ttk.Label(
             self,
             text=f"Sample: {self.meta.get('sample_id', '?')}  |  "
-                 f"Ion mode: {self.meta.get('ion_mode', '?')}  |  "
-                 f"Rows: {len(self.rows)}",
+                 f"Ion mode: {self.meta.get('ion_mode', '?')}",
         )
-        info.pack(fill="x", padx=10, pady=(8, 4))
+        info.pack(fill="x", padx=10, pady=(8, 2))
 
-        # Treeview
+        self._build_filter_bar()
+
         cols_spec = self._PREVIEW_COLS.get(self.import_mode, self._PREVIEW_COLS["cga"])
+        self._cols_spec = cols_spec
         col_ids = [c[0] for c in cols_spec]
 
         tree_frame = ttk.Frame(self)
@@ -1114,13 +1244,158 @@ class ImportPreviewDialog(tk.Toplevel):
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
-        # Populate
-        for i, row in enumerate(self.rows):
+        self._ptree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
+        self._render_rows()
+
+        self._summary_var = tk.StringVar()
+        ttk.Label(self, textvariable=self._summary_var).pack(
+            fill="x", padx=10, pady=(2, 4),
+        )
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill="x", padx=10, pady=(4, 10))
+
+        ttk.Button(btn_frame, text="Select All", command=self._select_all).pack(
+            side="left", padx=4,
+        )
+        ttk.Button(btn_frame, text="Deselect All", command=self._deselect_all).pack(
+            side="left", padx=4,
+        )
+        ttk.Button(
+            btn_frame,
+            text="Select all with composition",
+            command=self._select_with_composition,
+        ).pack(side="left", padx=4)
+
+        ttk.Label(btn_frame, text="Score B >=").pack(side="left", padx=(8, 2))
+        self._quick_scoreb_var = tk.StringVar()
+        ttk.Entry(btn_frame, textvariable=self._quick_scoreb_var, width=6).pack(
+            side="left",
+        )
+        ttk.Button(
+            btn_frame, text="Select", command=self._select_with_scoreb,
+        ).pack(side="left", padx=(2, 8))
+
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(
+            side="right", padx=4,
+        )
+        ttk.Button(btn_frame, text="Import Selected", command=self._do_import).pack(
+            side="right", padx=4,
+        )
+
+        self._update_summary()
+
+    # ------------------------------------------------------------------
+    # Filter bar
+    # ------------------------------------------------------------------
+
+    def _build_filter_bar(self) -> None:
+        """Build the shared import-preview filter bar (v0.4 Item 1)."""
+        fbar = ttk.LabelFrame(self, text="Filters")
+        fbar.pack(fill="x", padx=10, pady=(4, 2))
+
+        row1 = ttk.Frame(fbar)
+        row1.pack(fill="x", padx=6, pady=(4, 2))
+
+        self._fp_comp_present = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row1, text="Composition present", variable=self._fp_comp_present,
+        ).pack(side="left", padx=(0, 12))
+
+        ttk.Label(row1, text="Score A min:").pack(side="left", padx=(0, 2))
+        self._fp_score_a = ttk.Entry(row1, width=6)
+        self._fp_score_a.pack(side="left", padx=(0, 12))
+
+        ttk.Label(row1, text="Score B min:").pack(side="left", padx=(0, 2))
+        self._fp_score_b = ttk.Entry(row1, width=6)
+        self._fp_score_b.pack(side="left", padx=(0, 12))
+
+        ttk.Label(row1, text="ppm max:").pack(side="left", padx=(0, 2))
+        self._fp_ppm = ttk.Entry(row1, width=6)
+        self._fp_ppm.pack(side="left", padx=(0, 12))
+
+        row2 = ttk.Frame(fbar)
+        row2.pack(fill="x", padx=6, pady=(2, 4))
+
+        ttk.Label(row2, text="Sample:").pack(side="left", padx=(0, 2))
+        self._fp_sample = ttk.Combobox(row2, state="readonly", width=24)
+        unique_samples = sorted({
+            str(
+                r.get("sample_id") or r.get("Sample ID") or r.get("sample") or ""
+            ).strip()
+            for r in self.rows
+        })
+        unique_samples = [s for s in unique_samples if s]
+        self._fp_sample["values"] = ["(all)", *unique_samples]
+        self._fp_sample.set("(all)")
+        self._fp_sample.pack(side="left", padx=(0, 12))
+
+        ttk.Button(row2, text="Apply", command=self._on_apply_filters).pack(
+            side="left", padx=4,
+        )
+        ttk.Button(row2, text="Clear", command=self._on_clear_filters).pack(
+            side="left", padx=4,
+        )
+
+    def _on_apply_filters(self) -> None:
+        """Recompute ``_shown_indices`` from the filter widgets.
+
+        Non-numeric entries in numeric boxes are treated as "not set"
+        (silent no-op) per Item 1's simplest-path rule.
+        """
+        def _parse_float(widget) -> float | None:
+            text = widget.get().strip()
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                return None
+
+        sample_val = self._fp_sample.get().strip()
+        sample_arg: str | None = (
+            sample_val if sample_val and sample_val != "(all)" else None
+        )
+
+        self._shown_indices = filter_import_rows(
+            self.rows,
+            composition_present=bool(self._fp_comp_present.get()),
+            score_a_min=_parse_float(self._fp_score_a),
+            score_b_min=_parse_float(self._fp_score_b),
+            ppm_max=_parse_float(self._fp_ppm),
+            sample=sample_arg,
+        )
+        self._render_rows()
+        self._update_summary()
+
+    def _on_clear_filters(self) -> None:
+        self._fp_comp_present.set(False)
+        self._fp_score_a.delete(0, "end")
+        self._fp_score_b.delete(0, "end")
+        self._fp_ppm.delete(0, "end")
+        self._fp_sample.set("(all)")
+        self._shown_indices = list(range(len(self.rows)))
+        self._render_rows()
+        self._update_summary()
+
+    # ------------------------------------------------------------------
+    # Rendering + selection bookkeeping
+    # ------------------------------------------------------------------
+
+    def _render_rows(self) -> None:
+        """Populate the Treeview with the currently shown rows only.
+
+        Rows hidden by the filter stay in ``_selected_indices`` but do not
+        appear in the Treeview. The authoritative selection is re-applied
+        to any rows still visible.
+        """
+        self._ptree.delete(*self._ptree.get_children())
+        for i in self._shown_indices:
+            row = self.rows[i]
             values = []
-            for cid, _, _ in cols_spec:
+            for cid, _, _ in self._cols_spec:
                 val = row.get(cid, "")
                 if cid == "peaklist" and val:
-                    # Show count instead of raw data
                     try:
                         s = str(val).strip()
                         if s.startswith("(") or s.startswith("["):
@@ -1133,36 +1408,92 @@ class ImportPreviewDialog(tk.Toplevel):
                 values.append(val or "\u2014")
             self._ptree.insert("", "end", iid=str(i), values=values)
 
-        # Select all by default
-        self._ptree.selection_set(
-            [str(i) for i in range(len(self.rows))]
+        visible_selected = [
+            str(i) for i in self._selected_indices if i in self._shown_indices
+        ]
+        if visible_selected:
+            self._ptree.selection_set(visible_selected)
+
+    def _on_tree_selection_changed(self, _event: tk.Event) -> None:
+        """Sync ``_selected_indices`` with the Treeview.
+
+        Only rows currently visible contribute. Rows hidden by the filter
+        retain whatever selection state they had before the filter change.
+        """
+        visible_set = set(self._shown_indices)
+        tree_sel = {int(iid) for iid in self._ptree.selection()}
+        hidden_selected = {
+            i for i in self._selected_indices if i not in visible_set
+        }
+        self._selected_indices = hidden_selected | tree_sel
+        self._update_summary()
+
+    def _set_selection(self, new_selection: set[int]) -> None:
+        self._selected_indices = set(new_selection)
+        visible_selected = [
+            str(i) for i in self._selected_indices if i in self._shown_indices
+        ]
+        self._ptree.selection_set(visible_selected)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        self._summary_var.set(
+            f"Rows: {len(self.rows)}  |  Shown: {len(self._shown_indices)}  "
+            f"|  Selected: {len(self._selected_indices)}"
         )
 
-        # Buttons
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill="x", padx=10, pady=(4, 10))
-
-        ttk.Button(btn_frame, text="Select All", command=self._select_all).pack(
-            side="left", padx=4
-        )
-        ttk.Button(btn_frame, text="Deselect All", command=self._deselect_all).pack(
-            side="left", padx=4
-        )
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(
-            side="right", padx=4
-        )
-        ttk.Button(btn_frame, text="Import Selected", command=self._do_import).pack(
-            side="right", padx=4
-        )
+    # ------------------------------------------------------------------
+    # Quick-select actions (all operate on Shown rows only)
+    # ------------------------------------------------------------------
 
     def _select_all(self) -> None:
-        self._ptree.selection_set([str(i) for i in range(len(self.rows))])
+        self._set_selection(self._selected_indices | set(self._shown_indices))
 
     def _deselect_all(self) -> None:
-        self._ptree.selection_remove(self._ptree.selection())
+        shown = set(self._shown_indices)
+        self._set_selection(self._selected_indices - shown)
+
+    def _select_with_composition(self) -> None:
+        to_add = set()
+        for i in self._shown_indices:
+            comp = str(
+                self.rows[i].get("composition")
+                or self.rows[i].get("selected_composition")
+                or ""
+            ).strip()
+            if comp:
+                to_add.add(i)
+        self._set_selection(self._selected_indices | to_add)
+
+    def _select_with_scoreb(self) -> None:
+        """Select shown rows with ``score_b >= threshold``.
+
+        Blank / non-numeric threshold is a silent no-op. Missing
+        ``score_b`` cell means the row is simply not added.
+        """
+        text = self._quick_scoreb_var.get().strip()
+        if not text:
+            return
+        try:
+            threshold = float(text)
+        except ValueError:
+            return
+        to_add = set()
+        for i in self._shown_indices:
+            raw = self.rows[i].get("score_b")
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                if float(raw) >= threshold:
+                    to_add.add(i)
+            except (ValueError, TypeError):
+                continue
+        self._set_selection(self._selected_indices | to_add)
 
     def _do_import(self) -> None:
-        sel_indices = [int(iid) for iid in self._ptree.selection()]
+        # The authoritative selection set survives filter tweaks:
+        # import every index we have, even if currently hidden.
+        sel_indices = sorted(self._selected_indices)
         if not sel_indices:
             messagebox.showwarning("Import", "No rows selected.", parent=self)
             return
@@ -1789,27 +2120,132 @@ class StatsDialog(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
+# Batch Confidence Dialog (v0.4 Item 2)
+# ---------------------------------------------------------------------------
+
+
+class BatchConfidenceDialog(tk.Toplevel):
+    """Confirmation dialog for batch-updating ``confidence`` across rows.
+
+    Presented from the right-click ``Set Confidence for Selected...`` menu
+    item. Collects a confidence level (``confirmed`` / ``probable`` /
+    ``tentative``) and an optional reviewer override; empty reviewer field
+    falls back to the session user.
+
+    Args:
+        master: Parent window.
+        n_selected: Count of rows that will be updated. Shown in the
+            Apply-button label and the intro text.
+        session_user: Default reviewer when the override entry is blank.
+        on_apply: Callback ``(confidence, reviewer)`` invoked on Apply.
+    """
+
+    def __init__(
+        self,
+        master: tk.Toplevel,
+        n_selected: int,
+        session_user: str,
+        on_apply,
+    ) -> None:
+        super().__init__(master)
+        self.title("Set Confidence for Selected")
+        self.geometry("360x220")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        self._on_apply = on_apply
+
+        frame = ttk.Frame(self, padding=14)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text=f"Apply to {n_selected} selected entr"
+                 f"{'y' if n_selected == 1 else 'ies'}.",
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(frame, text="Confidence:").pack(anchor="w")
+        self._conf_var = tk.StringVar(value="probable")
+        for value in ("confirmed", "probable", "tentative"):
+            ttk.Radiobutton(
+                frame, text=value, value=value, variable=self._conf_var,
+            ).pack(anchor="w", padx=16)
+
+        rev_row = ttk.Frame(frame)
+        rev_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(rev_row, text="Reviewer override:").pack(side="left")
+        self._reviewer_var = tk.StringVar(value="")
+        ttk.Entry(rev_row, textvariable=self._reviewer_var, width=16).pack(
+            side="left", padx=6,
+        )
+        ttk.Label(
+            rev_row,
+            text=f"(blank = {session_user})",
+            foreground="gray",
+        ).pack(side="left")
+
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(
+            side="right", padx=4,
+        )
+        ttk.Button(
+            btns, text=f"Apply to {n_selected}", command=self._do_apply,
+        ).pack(side="right", padx=4)
+
+    def _do_apply(self) -> None:
+        confidence = self._conf_var.get()
+        reviewer = self._reviewer_var.get().strip()
+        try:
+            self._on_apply(confidence, reviewer)
+        finally:
+            self.destroy()
+
+
+# ---------------------------------------------------------------------------
 # Spectrum Preview Dialog
 # ---------------------------------------------------------------------------
 
 class SpectrumPreviewDialog(tk.Toplevel):
     """Read-only spectrum preview as a stick plot.
 
-    Uses matplotlib embedded in Tkinter via FigureCanvasTkAgg.
-    Falls back to a text summary if matplotlib is not available.
+    Uses matplotlib embedded in Tkinter via FigureCanvasTkAgg. Ion-hit peaks
+    are rendered in red and, when the current ion list supplies names,
+    labeled with the resolved ``fragment_name`` (or the m/z rounded to two
+    decimals as a fallback). A checkbutton toggles the labels off for dense
+    profile-mode spectra.
 
     Args:
         master: Parent window.
         entry: Dict of entry column values.
+        ion_list_path: Path to the active ion list (session setting) — used
+            to resolve fragment names. When empty or unreadable, the dialog
+            silently falls back to m/z-only labels.
     """
 
-    def __init__(self, master: tk.Toplevel, entry: dict) -> None:
+    _LABEL_ROTATION_DEG = 30  # v0.4 spec: default rotation, stick-tip anchor.
+    _HIT_TOLERANCE = 0.5      # m/z tolerance for hit highlighting + name lookup.
+
+    def __init__(
+        self,
+        master: tk.Toplevel,
+        entry: dict,
+        ion_list_path: str = "",
+    ) -> None:
         super().__init__(master)
         self.entry = entry
+        self._ion_list_path = ion_list_path
+        self._ion_df = None  # Lazily loaded; None on failure or empty path.
+        self._show_labels_var = tk.BooleanVar(value=True)
+        # Populated during _build_peak_data; reused by plot + peak table.
+        self._hit_name_by_mz: dict[float, str] = {}
+        self._canvas_widget = None  # matplotlib canvas widget (for re-render).
+
         eid = entry.get("entry_id", "?")
         scan = entry.get("ms2_scan_no", "?")
         self.title(f"Spectrum Preview: {eid} (Scan {scan})")
-        self.geometry("750x680")
+        self.geometry("750x720")
         self.resizable(True, True)
         self.transient(master)
 
@@ -1836,6 +2272,22 @@ class SpectrumPreviewDialog(tk.Toplevel):
             info_parts.append(f"Score B: {sb}")
         ttk.Label(info_frame, text="   ".join(info_parts)).pack(anchor="w")
 
+        # Label toggle — placed between info bar and plot so the user can
+        # toggle before/after reading the data.
+        ctrl_frame = ttk.Frame(self)
+        ctrl_frame.pack(fill="x", padx=10, pady=(0, 2))
+        ttk.Checkbutton(
+            ctrl_frame,
+            text="Show fragment labels",
+            variable=self._show_labels_var,
+            command=self._on_toggle_labels,
+        ).pack(side="left")
+
+        # Load ion_df once (lazy failures are silently absorbed — label
+        # rendering degrades to m/z-only in that case).
+        self._load_ion_df_safe()
+        self._prepare_hit_name_map()
+
         try:
             self._build_matplotlib_plot()
         except ImportError:
@@ -1847,6 +2299,36 @@ class SpectrumPreviewDialog(tk.Toplevel):
         ttk.Button(self, text="Close", command=self.destroy).pack(
             side="bottom", pady=(0, 8)
         )
+
+    def _load_ion_df_safe(self) -> None:
+        """Attempt to load the active ion list; on any failure, leave ``None``."""
+        if not self._ion_list_path:
+            return
+        if not Path(self._ion_list_path).exists():
+            return
+        try:
+            self._ion_df = _load_ion_df(self._ion_list_path)
+        except Exception:
+            # Any parse error (missing sheet, malformed CSV) just disables
+            # label resolution — the preview itself must still open.
+            self._ion_df = None
+
+    def _prepare_hit_name_map(self) -> None:
+        """Resolve ``hit_mz -> fragment_name`` for every ion-hit peak.
+
+        Uses the stored ``ion_hits_mz`` (from scoring) as the authoritative
+        hit list and looks up each against the active ion list. Peaks that
+        are not hits never get a label.
+        """
+        _, _, ion_hits = self._parse_peaks()
+        if not ion_hits:
+            return
+        names = lookup_fragment_names(
+            self._ion_df, ion_hits, tolerance=self._HIT_TOLERANCE,
+        )
+        self._hit_name_by_mz = {
+            mz: name for mz, name in zip(ion_hits, names)
+        }
 
     def _parse_peaks(self) -> tuple[list[float], list[float], list[float]]:
         """Parse peaklist, peakintensity, and ion_hits_mz from entry."""
@@ -1876,26 +2358,23 @@ class SpectrumPreviewDialog(tk.Toplevel):
 
         fig = Figure(figsize=(7, 4), dpi=96)
         ax = fig.add_subplot(111)
+        self._fig = fig
+        self._ax = ax
 
         if mzs and intensities and len(mzs) == len(intensities):
-            # Determine which peaks are ion hits
-            ion_hit_set = set()
-            if ion_hits:
-                for mz in mzs:
-                    for hit_mz in ion_hits:
-                        if abs(mz - hit_mz) < 0.5:  # tolerance for matching display
-                            ion_hit_set.add(mz)
-                            break
+            ion_hit_set = self._build_ion_hit_set(mzs, ion_hits)
+            self._ion_hit_set = ion_hit_set
 
-            # Draw all peaks
             for mz, intensity in zip(mzs, intensities):
                 color = "#d62728" if mz in ion_hit_set else "#1f77b4"
                 ax.vlines(mz, 0, intensity, colors=color, linewidth=1.0)
 
+            if self._show_labels_var.get():
+                self._draw_fragment_labels(ax, mzs, intensities, ion_hit_set)
+
             ax.set_xlabel("m/z")
             ax.set_ylabel("Intensity")
 
-            # Legend
             from matplotlib.lines import Line2D
             handles = [Line2D([0], [0], color="#1f77b4", lw=2, label="All peaks")]
             if ion_hit_set:
@@ -1912,24 +2391,112 @@ class SpectrumPreviewDialog(tk.Toplevel):
         fig.tight_layout()
         canvas = FigureCanvasTkAgg(fig, master=self)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        self._canvas = canvas
+        self._canvas_widget = canvas.get_tk_widget()
+        self._canvas_widget.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+
+    def _build_ion_hit_set(
+        self, mzs: list[float], ion_hits: list[float],
+    ) -> set[float]:
+        """Match observed peak m/z to ion-hit m/z within display tolerance."""
+        if not ion_hits:
+            return set()
+        out: set[float] = set()
+        for mz in mzs:
+            for hit_mz in ion_hits:
+                if abs(mz - hit_mz) <= self._HIT_TOLERANCE:
+                    out.add(mz)
+                    break
+        return out
+
+    def _draw_fragment_labels(
+        self,
+        ax,
+        mzs: list[float],
+        intensities: list[float],
+        ion_hit_set: set[float],
+    ) -> None:
+        """Draw label text above every ion-hit stick.
+
+        Label rule (v0.4):
+            - fragment_name known for this hit → fragment_name
+            - no fragment_name, only m/z → ``"{m/z:.2f}"``
+            - non-hit peaks → skipped entirely
+
+        Labels rotated 30°, anchored at the stick tip. Minor overlap is
+        acceptable for v0.4; no manual placement UI.
+        """
+        for mz, intensity in zip(mzs, intensities):
+            if mz not in ion_hit_set:
+                continue
+            label = self._label_for_hit(mz)
+            if not label:
+                continue
+            ax.text(
+                mz,
+                intensity,
+                label,
+                rotation=self._LABEL_ROTATION_DEG,
+                rotation_mode="anchor",
+                ha="left",
+                va="bottom",
+                fontsize=7,
+                color="#d62728",
+            )
+
+    def _label_for_hit(self, mz: float) -> str:
+        """Pick the label text for a single ion-hit m/z."""
+        # Match an entry in self._hit_name_by_mz by the nearest ion-hit mz.
+        best_key: float | None = None
+        best_diff = self._HIT_TOLERANCE
+        for hit_mz in self._hit_name_by_mz:
+            diff = abs(mz - hit_mz)
+            if diff <= best_diff:
+                best_diff = diff
+                best_key = hit_mz
+        name = self._hit_name_by_mz.get(best_key, "") if best_key is not None else ""
+        if name:
+            return name
+        return f"{mz:.2f}"
+
+    def _on_toggle_labels(self) -> None:
+        """Redraw the plot when the fragment-label checkbox toggles."""
+        if not hasattr(self, "_ax") or not hasattr(self, "_canvas"):
+            return
+        mzs, intensities, ion_hits = self._parse_peaks()
+        if not (mzs and intensities and len(mzs) == len(intensities)):
+            return
+        ion_hit_set = self._ion_hit_set
+        # Remove only the text labels; keep vlines and legend as-is.
+        for text in list(self._ax.texts):
+            text.remove()
+        if self._show_labels_var.get():
+            self._draw_fragment_labels(self._ax, mzs, intensities, ion_hit_set)
+        self._canvas.draw_idle()
 
     def _build_peak_table(self) -> None:
-        """Build a scrollable peak list panel with ion hit highlighting."""
+        """Build a scrollable peak list panel with ion-hit highlighting and
+        a ``Fragment`` column populated from the resolved fragment names.
+
+        Rows where no fragment name is available (BY-style hits or non-hits)
+        display a blank Fragment cell.
+        """
         mzs, intensities, ion_hits = self._parse_peaks()
         if not mzs:
             return
 
-        # Build ion hit set for marking
         ion_hit_indices: set[int] = set()
         if ion_hits:
             for i, mz in enumerate(mzs):
                 for hit_mz in ion_hits:
-                    if abs(mz - hit_mz) < 0.5:
+                    if abs(mz - hit_mz) <= self._HIT_TOLERANCE:
                         ion_hit_indices.add(i)
                         break
 
-        table_frame = ttk.LabelFrame(self, text=f"Peak List ({len(mzs)} peaks, {len(ion_hit_indices)} ion hits)")
+        table_frame = ttk.LabelFrame(
+            self,
+            text=f"Peak List ({len(mzs)} peaks, {len(ion_hit_indices)} ion hits)",
+        )
         table_frame.pack(fill="both", expand=True, padx=8, pady=(2, 4))
 
         text = tk.Text(table_frame, wrap="none", height=8, font=("Courier", 9))
@@ -1938,18 +2505,30 @@ class SpectrumPreviewDialog(tk.Toplevel):
         yscroll.pack(side="right", fill="y")
         text.pack(fill="both", expand=True)
 
-        # Tag for ion hits (red text)
-        text.tag_configure("ion_hit", foreground="#d62728", font=("Courier", 9, "bold"))
+        text.tag_configure(
+            "ion_hit", foreground="#d62728", font=("Courier", 9, "bold"),
+        )
 
-        # Header
-        header = f"  {'#':>4}  {'m/z':>14}  {'Intensity':>14}  {'Ion Hit':>8}\n"
+        header = (
+            f"  {'#':>4}  {'m/z':>14}  {'Intensity':>14}  "
+            f"{'Ion Hit':>8}  {'Fragment':<20}\n"
+        )
         text.insert("end", header)
-        text.insert("end", "  " + "-" * 46 + "\n")
+        text.insert("end", "  " + "-" * 68 + "\n")
 
         for i, (mz, intensity) in enumerate(zip(mzs, intensities)):
             is_hit = i in ion_hit_indices
             mark = "  *" if is_hit else ""
-            line = f"  {i+1:>4}  {mz:>14.4f}  {intensity:>14.1f}{mark:>8}\n"
+            # Fragment column is populated only for hits with a known name.
+            fragment = self._label_for_hit(mz) if is_hit else ""
+            # Non-named hits return the m/z-as-label fallback, which we do
+            # *not* want to repeat in the Fragment cell; strip it.
+            if fragment and fragment == f"{mz:.2f}":
+                fragment = ""
+            line = (
+                f"  {i+1:>4}  {mz:>14.4f}  {intensity:>14.1f}"
+                f"{mark:>8}  {fragment:<20}\n"
+            )
             if is_hit:
                 text.insert("end", line, "ion_hit")
             else:
