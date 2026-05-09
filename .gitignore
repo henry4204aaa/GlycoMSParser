@@ -1,7 +1,31 @@
+# Local archive / deprecated working files
+2025_demo/archive/
+tmpdata/
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs / temporary outputs
+*.log
+*.tmp
+*.bak
+*.old
+
+# Temporary JSON outputs
+*.temp.json
+*_temp.json
+*tmp*.json
+
+# other format should not be included
 *.ini
 *.pyc
 *.csv
 *.tsv
-testdata/thermo_convert.py
+*.zip
+
+# need to keep this for version display
+!project_version_manifest.ini
+
+# google drive
 .tmp.driveupload/
-desktop.ini
+.venv/
+.vscode/

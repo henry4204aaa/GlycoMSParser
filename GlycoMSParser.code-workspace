@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.defaultInterpreterPath": "C:\\Program Files\\Python310\\python.exe",
+		"python.terminal.launchArgs": [
+
+		]
+	}
+}

@@ -1,5 +1,0 @@
-#using dynaconf 
-#initialize the dynaconf on another branch to avoid unattended errors
-
-variables in the ms data processing
-ppm_tolerance = 5
