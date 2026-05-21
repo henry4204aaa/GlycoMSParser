@@ -4322,6 +4322,26 @@ def open_prepare_dataset_window():
             eligible = eligible[eligible["ion score"] >= min_score]
         eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm]
 
+        # Fix B-25-A: when every row was filtered out by Score A eligibility,
+        # the rest of this function (Score B re-ranking, legacy fallback, feature
+        # build, MS1 merge, negative-pool, CSV write) all assume a non-empty `sel`
+        # with Score B columns present. Defensively guarding each of those is
+        # whack-a-mole; abort with an actionable RuntimeError instead. Matches
+        # the existing failure pattern at line 4203. C-001 lock is preserved:
+        # Score A is the eligibility gate; if nothing passes Score A there is
+        # nothing for Score B to re-rank.
+        if eligible.empty:
+            raise RuntimeError(
+                f"[PL→Train] 0 rows passed Score A eligibility "
+                f"(min_ion_score={min_score}, max_abs_ppm={max_abs_ppm}).\n"
+                f"This usually means the PL was produced by the Score B pipeline "
+                f"(which writes ion_score=0) and the UI min_ion_score is > 0, OR "
+                f"the CGA parameters used to produce this PL don't match what the "
+                f"trainable build expects.\n"
+                f"Please re-confirm CGA parameters / the min_ion_score threshold "
+                f"and retry."
+            )
+
         # Legacy fallback selection (current behavior)
         order_cols = [scan_col] + (["ion score"] if use_score else ["ppm_error"])
         ascending  = [True] + ([False] if use_score else [True])
@@ -4335,13 +4355,21 @@ def open_prepare_dataset_window():
 
         # New: prefer Score B-selected rows when available
         has_scoreb_selected = "score_b_selected" in eligible.columns
-        has_selected_comp = "selected_composition" in eligible.columns
 
         if has_scoreb_selected:
-            scoreb_sel = eligible[eligible["score_b_selected"].map(_truthy)].copy()
+            # Fix B-25-B: cast mask to bool BEFORE indexing. On older pandas (1.x / early 2.x),
+            # `Series.map(callable)` on an empty Series loses dtype and returns object-dtype,
+            # then `df[empty_object_series]` is interpreted as `df[[]]` (column-selection)
+            # rather than a boolean row-mask — silently dropping all columns. astype(bool)
+            # + .loc[] removes both ambiguities.
+            _mask = eligible["score_b_selected"].map(_truthy).astype(bool)
+            scoreb_sel = eligible.loc[_mask].copy()
 
-            # keep only rows with a usable selected_composition if present
-            if has_selected_comp:
+            # Fix B-25-C: re-check column presence on scoreb_sel directly, not on a
+            # value cached from eligible.columns. The cached check went stale during the
+            # older-pandas column-drop quirk fixed above; rechecking here is cheap insurance
+            # in case any future code path drops the column between eligible and scoreb_sel.
+            if "selected_composition" in scoreb_sel.columns:
                 scoreb_sel = scoreb_sel[scoreb_sel["selected_composition"].map(_nonempty_label)].copy()
                 scoreb_sel["Structure"] = scoreb_sel["selected_composition"].astype(str).str.strip()
             else:

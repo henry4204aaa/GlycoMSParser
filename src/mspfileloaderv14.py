@@ -1,6 +1,6 @@
 import os
 version = "1.09.3"
-last_update = 20260501
+last_update = 20260521
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -18,6 +18,17 @@ import shutil
 import traceback
 import mspvalidator_merger as mspval
 import pandas as pd
+# 20260520 fix B-28 (Patch D, revised per Codex same-day): opt out of pandas 3.x
+# future.infer_string=True default. Mirrors the same opt-out in
+# mspvalidator_merger.py top (Patch C) for defense in depth — if v14 is launched
+# standalone or before mspval is imported, this still applies. Restores legacy
+# 'object' dtype for string columns; required for v14's read_csv on trainable /
+# prediction / converted CSVs and any downstream list-into-string assignment.
+# Guard: tolerate older pandas where the option does not exist (see mspval Patch C).
+try:
+    pd.options.future.infer_string = False
+except (AttributeError, KeyError):
+    pass
 import platform
 import msp_insilicomarker_withGPT as marker
 # --- Add near top-level imports ---
@@ -25,7 +36,7 @@ import os, joblib
 import compnewv4 as compv4  # assumes dev/test calls are guarded by if __name__ == "__main__"
 # Ion mining feature (safe to import even if file is absent)
 # 20250907 to solve ion suggest missing issue
-import importlib, sys, os, traceback
+import importlib, sys, os, traceback, io
 from pathlib import Path
 import pathcanon
 from typing import Dict
@@ -55,12 +66,13 @@ def _check_mod(name, alt=None):
     except Exception as e:
         return False, f"import failed: {e.__class__.__name__}: {e}"
 
-def _quick_diag(note=None):
-    print("=== GlycoMSP quick environment check ===")
-    print(f"Python: {sys.version.split()[0]}  ({sys.executable})")
-    print(f"Platform: {platform.platform()}")
+def _quick_diag(note=None, file=None):
+    f = file if file is not None else sys.stdout
+    print("=== GlycoMSP quick environment check ===", file=f)
+    print(f"Python: {sys.version.split()[0]}  ({sys.executable})", file=f)
+    print(f"Platform: {platform.platform()}", file=f)
     if note:
-        print(note)
+        print(note, file=f)
 
     wanted = [
         ("tkinter", None),      # stdlib (bundled on python.org installers)
@@ -73,24 +85,50 @@ def _quick_diag(note=None):
         ok, info = _check_mod(name, alt=mod)
         tag = "OK  " if ok else "MISS"
         shown = (mod or name)
-        print(f"{tag} {shown:<10} {info}")
+        print(f"{tag} {shown:<10} {info}", file=f)
 
     if os.name == "nt":
         ok, info = _check_mod("pymsfilereader")
         tag = "OK  " if ok else "MISS"
-        print(f"{tag} pymsfilereader {info}  (needed only for RAW conversion)")
+        print(f"{tag} pymsfilereader {info}  (needed only for RAW conversion)", file=f)
 
     if sys.version_info >= (3, 13):
         print("\n[Notice] Running on Python 3.13.",
-              "If wheels for numpy/pandas/scikit-learn are missing, prefer Python 3.11/3.12 for now.")
+              "If wheels for numpy/pandas/scikit-learn are missing, prefer Python 3.11/3.12 for now.",
+              file=f)
 
 def _excepthook(exctype, value, tb):
-    print("\n[StartupError] Unhandled exception during launch/import:\n")
-    traceback.print_exception(exctype, value, tb)
-    print()
-    _quick_diag()
+    log_path = None
+    try:
+        if os.name == "nt":
+            log_dir = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "GlycoMSP"
+        else:
+            log_dir = Path(os.path.expanduser("~")) / ".glycomsp"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"startup_error_{datetime.now():%Y%m%d_%H%M%S_%f}.log"
+    except Exception:
+        pass
+
+    buf = io.StringIO()
+    banner = "\n[StartupError] Unhandled exception during launch/import:\n"
+    print(banner, file=sys.stdout)
+    buf.write(banner + "\n")
+    traceback.print_exception(exctype, value, tb, file=sys.stdout)
+    traceback.print_exception(exctype, value, tb, file=buf)
+    print(file=sys.stdout)
+    buf.write("\n")
+    _quick_diag(file=sys.stdout)
+    _quick_diag(file=buf)
+
+    if log_path is not None:
+        try:
+            log_path.write_text(buf.getvalue(), encoding="utf-8")
+            print(f"\n[StartupError] Crash details saved to: {log_path}", file=sys.stdout)
+        except Exception as e:
+            print(f"\n[StartupError] Failed to save crash log: {e}", file=sys.stdout)
+
     _pause_if_no_tty()
-    # Swallow default hook to avoid duplicate tracebacks
+    sys.exit(1)
 sys.excepthook = _excepthook
 
 # Allow a no-import diagnostics mode:
@@ -254,11 +292,88 @@ else:
     class SuggestParams: pass
 # ===========================
 
+# 20260520 fix B-30: tkinter filedialog macOS-safety helpers.
+# Tk on macOS crashes (SIGABRT via setAllowedFileTypes / NSSavePanel nil-UTI)
+# when filetypes patterns or defaultextension use compound double-dot extensions
+# (*.exp.json, *.method.json) because no UTI exists for them. Helpers collapse
+# compound patterns to bare *.json on macOS and post-process SaveAs returns to
+# preserve the .exp.json / .method.json naming convention.
+# Per Codex round-2 verdict on packet codex_B30_macos_saveasdialog_review.md:
+#  - REPLACE (don't append) compound patterns with safe ones; fallback entries
+#    do not rescue because Tk crashes on the first bad UTI conversion.
+#  - Dedupe collapsed patterns preserving first label.
+#  - Skip multi-pattern strings ("*.xls *.xlsx") via " " not in pattern guard.
+#  - Both Save and Open dialogs need patching; _macos_append_compound_suffix is
+#    SAVE-ONLY (never call on askopenfilename returns — would mutate user-picked
+#    existing-file path).
+# Windows/Linux behavior is unchanged (helpers are pass-through).
+_IS_MACOS = platform.system() == "Darwin"
+
+
+def _macos_safe_filetypes(filetypes):
+    """Replace compound double-dot patterns (e.g. '*.exp.json', '*.method.json')
+    with '*.json' on macOS, then dedupe by pattern preserving the first label.
+    Pass-through on Windows/Linux. Returns a new list.
+
+    Skips multi-pattern strings like '*.xls *.xlsx' which are not compound
+    suffixes but multiple patterns in one Tk pattern string.
+    """
+    if not _IS_MACOS:
+        return filetypes
+    safe = []
+    seen_patterns = set()
+    for label, pattern in filetypes:
+        if (
+            isinstance(pattern, str)
+            and " " not in pattern
+            and pattern.startswith("*.")
+            and pattern.count(".") > 1
+        ):
+            new_pattern = "*.json"
+        else:
+            new_pattern = pattern
+        if new_pattern in seen_patterns:
+            continue
+        seen_patterns.add(new_pattern)
+        safe.append((label, new_pattern))
+    return safe
+
+
+def _macos_safe_defaultextension(ext):
+    """Collapse compound double-dot defaultextension to '.json' on macOS.
+    SaveAs callers should pair this with _macos_append_compound_suffix on the
+    returned path. Pass-through on Windows/Linux or empty input."""
+    if not _IS_MACOS or not ext:
+        return ext
+    if ext.count(".") > 1:
+        return ".json"
+    return ext
+
+
+def _macos_append_compound_suffix(path, compound_suffix):
+    """SAVE-ONLY. If macOS user-returned SaveAs path doesn't end in the compound
+    suffix, append it (handling the 'user picked .json' case by upgrading to
+    the compound form). No-op on Windows/Linux or empty path. compound_suffix
+    should start with '.' (e.g. '.exp.json').
+
+    Per Codex round-2 verdict on B-30: never call on askopenfilename returns
+    — the user selected a specific existing file and the path must not be
+    rewritten. Use only on asksaveasfilename() returns.
+    """
+    if not _IS_MACOS or not path:
+        return path
+    if path.endswith(compound_suffix):
+        return path
+    if path.endswith(".json"):
+        return path[:-5] + compound_suffix
+    return path + compound_suffix
+# ===========================
+
 # Changelogs:
 # v1.5 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
 # v1.3 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
 # v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
-# v1.1 (future) fix the old macos crash issue due to malformed tkinter askopenfilename (see crash report analysis in GPT chat)
+# v1.1 [stable version for publish] fix the old macos crash issue in tkinter, confirmed full pipeline executable on both Windows (fixed package version) and MacOS (py3.12+, latest packages) 
 # v1.09.5 refactoring v1.09.23 fix conversion early fire issue. If conversion at Thermo COM level fails, need to close app to release. Marked for future fix.
 # v1.09.3 deep review and add comments for further refactor work (Claude Code involved)
 # v1.09.1 dead code cleanup
@@ -462,14 +577,16 @@ class CGASetupWindow(tk.Toplevel):
             if ext not in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
                 return False, "Score B workbook must be an Excel workbook (.xlsx/.xlsm)."
 
+            # 20260518 B-12 fold-in (issue c): split import-try from validation-try (was silently downgrading real ImportError from transitive deps)
             try:
-                # Preferred: deep workbook validation from your Score B module
                 from msp_CGA_structscore import ScoreBLoader
-                ScoreBLoader(path).load()
-                return True, "Workbook validated successfully."
             except ImportError:
                 # Fallback if module import is not ready in this environment yet
                 return True, "Workbook file looks acceptable (deep validation unavailable in this build)."
+            try:
+                # Preferred: deep workbook validation from your Score B module
+                ScoreBLoader(path).load()
+                return True, "Workbook validated successfully."
             except Exception as e:
                 return False, f"Score B workbook validation failed:\n{e}"
 
@@ -591,8 +708,8 @@ class CGASetupWindow(tk.Toplevel):
         # Define the keys group for the CGA window
         # Keys that belong to the "Advanced options" collapsible group
         ADVANCED_KEYS = {"debug", "dev", "force_exit", "topology", "perman"}
-        # Keys that belong to the "glycotope restraints" sub-frame
-        GLYCOTOPE_KEYS = {
+        # Keys that belong to the "glyco-feature restraints" sub-frame
+        GLYCO_FEATURE_KEYS = {
             "alphagal_like","allowldnc","allowleby","allow5ac","allow5gc",
             "allowkdn","allowfuc","allowpsa","allowHexA", "allowldnf"
         }
@@ -626,7 +743,7 @@ class CGASetupWindow(tk.Toplevel):
             label = key
             if key == "arm_count":
                 label = "arm_count (N-glycans)"
-            ttk.Label(parent, text=key + ":").grid(row=row, column=0, sticky="w")
+            ttk.Label(parent, text=label + ":").grid(row=row, column=0, sticky="w")
             var = tk.IntVar(value=_coerce_int_like(self.flags.get(key, 0), 0))
             ttk.Spinbox(parent, from_=lo, to=hi, textvariable=var, width=6).grid(row=row, column=1, sticky="w", padx=6)
             self.flag_vars[key] = var
@@ -702,8 +819,8 @@ class CGASetupWindow(tk.Toplevel):
             # choose keys for current glycan type
             keys = [k for k in flag_spec.keys() if k in _current_keys()]
 
-            # split into glycotope / main / advanced
-            glycotope_keys = [k for k in keys if k in GLYCOTOPE_KEYS]
+            # split into glyco-feature / main / advanced
+            glyco_feature_keys = [k for k in keys if k in GLYCO_FEATURE_KEYS]
             internal_keys = [k for k in keys if k in INTERNAL_EXT_KEYS]
             ngcore_keys = [k for k in keys if k in NG_CORE_KEYS]
             substituent_neg_keys = [k for k in keys if k in SUBSTITUENT_NEG_KEYS]
@@ -712,7 +829,7 @@ class CGASetupWindow(tk.Toplevel):
                 k for k in keys
                 if (
                     k not in ADVANCED_KEYS
-                    and k not in GLYCOTOPE_KEYS
+                    and k not in GLYCO_FEATURE_KEYS
                     and k not in INTERNAL_EXT_KEYS
                     and k not in NG_CORE_KEYS
                     and k not in SUBSTITUENT_NEG_KEYS
@@ -741,13 +858,13 @@ class CGASetupWindow(tk.Toplevel):
                     r += 1
                 return r
 
-            # --- glycotope restraints sub-frame (left side) ---
+            # --- glyco-feature restraints sub-frame (left side) ---
             left_start_row = 0
-            # row 0: glycotope restraints
-            if glycotope_keys:
-                glyco_frame = ttk.LabelFrame(left, text="glycotope restraints")
+            # row 0: glyco-feature restraints
+            if glyco_feature_keys:
+                glyco_frame = ttk.LabelFrame(left, text="glyco-feature restraints")
                 glyco_frame.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-                render_column(glyco_frame, glycotope_keys, start_row=0)
+                render_column(glyco_frame, glyco_feature_keys, start_row=0)
                 left_start_row = 1 # other left-column flags start under this frame
 
             # row 1: substituent(neg)
@@ -847,8 +964,6 @@ class CGASetupWindow(tk.Toplevel):
         links_frame = ttk.LabelFrame(self, text="Files selected for CGA analysis")
         links_frame.pack(fill="x", padx=12, pady=(6, 0))
 
-        self.insilico_path_var = tk.StringVar(value=initial_insilico or "")
-        self.ionlist_path_var  = tk.StringVar(value=initial_ionlist or "")
         # allow the path column to expand
         links_frame.columnconfigure(1, weight=1)
 
@@ -1015,6 +1130,8 @@ class CGASetupWindow(tk.Toplevel):
                 out[k] = bool(v.get())
             else:
                 out[k] = int(v.get())
+        # 20260518 B-13: persist OG core types (previously lost on save/load)
+        out["coretype"] = [i for i, v in self.og_core_vars.items() if v.get()]
         return out
 
     def load_flags(self):
@@ -1035,6 +1152,10 @@ class CGASetupWindow(tk.Toplevel):
                     w.set(bool(v))
                 else:
                     w.set(int(v))
+            # 20260518 B-13: restore OG core types (gracefully absent in legacy saves)
+            cores = data.get("coretype", [])
+            for i, v in self.og_core_vars.items():
+                v.set(i in cores)
             messagebox.showinfo("Flags Loaded", f"Loaded: {os.path.basename(path)}")
         except Exception as e:
             messagebox.showerror("Load Failed", str(e))
@@ -1081,8 +1202,6 @@ class MetadataEditorWindow:
             "Experiment Title", "Experiment Description", "Author running this analysis",
             "Raw data acquired date", "Glycan Type", "Mass Analyzer charge mode", "Derivatization Type"
         ]
-        #20250927
-        self._tmp_paths = None
 
         self.window = tk.Toplevel(parent)
         # 20250917
@@ -1135,7 +1254,7 @@ class MetadataEditorWindow:
         tk.Button(button_frame, text="Use Last Metadata", command=self.use_last_metadata).grid(row=0, column=1, padx=5)
         tk.Button(button_frame, text="Clear", command=self.clear_fields).grid(row=0, column=2, padx=5)
         tk.Button(button_frame, text="Generate Dataset", command=self.generate).grid(row=0, column=3, padx=5)
-        tk.Button(button_frame, text="Cancel", command=self.window.destroy).grid(row=0, column=4, padx=5)
+        tk.Button(button_frame, text="Cancel", command=self._cancel_editor).grid(row=0, column=4, padx=5)  # 20260519 [B-26]: was self.window.destroy (orphaned tmps + bar)
 
         label = tk.Label(self.window, text="Raw File (optional):")
         label.grid(row=button_row + 1, column=0, padx=10, pady=5, sticky="w")
@@ -1154,6 +1273,34 @@ class MetadataEditorWindow:
 
         tk.Button(raw_file_frame, text="Browse", command=select_raw_file).pack(side=tk.LEFT, padx=5)
 
+    def _cancel_editor(self):
+        """20260519 [B-26] Unified cancel handler: cleanup mzml tmps + invoke on_finish + destroy window.
+        Why: bare window.destroy from the Cancel button left ms2tmp_/ms3tmp_ orphaned (mzml path)
+        and the indeterminate progress bar animating indefinitely (both paths). on_finish ==
+        reset_main_status callback wired at MetadataEditorWindow construction, which calls
+        progress.stop() + sets status='Idle' + re-enables the convert button.
+        """
+        try:
+            for p in [self.files.get("ms2tmp"), self.files.get("ms3tmp")]:
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        # 20260519 [B-26] log success — diagnostic value for Henry + testers (especially when current extraction overwrote a pre-existing orphan from a prior session, then this cleanup removes it)
+                        logger.log(f"[Cleanup] Removed leftover temp file (cancel path): {p}")
+                    except OSError as e:
+                        logger.log(f"[Cleanup] cancel: failed to remove {p}: {e}")
+        except Exception:
+            pass
+        try:
+            if callable(getattr(self, "on_finish", None)):
+                self.on_finish()
+        except Exception:
+            pass
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+
     #20251001 replace
     def on_conversion_complete(self):
         # Status (your existing line)
@@ -1169,9 +1316,6 @@ class MetadataEditorWindow:
         except tk.TclError:
             # Widget already destroyed; nothing else to do here
             return
-
-        # Extract filename base (your existing line)
-        self.rawfilename = os.path.splitext(os.path.basename(self.current_raw_file))[0]
 
         # Re-enable entries and buttons (guard each widget in case the window is closing)
         try:
@@ -1207,10 +1351,6 @@ class MetadataEditorWindow:
         self.window.title(f"Converting: {os.path.basename(raw_file)}")
         self.clear_fields()
 
-        # Add status label if not already there
-        if not hasattr(self, "status_label"):
-            self.status_label = tk.Label(self.window, text="", fg="blue")
-            self.status_label.grid(row=0, columnspan=2, pady=10)
         #self.status_label.config(text="Converting raw file... please wait.", fg="blue")
         self._safe_set_status("Converting raw file... please wait.", fg="blue")
 
@@ -1272,7 +1412,8 @@ class MetadataEditorWindow:
             except Exception as e:
                 self._convert_in_progress = False
                 logger.log(f"[FATAL] Exception during raw file conversion: {e}")
-                self._enter_error_mode("An error occurred. Please check the log.")
+                # 20260518 B-10: marshal to Tk main thread (was direct call from worker)
+                self._safe_after(0, lambda: self._enter_error_mode("An error occurred. Please check the log."))
 
                 try:
                     for p in [self.files.get("ms2tmp"), self.files.get("ms3tmp")]:
@@ -1371,6 +1512,11 @@ class MetadataEditorWindow:
                 try:
                     self.window.destroy()                                             
                 except Exception:                                 
+                    pass
+                # 20260519 [B-26] stop indeterminate progress bar after force-close; status="Idle (cancelled)" below preserves yellow indicator
+                try:
+                    progress.stop()
+                except Exception:
                     pass
                 set_main_status("Idle (cancelled)", fg="orange")
                 return                                                                
@@ -1662,10 +1808,10 @@ def clean_cols(df):
 
 #fix in 20251001
 def _read_ion_df(path):
+    """Read ion list from .xlsx/.xls (preferred) or .csv (comma-separated)."""
     if not path:
         return None
     p = str(path).lower()
-    ext = os.path.splitext(path)[1].lower() #need or not need
     if p.endswith((".xlsx", ".xls")):
         try:
             sheets = pd.read_excel(path, sheet_name=None)
@@ -1690,13 +1836,10 @@ def _read_ion_df(path):
                 "Reading .xlsx needs 'openpyxl'.\n\nPlease install:\n\npip install openpyxl"
             )
             raise            
-    elif p in (".csv", ".tsv"):
-        sep = "\t" if ext == ".tsv" else ","
-        return {"ionlist": pd.read_csv(path, sep=sep, encoding="utf-8")}
     else:
         try:
             df = pd.read_csv(path, engine="python")
-        except:
+        except Exception:
             raise ValueError(f"Unsupported ion-list file: {path}")
 
     # normalize a mass column name
@@ -1860,11 +2003,8 @@ def launch_metadata_batch():
             on_finish=reset_main_status,
             input_kind="mzml"
             )
-        messagebox.showinfo(
-            "mzML Support (Preview)",
-            "mzML file was selected.\n\n"
-            "For now, please convert from Thermo .RAW on Windows as usual."
-        )
+        # 20260519 [B-23-E] removed Preview notification window. mzML is now functional, 
+        # the concern of minimal requirements for mzML conversion can be found at user manuals
         return
 
     # (Optional) prevent ambiguous mixed selection
@@ -1875,14 +2015,6 @@ def launch_metadata_batch():
             "Please convert one format at a time (clear one selection and retry)."
         )
         return
-    if not mspmzmlext.mzmlavailable:
-        logger.log("[ERROR] mzml file conversion is not available — pymzml missing.")
-        messagebox.showerror(
-            "MZML Conversion Not Available",
-            "pymzml is not installed.\n"
-            "If this package is not served in Python 3.13, please run the conversion in lower version of python."
-        )
-        return        
 
     if not mspext.pymsreader:
         logger.log("[ERROR] Raw file conversion is not available — pymsfilereader missing.")
@@ -2350,6 +2482,12 @@ def normalize_method_json(method_obj: dict, method_path: str, base_dir: str = No
             "unlabeled_csv": None,
             "reports": []
         },
+        # 20260521 B-32 (Codex defer + document, NOT a semantic change): the
+        # `validation` block here is reserved for future method/file integrity
+        # checks (v1.2+), NOT current GUI sample-validation state. Current MAS
+        # sample validation is workspace-scoped and persisted in exp.json
+        # `samples[].validated` (see export_experiment_json). CGA currently has
+        # no equivalent user-facing validation flow; it keeps this scaffold as "unknown".
         "validation": {
             "status": "unknown",
             "checked_utc": None,
@@ -2510,8 +2648,8 @@ def open_prepare_dataset_window():
                 "tags": []
             },
             "workspace": {
-                "preferred_method_folder": sample_method_folder if "sample_method_folder" in globals() else "",
-                "preferred_exp_path": experiment_method_paths.get(exp_title, "") if "experiment_method_paths" in globals() else "",
+                "preferred_method_folder": sample_method_folder or "",
+                "preferred_exp_path": experiment_method_paths.get(exp_title, "") or "",
                 "ui_order": list(samples.keys())
             },
             "samples": [],
@@ -2540,9 +2678,6 @@ def open_prepare_dataset_window():
                         "status": "unknown",
                         "notes": ""
                     }]
-            if not methods:
-                print("legacy might hit this")
-                out_methods = []
             out_methods = []
             for m in methods:
                 mpath = m.get("path") or m.get("method_path") or m.get("json")
@@ -2612,8 +2747,10 @@ def open_prepare_dataset_window():
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
         experiment_method_paths[exp_title] = out_path
-        if exp_title in experiment_status_labels:
-            experiment_status_labels[exp_title].config(text=f"EXP file: {out_path}")
+        if exp_title in experiment_status_labels:  # 20260515 fix B-06: mirror tuple-unpack pattern from load_experiment_method_file (was AttributeError on tuple).
+            path_label, _ = experiment_status_labels[exp_title]
+            if path_label:
+                path_label.set(f"EXP file: {out_path}")
         logger.log(f"[EXP v1] Saved → {out_path}")
         return out_path
 
@@ -2736,21 +2873,12 @@ def open_prepare_dataset_window():
                     _fam_auto = _detect_legacy_family(files)
                     if _fam_auto:
                         logger.log(f"[LEGACY] {sname}: no methods in v1 JSON → auto-detecting {_fam_auto}")
-                        print(f"[LEGACY DEBUG v1] {sname}: family={_fam_auto}, "
-                              f"insilico={bool(files.get('insilico_csv'))}, "
-                              f"ionlist={bool(files.get('ionlist_path'))}, "
-                              f"excel={bool(files.get('excel'))}")
                         _ensure_method_stub(files, family=_fam_auto, sample_name=sname)
                         try:
                             _leg_path = save_method_v1_for_sample(exp_name=exp_title, sample_name=sname, kind=_fam_auto, auto=True)
                             logger.log(f"[LEGACY] Created: {_leg_path}")
                         except Exception as e_leg:
                             logger.log(f"[LEGACY] Conversion failed for {sname}: {e_leg}")
-
-                # [ML-1 DEBUG] temporary trace for Issue-2 diagnosis
-                print(f"[ML-1 DEBUG] {sname}: s.validated={s.get('validated')}, "
-                      f"files.excel={bool(files.get('excel'))}, "
-                      f"_methods={files.get('_methods')}")
 
                 #fixed 20260313 ML-1: auto-create MAS method for legacy v11 samples
                 # Validated samples loaded from v11 JSON may lack a MAS method entry.
@@ -2959,6 +3087,22 @@ def open_prepare_dataset_window():
         # legacy compatibility: lots of code still reads files["json"]
         files["json"] = out_path
 
+    # 20260521 fix B-31 (MAS+CGA, Codex Option B + Q7): resolve method.json output path.
+    # Reuse existing registered path for this (sample, family) if it still exists on disk;
+    # else return a stable name (no timestamp). Replaces the prior timestamped-on-every-save
+    # convention that accumulated orphan method.json files in sample_method_folder.
+    # Hash mismatch on overwrite is acceptable per validation_policy.allow_hash_mismatch=True
+    # (warn-only UX until exp.json is re-saved).
+    def _resolve_method_out_path(files: dict, sample_name: str, family: str, base_dir: str) -> str:
+        famU = (family or "").upper()
+        methods = files.get("_methods") or []
+        for m in methods:
+            if (m.get("family") or "").upper() == famU:
+                mp = m.get("path")
+                if isinstance(mp, str) and mp.strip() and os.path.exists(mp):
+                    return mp
+        return os.path.join(base_dir, f"{sample_name}.{famU}.method.json")
+
     # Method export writer
     def _export_method_v1(force_family: str):
         exp_name, sample_name, method_path = _get_selected_context() 
@@ -2985,11 +3129,16 @@ def open_prepare_dataset_window():
             return
         # Save
         try:
+            # 20260521 fix B-31 sister (logger gap close): manual-export observability.
+            # filedialog already prompts "overwrite?" if file exists, but a forensic
+            # log entry is still useful since users may intentionally pick the same name.
+            _path_existed = os.path.exists(out_path)
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(v1, f, indent=2, ensure_ascii=False)
             files = experiment_projects[exp_name]["samples"][sample_name]
             _register_or_update_method_ref(files, out_path, family=force_family)
             refresh_tree()
+            logger.log(f"[Method v1][{force_family}][Manual Export] {'Updated existing' if _path_existed else 'Created new'}: {out_path}")
         except Exception as e:
             messagebox.showerror("Method v1", f"Failed to save:\n{out_path}\n{e}")
             return
@@ -3157,7 +3306,7 @@ def open_prepare_dataset_window():
                                     elif ftype == "ionlist_path":
                                         label = "Ion List"
                                     elif ftype == "pseudolabel_csv":
-                                        label = "Pseudolabel CSV"
+                                        label = "CGA result tsv"
                                     elif ftype == "score_b_workbook_path":
                                         label = "CGA score B reference"
                                     elif ftype == "trainable_csv":
@@ -3421,16 +3570,9 @@ def open_prepare_dataset_window():
                 validate="key", validatecommand=(vcmd, "%P")
                 ).grid(row=3, column=1, sticky="w", padx=6, pady=2)
 
-        # live hint
-        tk.Label(dlg, textvariable=gate_hint_var, fg="#555").grid(row=4, column=0, columnspan=2,
-                                                                sticky="w", padx=10, pady=(6,10))
-
         tk.Button(dlg, text="Load ion list now…",
           command=_fetch_ion_count_for_dialog).grid(row=4, column=0, columnspan=2,
                                                             sticky="w", padx=10, pady=(6,0))
-        # move the hint to next row
-        tk.Label(dlg, textvariable=gate_hint_var, fg="#555").grid(row=5, column=0, columnspan=2,
-                                                                sticky="w", padx=10, pady=(6,10))
 
         # react when min-hits changes
         def _on_hits_change(*_): _update_gate_hint()
@@ -3439,7 +3581,10 @@ def open_prepare_dataset_window():
         # initialize text
         _update_gate_hint()
 
-        tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=5, column=0, columnspan=2, pady=(4,10))
+        # live hint label (single placement at clean row; see freeze v1.10 S6.5 cluster_triage_2026_05_18.md issue m)
+        tk.Label(dlg, textvariable=gate_hint_var, fg="#555").grid(row=6, column=0, columnspan=2,
+                                                                sticky="w", padx=10, pady=(6,10))
+        tk.Button(dlg, text="Close", command=dlg.destroy).grid(row=7, column=0, columnspan=2, pady=(4,10))
     # Negative Sampling Options block end
     # ===================================
 
@@ -3491,8 +3636,8 @@ def open_prepare_dataset_window():
             return
         
         # Validate CSV format
-        if not mspval.validate_csv_structure(sample["csv"]): #when it returns False meaning failed 
-            messagebox.showerror("CSV Validation Failed")#, f"{sample['csv']}")
+        if not mspval.validate_csv_structure(sample["csv"]): #when it returns False meaning failed
+            messagebox.showerror("CSV Validation Failed", f"File: {os.path.basename(sample['csv'])}\nSee log for details.")
             logger.log(f"[Validation Failed] Spectral data CSV failed: {sample['csv']}\n")
             validation_failed_samples.add((exp_name, sample_name))
             refresh_tree()
@@ -3519,7 +3664,7 @@ def open_prepare_dataset_window():
         MSlistdf = pd.read_excel(anno, sheet_name="MSlist")
         ionlistdf = pd.read_excel(anno, sheet_name="ionlist")
         if not mspval.validate_annotation_structure(MSlistdf):
-            messagebox.showerror("Excel Validation Failed")
+            messagebox.showerror("Excel Validation Failed", f"File: {os.path.basename(sample['excel'])}\nSee log for details.")
             logger.log(f"[Validation Failed] MAS Annotation failed: {sample['excel']}\n")
             validation_failed_samples.add((exp_name, sample_name))
             refresh_tree()
@@ -3584,7 +3729,6 @@ def open_prepare_dataset_window():
         #fixed 20260313 ML-2: ensure MAS method exists before merge
         # Legacy samples may not have a MAS method node; create one now so merge can proceed.
         if not files.get("_methods") or not any(m.get("family") == "MAS" for m in files.get("_methods", [])):
-            print(f"[DEBUG]: add MAS method node (for legacy validated but not merged file)")
             _ensure_method_stub(files, family="MAS", sample_name=sample_name)
             save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="MAS", auto=True)
 
@@ -3598,7 +3742,6 @@ def open_prepare_dataset_window():
             messagebox.showerror(
                 "Merge Failed\n","Could not locate the metadata."
             )
-            print(f"[DEBUG] Could not locate the metadata.")
             logger.log(f"[ERROR 1] Metadata lost, merge abort")
             return
 
@@ -3606,7 +3749,6 @@ def open_prepare_dataset_window():
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
             derivatization_type = metadata.get("Derivatization Type", "Others")
-            print(f"[DEBUG] Derivatization Type is {derivatization_type}")
             if derivatization_type == "Others":
                 value = simpledialog.askfloat("Custom Derivatization Mass","Enter custom derivatization mass (e.g., 50.1234):")
                 if value is None:
@@ -3686,7 +3828,7 @@ def open_prepare_dataset_window():
                         messagebox.showwarning("Ion Mining", f"Suggestion failed:\n{e}")
 
             mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
-            messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(os.path.basename(outpath))}")
+            messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(outpath)}")
             #fixed 20260313 ML-2: update method after merge completes
             # 20260416 add trainable_csv tracking (in future we may need subnode, or separated ML method under same MAS/CGA method)
             files["trainable_csv"] = outpath 
@@ -3787,7 +3929,7 @@ def open_prepare_dataset_window():
             if hexc:  parts.append(f"N{hexc}")
             if neuac: parts.append(f"S{neuac}")
             if neugc: parts.append(f"G{neugc}")
-            if kdn:   parts.append(f"K{kdn}")
+            if kdn:   parts.append(f"KDN{kdn}")   # 20260517 fix B-01: 3-char KDN token (was "K{kdn}"); matches _MANUAL_EXT validator + future trainable-CSV consumers
             return "".join(parts) if parts else None
         return None
 
@@ -3990,8 +4132,28 @@ def open_prepare_dataset_window():
             eligible = eligible[eligible["ion score"] >= min_score]
         # 20260416 nan version, if not working rollback
         if "ppm_error" in pl.columns and pl["ppm_error"].notna().any():
-            eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm]  
+            eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm]
         #eligible = eligible[eligible["ppm_error"].abs() <= max_abs_ppm] #old #9e9 version use this line
+
+        # Fix B-25-A: when every row was filtered out by Score A eligibility,
+        # the rest of this function (Score B re-ranking, legacy fallback, feature
+        # build, MS1 merge, negative-pool, CSV write) all assume a non-empty `sel`
+        # with Score B columns present. Defensively guarding each of those is
+        # whack-a-mole; abort with an actionable RuntimeError instead. Mirrors
+        # the equivalent v14db abort. C-001 lock is preserved: Score A is the
+        # eligibility gate; if nothing passes Score A there is nothing for
+        # Score B to re-rank.
+        if eligible.empty:
+            raise RuntimeError(
+                f"[CGA→Train] 0 rows passed Score A eligibility "
+                f"(min_ion_score={min_score}, max_abs_ppm={max_abs_ppm}).\n"
+                f"This usually means the PL was produced by the Score B pipeline "
+                f"(which writes ion_score=0) and the UI min_ion_score is > 0, OR "
+                f"the CGA parameters used to produce this PL don't match what the "
+                f"trainable build expects.\n"
+                f"Please re-confirm CGA parameters / the min_ion_score threshold "
+                f"and retry."
+            )
 
         # Legacy fallback selection (current behavior), score A based selection is copied to legacy_sel
         order_cols = [pl_scan_col] + (["ion score"] if use_score else ["ppm_error"]) #replaced pl_scan_col
@@ -4006,13 +4168,21 @@ def open_prepare_dataset_window():
 
         # New: prefer Score B-selected rows when available
         has_scoreb_selected = "score_b_selected" in eligible.columns
-        has_selected_comp = "selected_composition" in eligible.columns
 
         if has_scoreb_selected:
-            scoreb_sel = eligible[eligible["score_b_selected"].map(_truthy)].copy()
+            # Fix B-25-B: cast mask to bool BEFORE indexing. On older pandas (1.x / early 2.x),
+            # `Series.map(callable)` on an empty Series loses dtype and returns object-dtype,
+            # then `df[empty_object_series]` is interpreted as `df[[]]` (column-selection)
+            # rather than a boolean row-mask — silently dropping all columns. astype(bool)
+            # + .loc[] removes both ambiguities.
+            _mask = eligible["score_b_selected"].map(_truthy).astype(bool)
+            scoreb_sel = eligible.loc[_mask].copy()
 
-            # keep only rows with a usable selected_composition if present
-            if has_selected_comp:
+            # Fix B-25-C: re-check column presence on scoreb_sel directly, not on a
+            # value cached from eligible.columns. The cached check went stale during the
+            # older-pandas column-drop quirk fixed above; rechecking here is cheap insurance
+            # in case any future code path drops the column between eligible and scoreb_sel.
+            if "selected_composition" in scoreb_sel.columns:
                 scoreb_sel = scoreb_sel[scoreb_sel["selected_composition"].map(_nonempty_label)].copy()
                 scoreb_sel["Structure"] = scoreb_sel["selected_composition"].astype(str).str.strip()
             else:
@@ -4186,7 +4356,9 @@ def open_prepare_dataset_window():
 
         # attach label next; do NOT subset columns yet
         # updated 20260330
-        merge_cols = [pl_scan_col, "Structure"] + (["selection_source"] if "selection_source" in sel.columns else [])
+        # 20260517 fix B-17: also carry label metadata columns (Glycanannotation2 / GlyToucan ID / WURCS) into pos_feat when present in CGA TSV `sel`. Without this, the finalize block at line 4432 would always produce empty metadata columns even when the upstream CGA TSV had user-supplied or B-17-Edit-1-seeded values (Codex Edit 2 flag).
+        _b17_meta_cols = [c for c in ("Glycanannotation2", "GlyToucan ID", "WURCS") if c in sel.columns]
+        merge_cols = [pl_scan_col, "Structure"] + (["selection_source"] if "selection_source" in sel.columns else []) + _b17_meta_cols
         pos_feat = pos_feat.merge(sel[merge_cols],
                                 left_on="MS2scan_no", right_on=pl_scan_col,
                                 how="left").drop(columns=[pl_scan_col]) #pl_scan_col
@@ -4399,16 +4571,20 @@ def open_prepare_dataset_window():
             print("[CGA→Train][DEBUG][auto] MS1 feature disabled → dropped MS1 columns in trainable csv product")
 
         # order columns for saving
-        feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure")]
+        # 20260517 fix B-17: ensure label metadata columns exist (empty-fill if absent post-merge — covers pre-Edit-1 CGA TSVs / reuse-mode trainable CSVs without metadata); reorder so they sit adjacent to Structure (label-metadata block), not at the tail of the feature block. Excludes them from feature_cols so wildcard whitelist doesn't classify them as ML features.
+        for _b17_label_col in ("Glycanannotation2", "GlyToucan ID", "WURCS"):
+            if _b17_label_col not in final_df.columns:
+                final_df[_b17_label_col] = ""
+        feature_cols = [c for c in final_df.columns if c not in ("MS2scan_no","Structure","Glycanannotation2","GlyToucan ID","WURCS")]
         if include_mass_feature and "protonatedmass" in final_df.columns:
             # 20260417 code review: fix the guarantee of protonatedmass should be at the beginning of feature rows, next to "MS2scan_no","Structure"
-            feature_cols = [c for c in feature_cols if c != "protonatedmass"]                
+            feature_cols = [c for c in feature_cols if c != "protonatedmass"]
             feature_cols.insert(0, "protonatedmass")
         else:
             # explicitly drop if user disabled
             feature_cols = [c for c in feature_cols if c != "protonatedmass"]
 
-        final_df = final_df[["MS2scan_no","Structure"] + feature_cols]
+        final_df = final_df[["MS2scan_no","Structure","Glycanannotation2","GlyToucan ID","WURCS"] + feature_cols]
 
         final_df.to_csv(output_path, index=False)
         log(f"[CGA→Train] saved: {output_path}")
@@ -4585,9 +4761,9 @@ def open_prepare_dataset_window():
                 add_legacy_repr=True,
             ).copy()
             logger.log(f"[DEBUG] in silico library is loaded and normalized")
-        except:
-            logger.log(f"[ERROR 1] in silico library normalization failed")
-            messagebox.showerror("in silico library normalization failed. Is marker module missing?")
+        except Exception as e:
+            logger.log(f"[ERROR 1] in silico library normalization failed: {e}")
+            messagebox.showerror("In-silico library normalization failed", f"Could not normalize the in-silico glycan library.\nSee log for details.\n\n{e}")
             return
         
         # IMPORTANT: keep modifier columns on the normalized table
@@ -4800,8 +4976,8 @@ def open_prepare_dataset_window():
             except Exception as e:
                 import traceback; traceback.print_exc()
                 # 5b) fallback — always produce basic ion columns with score_counter
-                logger.log("[CGA→Train][EXCEPTION] Using fallback ion scoring with hardcoded PerMe N-glycan anchor masses (204.087, 366.140, 512.197 Da). ")
-                print("[CGA→Train][EXCEPTION] Using fallback ion scoring with hardcoded PerMe N-glycan anchor masses (204.087, 366.140, 512.197 Da). ")
+                logger.log("[CGA→Train][EXCEPTION] Using fallback ion scoring (simple fraction of logI>1 matches / reference ion count). ")
+                print("[CGA→Train][EXCEPTION] Using fallback ion scoring (simple fraction of logI>1 matches / reference ion count). ")
                 try:
                     matched = _fallback_simple_ion_scoring(matched, ion_df, ion_ppm)
                     ion_scoring_status = "ok(fallback)"
@@ -4845,6 +5021,11 @@ def open_prepare_dataset_window():
         )
         # just in case it sneaks in from elsewhere:
         out.drop(columns=["observed_mass"], errors="ignore", inplace=True)
+        # 20260517 fix B-17: seed label metadata columns with empty defaults so CGA-produced TSVs match the v5 MAS schema. Preserves user-supplied values when upstream `df` already carries them (MAS-converted-reused-for-CGA path).
+        # FUTURE-API-HOOK: primary Glycosmos composition API integration point — when the external API caller/collector lands post-freeze, fill GlyToucan ID + WURCS from `selected_composition` / `composition` here, replacing the empty-string defaults below. Single composition string → (glytoucan_id, wurcs) round trip; no structural change to this block needed.
+        for _b17_label_col in ("Glycanannotation2", "GlyToucan ID", "WURCS"):
+            if _b17_label_col not in out.columns:
+                out[_b17_label_col] = ""
        #20250930 fix win11 issue
        # 7) Save TSV next to converted CSV  (ABSOLUTE + explicit encoding)
         outdir  = os.path.dirname(os.path.abspath(csv_path))
@@ -4877,7 +5058,7 @@ def open_prepare_dataset_window():
         # ALWAYS hop back to Tk main thread for UI work
         if parent:
             subwin.after(0, lambda p=outpath: messagebox.showinfo(
-                "Pseudolabeling complete", f"Saved and linked:\n{p}"
+                "CGA analysis complete", f"Saved and linked:\n{p}"
             ))
         subwin.after(0, refresh_tree)
         return outpath     # 20260501 fix issue (v): expose outpath
@@ -5013,7 +5194,9 @@ def open_prepare_dataset_window():
             "metadata": [("Metadata JSON", "*.json")],            
             "all": [("All files", "*.*")]                                                    
         }     
-        filetypes = filetypes_dict.get(filetype_key, filetypes_dict["all"])
+        # 20260520 fix B-30: macOS-safe filetypes wrap (closes indirect path for
+        # filetype_key="method" / "experiment" without touching call sites).
+        filetypes = _macos_safe_filetypes(filetypes_dict.get(filetype_key, filetypes_dict["all"]))
         # 20260417 add crash prevention on certain macos with danger tkinter build
         if allow_multiple:                                                                   
             try:
@@ -5062,10 +5245,7 @@ def open_prepare_dataset_window():
             drag_data["item"] = item_id
             drag_data["from_sample"] = clean_sample_name(tree.item(sample_id, "text"))
             drag_data["from_exp"] = tree.item(exp_id, "text").replace("Experiment: ", "")
-            #print("[Explorer][DEBUG] Drag start on :", drag_data)
-            print(f"[Explorer][DEBUG] Drag: {drag_data.get('filetype')}:{drag_data.get('filename')} from {drag_data.get('from_exp')}/{drag_data.get('from_sample')}")
             #if debug: (gives raw dict)
-            # print(f"[DEBUG] Drag start: { {k: v for k, v in drag_data.items() if k != 'item'} }")
         else:
             drag_data["item"] = None
 
@@ -5082,7 +5262,6 @@ def open_prepare_dataset_window():
         to_sample = clean_sample_name(dest_text)
         to_exp_id = tree.parent(dest_id)
         to_exp = tree.item(to_exp_id, "text").replace("Experiment: ", "")
-        print(f"[DEBUG] Drag release: {drag_data.get('filetype')}:{drag_data.get('filename')}from {drag_data.get('from_exp')}/{drag_data.get('from_sample')} → {to_exp}/{to_sample}")  
         # Perform move
         move_file(
             from_exp=drag_data["from_exp"],
@@ -5207,13 +5386,18 @@ def open_prepare_dataset_window():
             base_dir = sample_method_folder or (
                 os.path.dirname(sample["csv"]) if sample.get("csv") else os.getcwd()
             )
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_name = f"{sample_name}.{kind}{timestamp}.method.json"
-            out_path = os.path.join(base_dir, out_name)
+            # 20260521 fix B-31 (Codex Option B + Q7): reuse existing registered method
+            # path for this (sample, family) if present; else stable name {sample}.{KIND}.method.json.
+            # Was: timestamp embedded in filename → new file per save → orphan accumulation
+            # (smoke4_5 evidence: 3 method.json files within 10-minute window).
+            out_path = _resolve_method_out_path(sample, sample_name, kind, base_dir)
 
         # Write
         #fixed 20260313 Test-2: ensure parent directory exists (sample_method_folder may not exist yet)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        # 20260521 fix B-31 sister (logger gap close): observability for overwrite-by-default
+        # auto-save; record whether this call updated an existing file or created a new one.
+        _path_existed = os.path.exists(out_path)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(v1, f, indent=2, ensure_ascii=False)
 
@@ -5223,6 +5407,7 @@ def open_prepare_dataset_window():
         # sample["json"] = out_path line removed).
         _register_or_update_method_ref(sample, out_path, family=kind)
         refresh_tree()
+        logger.log(f"[Method v1][{kind}] {'Updated existing' if _path_existed else 'Created new'}: {out_path}")
         return out_path
 
     # Legacy writing method file. Only fires when method v1 can't execute anyway.
@@ -5281,11 +5466,14 @@ def open_prepare_dataset_window():
         if auto and exp_name in experiment_method_paths:
             output_path = experiment_method_paths[exp_name]
         else:
+            # 20260520 fix B-30: macOS-safe filetypes + defaultextension + post-process
+            # to preserve compound .exp.json suffix on macOS where compound patterns crash Tk.
             output_path = filedialog.asksaveasfilename(
-                defaultextension=".exp.json",
+                defaultextension=_macos_safe_defaultextension(".exp.json"),
                 initialfile=f"{exp_name}.exp.json",
-                filetypes=[("Experiment Method JSON", "*.exp.json")]
+                filetypes=_macos_safe_filetypes([("Experiment Method JSON", "*.exp.json")])
             )
+            output_path = _macos_append_compound_suffix(output_path, ".exp.json")
             if not output_path:
                 return
             experiment_method_paths[exp_name] = output_path
@@ -5382,10 +5570,16 @@ def open_prepare_dataset_window():
                 "ml": {}
             },
 
+            # FUTURE-API-HOOK: when Glycosmos composition API integration lands post-freeze, add a sibling `glytoucan_resolution` block here with shape {"status": "manual"|"api"|"not_attempted", "api_endpoint": "https://doc.glycosmos.org/api/composition", "last_resolved_utc": <iso>}. Deferred for freeze v1.10 per Henry Q1: no schema bump without a reachable consumer.
             "artifacts": {
                 "reports": []
             },
 
+            # 20260521 B-32 (Codex defer + document, NOT a semantic change):
+            # see normalize_method_json — this `validation` block is reserved
+            # for future method/file integrity checks (v1.2+), NOT current GUI
+            # sample-validation state (which lives in exp.json
+            # `samples[].validated` via export_experiment_json).
             "validation": {
                 "status": "unknown",
                 "checked_utc": None,
@@ -5408,8 +5602,6 @@ def open_prepare_dataset_window():
             v1["inputs"]["insilico_glycan_list"] = {"path": os.path.normpath(insilico_path)}
             if scoreb_path:
                 v1["inputs"]["score_b_workbook"] = {"path": os.path.normpath(scoreb_path)}
-            if train_path: #added 20260417
-                v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
         #fixed 20260312 Test-B B1.1: gate all CGA artifacts/inputs, prevents cross-contamination
         # ion_list/insilico_glycan_list already gated above (in conditional inputs block).
         # pseudolabels_tsv, trainable_csv, unlabeled_csv are CGA pipeline outputs only;
@@ -5428,9 +5620,10 @@ def open_prepare_dataset_window():
     # load method file(s)
     def load_method_file(paths=None):
         if not paths:
+            # 20260520 fix B-30: macOS-safe filetypes wrap (compound .method.json crashes macOS Tk)
             paths = filedialog.askopenfilenames(
                 title="Select One or More Sample Method Files",
-                filetypes=[("Sample Method JSON", "*.method.json"), ("JSON files", "*.json")]
+                filetypes=_macos_safe_filetypes([("Sample Method JSON", "*.method.json"), ("JSON files", "*.json")])
             )
         if not paths:
             return
@@ -5485,11 +5678,14 @@ def open_prepare_dataset_window():
 
     def change_experiment_method_path():
         exp = _current_exp_title() or "Unassigned" # 20260418 code review fix Unassigned bug
+        # 20260520 fix B-30: macOS-safe SaveAs wrap (see save_method_v1_for_sample for rationale).
         path = filedialog.asksaveasfilename(
             title="Select path to save experiment method file",
-            defaultextension=".exp.json",
-            filetypes=[("Experiment Method JSON", "*.exp.json")]
+            defaultextension=_macos_safe_defaultextension(".exp.json"),
+            initialfile=f"{exp}.exp.json",
+            filetypes=_macos_safe_filetypes([("Experiment Method JSON", "*.exp.json")])
         )
+        path = _macos_append_compound_suffix(path, ".exp.json")
         if path:
             experiment_method_paths[exp] = path                                          
             update_status_display(exp) 
@@ -5504,9 +5700,10 @@ def open_prepare_dataset_window():
     #20250917 to avoid hard-fixing the items in exp json so the PL workflow can be saved as well
     def load_experiment_method_file():
         """Repurposed: load an experiment (.exp.json) and rebuild the tree."""
+        # 20260520 fix B-30: macOS-safe filetypes wrap (compound .exp.json crashes macOS Tk)
         path = filedialog.askopenfilename(
             title="Open Experiment (.exp.json)",
-            filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")]
+            filetypes=_macos_safe_filetypes([("Experiment JSON", "*.exp.json"), ("JSON", "*.json")])
         )
         if not path:
             return
@@ -5527,12 +5724,14 @@ def open_prepare_dataset_window():
         if not path:
             safe = exp.replace(" ", "_")
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S") # introduced in 20260418 code review
+            # 20260520 fix B-30: macOS-safe SaveAs wrap (see save_method_v1_for_sample for rationale).
             path = filedialog.asksaveasfilename(
                 title="Save Experiment (.exp.json)",
-                defaultextension=".exp.json",
+                defaultextension=_macos_safe_defaultextension(".exp.json"),
                 initialfile=f"{safe}_{stamp}.exp.json",
-                filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")]
+                filetypes=_macos_safe_filetypes([("Experiment JSON", "*.exp.json"), ("JSON", "*.json")])
             )
+            path = _macos_append_compound_suffix(path, ".exp.json")
             if not path:
                 return
         export_experiment_json(exp, path)
@@ -5563,9 +5762,6 @@ def open_prepare_dataset_window():
             messagebox.showerror("Missing Files", "This sample must have both CSV and Metadata (.json) linked.")
             return
         
-        print("[launch][DEBUG] files:", files)
-        print("[launch][DEBUG] using meta:", meta_path)
-
         # auto-resolve without prompting
         meta_path, meta_dict = _resolve_metadata_for_sample(files, sample_name, csv_path)
 
@@ -5593,7 +5789,6 @@ def open_prepare_dataset_window():
                     "Could not locate metadata for this sample. You can proceed, but defaults may be wrong."
                 )
 
-        print("[launch][DEBUG] using metadata (final):", meta_path)
 
 
         def on_generate(payload):
@@ -5796,14 +5991,20 @@ def open_prepare_dataset_window():
                     os.path.dirname(files["csv"]) if files.get("csv") else None
                 )
                 if base_dir:
-                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    out_name = f"{sample_name}.CGA{stamp}.method.json"
-                    out_path = os.path.join(base_dir, out_name)
+                    # 20260521 fix B-31 sister (Codex Option B + Q7, folded with MAS):
+                    # reuse existing registered CGA method path if present; else stable
+                    # name. Was: timestamped filename → CGA orphan accumulation per
+                    # scoring run, same pattern as MAS auto-save.
+                    out_path = _resolve_method_out_path(files, sample_name, "CGA", base_dir)
                     #fixed 20260313 Test-2: ensure parent directory exists
                     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+                    # 20260521 fix B-31 sister (logger gap close): same observability
+                    # rationale as MAS auto-save site in save_method_v1_for_sample.
+                    _path_existed = os.path.exists(out_path)
                     with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(v1, f, indent=2, ensure_ascii=False)
                     _register_or_update_method_ref(files, out_path, family="CGA")
+                    logger.log(f"[Method v1][CGA] {'Updated existing' if _path_existed else 'Created new'}: {out_path}")
                 else:
                     logger.log("[CGA] No method folder and no CSV path — CGA method JSON not auto-saved.")
 
@@ -6099,8 +6300,8 @@ def open_ml_analysis_window():
                 "class_weight": "balanced",
             },
             "train": {
-                "test_size": 0.25,
-                "val_size": 0.10,
+                "test_size": 0.20, # 0.25 in code review  for tracking
+                "val_size": 0.00, # 0.10 in code review for tracking
                 "stratify": True,
                 "real_world_test": True, # 20260418 False -> True
                 "threshold": {"enabled": False, "tau": 0.65, "margin": 0.05},
@@ -6118,12 +6319,12 @@ def open_ml_analysis_window():
 
     # 20260418 Keep first BUILTIN_ML as init, and remove others, also change reading it to snapshot_train_vars(), which captures real tkinter values
     BUILTIN_ML: Dict[str, Any] = {
-        "model": {"type": "RandomForest", "n_estimators": 401, "max_depth": None, "class_weight": "balanced"}, # was 500, others are 400
+        "model": {"type": "RandomForest", "n_estimators": 400, "max_depth": None, "class_weight": "balanced"}, # was 500, others are 400, in code review, set to 401 for tracking
         "split": {"test_size": 0.2, "val_size": 0.0, "random_state": 42, "stratified": True},
-        "filters": {"min_samples_per_class": 15, "drop_rare_in_test": True},
+        "filters": {"min_samples_per_class": 5, "drop_rare_in_test": True}, # in code review, min_samples_per_class set to 15 for tracking
         "negatives": {"enabled": True, "max_ratio": 3.0},
         "features": {"exclude_cols": ["MS2scan_no", "protonatedmass"], "use_ion_suggestions": False},
-        "thresholds": {"tau": 0.60, "margin": 0.05},
+        "thresholds": {"tau": 0.65, "margin": 0.05}, # in code review, tau set to 0.60 for tracking
     }
     # ML window state, grouped for better management. Duplicated are removed (lives inside ML window scope) 
     train_csv_path = None                                                                
@@ -6134,11 +6335,11 @@ def open_ml_analysis_window():
     ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
 
     # tk variables storing train/test + RF tk parameters (shared between settings dialog and the rest)
-    n_estimators_var     = tk.IntVar(value=333)     # default trees number, for debug during code review session, change 400 to 333
+    n_estimators_var     = tk.IntVar(value=400)     # default trees number, for debug during code review session, change 400 to 333
     class_weight_var     = tk.BooleanVar(value=True)  #  => "balanced" if True else None
-    test_split_var       = tk.DoubleVar(value=0.20)   # test set split ratio %
-    val_split_var        = tk.DoubleVar(value=0.10)   # validation set ratio %
-    min_samples_var      = tk.IntVar(value=5)         # tiny class threshold
+    test_split_var       = tk.DoubleVar(value=0.20)   # default test set split ratio % = 0.8 train/0.2 test, no val for glycomics (save entries)
+    val_split_var        = tk.DoubleVar(value=0.00)   # validation set ratio %. For pooled datasets, for debug during code review session, set to 0.1
+    min_samples_var      = tk.IntVar(value=5)         # tiny class threshold, default is 5, while more plausible count will be 8 or 10 on pooled dataset
     use_balance_var      = tk.BooleanVar(value=True)  # enable balancing pipeline, default to True
     majority_label_var   = tk.StringVar(value="Non-glycan") # Set Non-glycan as major labels (negatives) against other composition-fitted spectra entries
     majority_factor_var  = tk.IntVar(value=3)      # cap = factor * max(minor)
@@ -6156,6 +6357,8 @@ def open_ml_analysis_window():
     def _on_change(*_):
         # removed _write_train_ui_into_state
         _emit_ml_state_changed_ui_refresh()
+        # 20260518 B-09 fold-in (Codex Finding 38): trigger summary refresh on any tk-var write
+        _update_ml_summary()
         #_debug_print_train_params()
     
     # for live updating all tk values. Exactly infinite monitoring loop
@@ -6385,6 +6588,31 @@ def open_ml_analysis_window():
             )
         return model, loader
 
+    # 20260521 fix B-33 (helpers, Codex-approved closure scope): read trained sklearn
+    # version from training_run.json sidecar + current sklearn version, for use by
+    # the cross-version notice (Branch 2) and version-mismatch guard (Branch 3) in
+    # run_prediction. Codex correction: cannot rely on the `import sklearn` at
+    # collect_versions (v14:6441) — that import is scoped to collect_versions, not
+    # to run_prediction. _current_sklearn_version() isolates a local import.
+    def _read_trained_sklearn(model_path):
+        """Read trained-with sklearn version from training_run.json sidecar; None if unavailable."""
+        tr_path = os.path.join(os.path.dirname(model_path), "training_run.json")
+        if not os.path.exists(tr_path):
+            return None
+        try:
+            with open(tr_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("training_run", {}).get("versions", {}).get("sklearn")
+        except Exception:
+            return None
+
+    def _current_sklearn_version():
+        """Return current sklearn version string; 'unknown' if sklearn import fails."""
+        try:
+            import sklearn
+            return sklearn.__version__
+        except Exception:
+            return "unknown"
+
     # Recovers the exact list of feature column names that the model was trained on, avoid misalignment error
     def get_training_features(model, model_path: str):
         # 1) native sklearn attribute (best)
@@ -6414,7 +6642,7 @@ def open_ml_analysis_window():
         majority_label="Non-glycan",
         min_count=12,
         majority_factor=3,
-        feature_exclude=("MS2scan_no","ID","Source","IUPACname(optional)","Glycanannotation2","GlyToucan ID","unique_ID"),
+        feature_exclude=("MS2scan_no","ID","Source","IUPACname(optional)","Glycanannotation2","GlyToucan ID","WURCS","unique_ID"),  # 20260517 fix B-17: WURCS added — never treated as ML feature; carried as reference metadata only.
         test_size=0.2,
         val_size=0.0,
         stratify=True,
@@ -6611,10 +6839,11 @@ def open_ml_analysis_window():
             # 4) ask user explicitly
             try:
                 from tkinter import filedialog
+                # 20260520 fix B-30: macOS-safe filetypes wrap (compound .method.json crashes macOS Tk)
                 sel = filedialog.askopenfilename(
                     title="Select method.json for packaging",
                     initialdir=folder,
-                    filetypes=[("Method JSON", "*.method.json")]
+                    filetypes=_macos_safe_filetypes([("Method JSON", "*.method.json")])
                 )
                 if sel:
                     print(f"[ML-PACK] method basename from user dialog: {Path(sel).stem}")
@@ -6761,12 +6990,13 @@ def open_ml_analysis_window():
             m = src.get("model", {})
             t = src.get("train", {})
             b = t.get("balance", {})
+            # 20260518 B-09: read live slider tk-var (was schema-mismatch top-level lookup) + add separator
             ml_summary_var.set(
             f'Params: RF Trees: {m.get("n_estimators")}, '
-            f'Split test={t.get("test_size")}, val={t.get("val_size")}'
-            f'min_class_size={src.get("min_samples_per_class", 5)}, '
+            f'Split test={t.get("test_size")}, val={t.get("val_size")}, '
+            f'min_class_size={int(min_samples_var.get())}, '
             f'real_world={t.get("real_world_test")}, '
-            f'balance={b.get("enabled")}' 
+            f'balance={b.get("enabled")}'
             )
         except Exception:
             ml_summary_var.set("Params: (using built-ins)") 
@@ -6854,7 +7084,7 @@ def open_ml_analysis_window():
             ctx = _get_ml_context()
             exp_path = ctx.get("exp_json")
             if not exp_path:
-                messagebox.showwarning("No .exp.json found. Select a training CSV that has an .exp.json in the same folder, or use 'Load preset' instead."); return
+                messagebox.showwarning("No .exp.json found", "Select a training CSV that has an .exp.json in the same folder, or use 'Load preset' instead."); return
             defs = _read_ml_defaults_from_exp(exp_path)
             if defs is None:
                 messagebox.showinfo("No defaults", "This experiment has no ml_defaults yet.")
@@ -6866,8 +7096,10 @@ def open_ml_analysis_window():
             ctx = _get_ml_context()
             exp_path = ctx.get("exp_json")
             if not exp_path:
-                messagebox.showwarning("No .exp.json found. Select a training CSV that has an .exp.json in the same folder, or use 'Load preset' instead."); return
-            d = editor_txt.get("1.0","end").strip() or "{}"
+                messagebox.showwarning("No .exp.json found", "Select a training CSV that has an .exp.json in the same folder, or use 'Load preset' instead."); return
+            # 20260517 fix B-03: use _get_edit() (validating helper) so editor JSON is parsed before being passed
+            # to _write_ml_defaults_to_exp (which expects a dict, not a raw string). Mirrors _save_preset_as.
+            d = _get_edit()
             if d is None: return
             if _write_ml_defaults_to_exp(exp_path, d):
                 messagebox.showinfo("Saved", f"Updated ml_defaults in:\n{exp_path}")
@@ -6900,8 +7132,9 @@ def open_ml_analysis_window():
 
         def _link_exp_json():                                     
             nonlocal linked_exp_json                                                         
+            # 20260520 fix B-30: macOS-safe filetypes wrap (compound .exp.json crashes macOS Tk)
             path = filedialog.askopenfilename(title="Select experiment JSON",
-        filetypes=[("Experiment JSON", "*.exp.json"), ("JSON", "*.json")])                   
+        filetypes=_macos_safe_filetypes([("Experiment JSON", "*.exp.json"), ("JSON", "*.json")]))
             if path:
                 linked_exp_json = path                                                       
                 messagebox.showinfo("Linked", f"Experiment linked:\n{os.path.basename(path)}") 
@@ -6950,7 +7183,10 @@ def open_ml_analysis_window():
             )
             if not path: return
             # ensure effective is up-to-date with what’s in the editor
-            editor = _get_editor_json_or_empty()
+            # 20260517 fix B-03 fold-B: use _get_edit() instead of _get_editor_json_or_empty() so invalid editor JSON
+            # fail-closes (surfaces messagebox.showerror) instead of silently saving snapshot+exp+meth without the editor override. Mirrors B-03 main _apply_to_exp fix.
+            editor = _get_edit()
+            if editor is None: return
             ctx = _get_ml_context()
             exp_defs  = _read_ml_from_json(ctx.get("exp_json"))
             meth_defs = _read_ml_from_json(ctx.get("method_json"))
@@ -7238,7 +7474,23 @@ def open_ml_analysis_window():
             # For GlyToucan/IUPAC, leave as-is. 20260419 code review: add string conversion so at least in can be fed into RF trainer
             else:
                 before = df[label_col][:10]
-                df[label_col] = df[label_col].astype(str).str.strip() 
+                df[label_col] = df[label_col].astype(str).str.strip()
+                # 20260517 fix B-17: NaN-aware empty-label guard. pd.read_csv reads blanks as NaN; astype(str) turns them into the literal "nan", so a naive == "" check misses real empties. Cover the common pandas/CSV empty representations and warn-and-confirm before silently training on phantom-class rows (Codex Edit 3 flag).
+                _b17_empty_mask = df[label_col].str.strip().str.lower().isin({"", "nan", "none", "null"})
+                _b17_empty_count = int(_b17_empty_mask.sum())
+                if _b17_empty_count > 0:
+                    if not messagebox.askyesno(
+                        "Empty Labels",
+                        f"Label column '{label_col}' has {_b17_empty_count} of {len(df)} rows with empty values. "
+                        f"These rows will be dropped before training. Continue?",
+                    ):
+                        logger.log(f"[ML][train] User cancelled training: {_b17_empty_count} empty {label_col} rows.")
+                        return
+                    df = df.loc[~_b17_empty_mask].copy()
+                    if df.empty:
+                        logger.log(f"[ML][train][ERROR 1] All rows dropped — no usable {label_col} labels remain.")
+                        messagebox.showerror("No Labels", f"All rows had empty {label_col}. Nothing to train.")
+                        return
                 print("[ML][train][DEBUG] Other labels that will be turned into string for training:", before, "...")
         except Exception as e:
             logger.log(f"[ML][train][ERROR 1] structure normalization failed {e}")
@@ -7332,7 +7584,7 @@ def open_ml_analysis_window():
         if not rf.get('n_estimators'):
             print("[ML][Train][WARN] n_estimators is empty/None — using hardcoded fallback (is cfg broken?)")
         model = RandomForestClassifier(
-            n_estimators      = int(rf.get("n_estimators", 666)),  # for debug, change 400 to 666
+            n_estimators      = int(rf.get("n_estimators", 400)),  # for debug, change 400 to 666
             max_depth         = rf.get("max_depth", None),
             min_samples_split = int(rf.get("min_samples_split", 2)),
             min_samples_leaf  = int(rf.get("min_samples_leaf", 1)),
@@ -7587,6 +7839,20 @@ def open_ml_analysis_window():
             model, loader = load_model_any(model_file_path)
             df = pd.read_csv(predict_input_path)
             logger.log(f"[ML][Predict] Model loaded via {loader}")
+            # 20260521 fix B-33 (Branch 2 — tolerant cross-version notice, Codex-approved):
+            # Surface a non-blocking info popup + logger line when the model loaded
+            # successfully BUT trained sklearn version differs from current. Prediction
+            # proceeds; user is informed of the version delta in case results look off.
+            trained_sklearn = _read_trained_sklearn(model_file_path)
+            current_sklearn = _current_sklearn_version()
+            if trained_sklearn and trained_sklearn != current_sklearn:
+                logger.log(f"[ML][Predict][version-notice] trained=sklearn-{trained_sklearn} current=sklearn-{current_sklearn} — load OK, proceeding")
+                messagebox.showinfo(
+                    "sklearn version notice",
+                    f"Model trained with sklearn {trained_sklearn}; this machine has sklearn {current_sklearn}.\n\n"
+                    f"Loaded successfully — prediction will proceed.\n"
+                    f"If results look off, retrain on this machine for exact-version reproducibility."
+                )
             # Try loading label encoder if available
             if loader == "joblib":
                 logger.log(f"[ML][Predict] loading label encoder (joblib model)")
@@ -7610,18 +7876,49 @@ def open_ml_analysis_window():
                     logger.log(f"label encoder can't be loaded")
         except Exception as e:
             logger.log(f"[ML][Predict][ERROR 0] exception in loading model {e}")
-                # Suggestion to user if it's a version mismatch crash
-            if ".joblib" in model_file_path and "InconsistentVersionWarning" in str(e) or "dtype" in str(e):
+            # 20260521 fix B-33 (Branch 3 — version-aware guard rewrite, Codex-approved):
+            # Replaces v14:7838-7853 prior guard. Three fixes vs prior code:
+            # (A) operator precedence bug — prior `A and B or C` parsed as
+            #     `(A and B) or C` so .skops dtype errors fell into the joblib branch.
+            # (B) wrong message copy for .skops + dtype — prior message named
+            #     "joblib model" and advised "re-export as .skops" which is wrong
+            #     when the file already IS .skops and the dtype change is in sklearn
+            #     internals (not the persistence format).
+            # (C) unreachable .skops elif — couldn't fire for the dtype case because (A).
+            # New: read training_run.json sidecar for trained sklearn version; compare
+            # to current; surface BOTH versions in the message + logger line.
+            err_text = str(e)
+            is_version_error = "dtype" in err_text or "InconsistentVersionWarning" in err_text
+            trained_sklearn = _read_trained_sklearn(model_file_path)
+            current_sklearn = _current_sklearn_version()
+            versions_differ = bool(trained_sklearn) and trained_sklearn != current_sklearn
+
+            if is_version_error and versions_differ:
+                logger.log(f"[ML][Predict][version-mismatch-fatal] trained=sklearn-{trained_sklearn} current=sklearn-{current_sklearn} err={err_text[:120]}")
+                suffix = ".skops" if ".skops" in model_file_path else ".joblib"
                 messagebox.showerror(
-                    "Model version mismatch",
-                    "This joblib model was trained with a different scikit-learn version.\n\n"
-                    "Fix: re-export as .skops on the training machine (or retrain), then load the .skops here."
+                    f"Model version mismatch ({suffix})",
+                    f"This model cannot load on this machine.\n\n"
+                    f"Trained with: sklearn {trained_sklearn}\n"
+                    f"This machine: sklearn {current_sklearn}\n\n"
+                    f"Fix: retrain on this machine.\n\n"
+                    f"(Background: scikit-learn does not guarantee cross-version model loading. "
+                    f"For RandomForest/DecisionTree models, sklearn 1.3 introduced tree-internal "
+                    f"changes such as `missing_go_to_left`. Other estimator types and sklearn "
+                    f"versions can have similar break points; retraining on this machine is the safe fix.)"
                 )
-                return
+            elif is_version_error:
+                logger.log(f"[ML][Predict][load-fail-dtype-versions-match] trained=sklearn-{trained_sklearn or 'unknown'} current=sklearn-{current_sklearn} err={err_text[:120]}")
+                messagebox.showerror(
+                    "Model load failed",
+                    f"Dtype/pickle error during load (sklearn versions appear to match: "
+                    f"trained={trained_sklearn or 'unknown'}, current={current_sklearn}).\n\nReason:\n{e}"
+                )
             elif ".skops" in model_file_path:
+                logger.log(f"[ML][Predict][load-fail-skops] err={err_text[:120]}")
                 messagebox.showerror("Model load failed", f"Failed to load .skops model.\n\nReason:\n{e}")
-                return
             else:
+                logger.log(f"[ML][Predict][load-fail-other] err={err_text[:120]}")
                 messagebox.showerror("Load Error", str(e))
             return
         # 20260419 code review: Stage 2 Feature Alignment
@@ -7727,6 +8024,7 @@ def open_ml_analysis_window():
             else:
                 logger.log("[ML][Predict][WARN] No label decoder available — predictions are raw integers") 
             # Append prediction labels back to original dataframe
+            # FUTURE-API-HOOK: when Glycosmos API integration + dynamic prediction column naming lands post-freeze (Option A from B-17 item 4), rename column from `Predicted_Label` to `Predicted_<label_col>` (e.g., `Predicted_GlyToucan_ID`, `Predicted_WURCS`). Today static for freeze v1.10; reporter expects literal `pred_label` alias retained at the rename below.
             df['Predicted_Label'] = y_pred
 
             # 20260420 code review Stage 6 - make sure columns are there
@@ -7740,15 +8038,18 @@ def open_ml_analysis_window():
             # --- START: Prediction summary integration ---
             # 
             # 20260420 code review Stage 8 --- composition helpers (for precursor gate) ---
-            _comp_pat = re.compile(r'(KDN|F|H|N|S|G|A|s|p)\s*([0-9]+)', re.I)
+            # 20260517 fix B-01: KDN-first alternation (greedy); bare 'K' aliased to KDN for back-compat with legacy MAS-trained model labels.
+            # Case-sensitive: uppercase F/H/N/S/G/A vs lowercase s/p are distinct semantic markers.
+            # NOTE: future K-adduct work must use an adduct/metadata channel, not append 'K' to composition strings.
+            _comp_pat = re.compile(r'(KDN|K|F|H|N|S|G|A|s|p)\s*([0-9]+)')
             def _canon_comp(s: str) -> str:
                 """Turn any comp string into canonical 'F,H,N,S,G,KDN,A,s,p' order; omit zeros."""
                 if not isinstance(s, str) or not s.strip():
                     return ""
-                # accumulate counts (case-insensitive; keep KDN token intact)
                 counts = {"F":0,"H":0,"N":0,"S":0,"G":0,"KDN":0,"A":0,"s":0,"p":0}
                 for k,v in _comp_pat.findall(s):
-                    k = "KDN" if k.upper() == "KDN" else k  # keep KDN as a unit
+                    if k == "K":  # 20260517 fix B-01: legacy single-char K aliased into KDN
+                        k = "KDN"
                     counts[k] = counts.get(k, 0) + int(v)
                 # canonical order
                 parts = []
@@ -7902,7 +8203,7 @@ def open_ml_analysis_window():
                             if N:     parts.append(f"N{N}")
                             if NeuAc: parts.append(f"S{NeuAc}")   # use 'S' for NeuAc if your label set uses it; otherwise remove this line
                             if NeuGc: parts.append(f"G{NeuGc}")
-                            if KDN:   parts.append(f"K{KDN}")     # + _get(row, "K") if we acknowledge K as KDN
+                            if KDN:   parts.append(f"KDN{KDN}")     # 20260517 fix B-01: 3-char KDN token (was "K{KDN}"); round-trips through _canon_comp
                             if HexA:  parts.append(f"A{HexA}")    # <-- HexA is 'A' in your schema
                             if SO3:   parts.append(f"s{SO3}")
                             if PO3H:  parts.append(f"p{PO3H}")
@@ -7948,8 +8249,9 @@ def open_ml_analysis_window():
                     lib_counts["__Mass__"] = pd.to_numeric(lib_counts[mass_col], errors="coerce")
                     # Parse a predicted label like "F1H4N3A1s1p1" → counts
                     def _parse_counts(label: str):
-                        d = {"F":0,"H":0,"N":0,"S":0,"G":0,"K":0,"A":0,"s":0,"p":0}
-                        for m in re.finditer(r'([FHNSGKAsp])(\d+)', str(label)):
+                        # 20260517 fix B-01: receives canonicalized labels from _canon_safe (A3) only; KDN-aware regex, no bare K (A2 already folded K -> KDN).
+                        d = {"F":0,"H":0,"N":0,"S":0,"G":0,"KDN":0,"A":0,"s":0,"p":0}
+                        for m in re.finditer(r'(KDN|[FHNSGAsp])(\d+)', str(label)):
                             ch, num = m.group(1), int(m.group(2))
                             if ch in d:
                                 d[ch] += num
@@ -7981,7 +8283,7 @@ def open_ml_analysis_window():
                             (lib_counts["HexNAc"]== cnt["N"]) &
                             (lib_counts["NeuAc"] == cnt["S"]) &
                             (lib_counts["NeuGc"] == cnt["G"]) &
-                            (lib_counts["KDN"]   == cnt["K"]) &
+                            (lib_counts["KDN"]   == cnt["KDN"]) &   # 20260517 fix B-01: dict key renamed K -> KDN (paired with _parse_counts change)
                             (lib_counts["HexA"]  == cnt["A"]) &
                             (lib_counts["SO3"]   == cnt["s"]) &
                             (lib_counts["PO3H"]  == cnt["p"]),
@@ -8061,7 +8363,7 @@ def open_ml_analysis_window():
                         no_lut_head = gly[gly["masses_found"] == 0].copy().head(30)
                         if not no_lut_head.empty:
                             no_lut_head["counts"] = no_lut_head["canon_pred"].map(_parse_counts)
-                            no_lut_head["Mass_candidates"] = no_lut_head["counts"].map(_masses_by_counts)
+                            no_lut_head["Mass_candidates"] = no_lut_head["canon_pred"].map(_masses_by_counts)   # 20260517 fix B-01 (Codex Finding 11): map over canon_pred strings, not the counts-dict column
                             # print to logger
                             if logger:
                                 logger.log(f"[Predict][gate][no_lut] sample {len(no_lut_head)} rows with Mass candidates:")
@@ -8389,10 +8691,9 @@ def open_ml_analysis_window():
         # --- Feature: JSON format (support both v1 list and legacy dict) ---
         raw_samples = exp.get("samples") or {}
         exp_base_dir = os.path.dirname(exp_path)
-
+        # 20260521 confirmed list object
         if isinstance(raw_samples, list):
             # v1 format: list of dicts with "sample_name" and optionally "methods"
-            samples = {}
             for s in raw_samples:
                 if not isinstance(s, dict):
                     continue
@@ -8453,7 +8754,7 @@ def open_ml_analysis_window():
             raw_csv   = sample_info.get("csv")
             ion_src   = sample_info.get("excel") or sample_info.get("ionlist_path")
             ion_sheet = sample_info.get("ion_sheet") or "ionlist"
-
+            print(f"[DEBUG] sample_info: {sample_info}")
             # --- Feature: Missing file handling (skip and report) ---
             if not raw_csv or not ion_src:
                 missing.append(f"{sample_id} (csv={'yes' if raw_csv else 'no'}, ion={'yes' if ion_src else 'no'})")
@@ -8706,9 +9007,9 @@ def set_main_status(text, fg=None):
 
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.093 Build 20260421 core v1.1 --code review version")
-root.geometry("800x480")
-root.minsize(800, 480)
+root.title("GlycoMSP File Manager GUI v1.10 Build 20260521 --finalcheck-CGA")
+root.geometry("800x560")
+root.minsize(800, 560)
 
 # Buttons
 button_frame = tk.Frame(root)

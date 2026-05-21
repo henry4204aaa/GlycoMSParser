@@ -331,28 +331,18 @@ def attach_ion_score_on_matched(
 
     def _score_row(row):
         hits_out = findingions(row, iondf_for_find, ppm_value)
-        # Detect shape:
-        #  (A) matched-only: list of mz or (mz, intensity) for matches
-        #  (B) full listing:  list of (mz, logI_plus1_or_1) for all reference ions
         if not hits_out:
             return 0.0, 0, ""
         elem = hits_out[0]
-        if isinstance(elem, (list, tuple)) and len(elem) == 2 and len(hits_out) == len(ionlist_mz):
-            # (B) full listing from findingions
-            matched = [(mz, v) for mz, v in hits_out if v > 1.0]
-            score = sum(1 for _mz, _v in hits_out if _v > 1.0) / len(hits_out)
-            hit_list = ";".join(f"{mz:.4f}" for mz, _ in matched)
-            return float(score), len(matched), hit_list
+        if isinstance(elem, (list, tuple)) and len(elem) == 2:
+            # B-24-L1: filter by float(v) > 1.0; drop the fragile length check.
+            # See handoff/codex_B24_scoreA_shadow_anchors_review.md §7.1.
+            matched_mz = [float(mz) for mz, v in hits_out if float(v) > 1.0]
         else:
-            # (A) matched-only from peaks_ppm
-            # normalize to m/z list for score_counter
-            if isinstance(elem, (list, tuple)):
-                matched_mz = [mz for mz, *_ in hits_out]     # [(mz,intensity),...] → [mz,...]
-            else:
-                matched_mz = list(hits_out)                  # [mz,...]
-            score = score_counter(matched_mz, ionlist_mz)    # 0..1
-            hit_list = ";".join(f"{mz:.4f}" for mz in matched_mz)
-            return float(score), len(matched_mz), hit_list
+            matched_mz = list(hits_out)
+        score = score_counter(matched_mz, ionlist_mz)
+        hit_list = ";".join(f"{mz:.4f}" for mz in matched_mz)
+        return float(score), len(matched_mz), hit_list
 
     triples = out.apply(_score_row, axis=1)
     triples = pd.DataFrame(triples.tolist(), index=out.index,
@@ -666,19 +656,8 @@ def ppm_qc(matches_long: pd.DataFrame, scan_col="MS2scan_no"):
 
 #20260411 code review: need to confirm if below code blocks is active and list the chain of triggering below functions, especially has_anchors and score_counter
 
-#1) Anchor rule (cheap & effective)
-# example anchors (placeholder values – swap for your dataset’s anchors)
-ANCHORS = [204.087, 366.140, 512.197]  # adjust for derivatization/adduct
-ANCHOR_TOL = 0.02  # Da window
-
-def has_anchors(hit_mz_list):
-    return sum(any(abs(m - a) <= ANCHOR_TOL for m in hit_mz_list) for a in ANCHORS)
-
-def score_counter(hits_mz, ionlist_mz):
-    # gate: at least 2 anchor ions
-    if has_anchors(hits_mz) < 2:
-        return 0.0
-    return len(hits_mz) / max(1, len(ionlist_mz))
+# B-24-L2: removed shadowed anchor-gated score_counter; line-295 simple fraction
+# is now the active scorer. Rationale in handoff/codex_B24_scoreA_shadow_anchors_review.md §7.
 
 #2) Trim the denominator (don’t penalize with rarely observed ions)
 #curated = ion_df.query("mass >= 150 & mass <= 2000")  # plus your own whitelist/blacklist

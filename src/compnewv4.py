@@ -1,5 +1,5 @@
 version = "1.07"
-last_update = 20260206
+last_update = 20260517
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -304,7 +304,7 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
               + b * 245.12632
               + c * 361.17367
               + d * 391.18423
-              + e * 335.1700
+              + e * 320.14710  # 20260517 fix B-05: PerMe-KDN residue per GlycoMod (5 net methyl additions; was 335.17, see fixes_log + Codex Finding 34)
               + 46.04186)   # reducing end (freeend)
         if reduced:
             M += 16.0313
@@ -347,7 +347,7 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
 def precursormassv3(composition, deri="PerMe",reduced=False, debug=False): #general version
     a, b, c, d, e, f = composition[0], composition[1], composition[2], composition[3], composition[4], composition[5]
     if deri == "PerMe":
-        M =  f * 174.08921 + a * 204.09977 + b * 245.12632 + c * 361.17367 + d * 391.18423 + e * 335.1700 + 46.04186 + 1.0073
+        M =  f * 174.08921 + a * 204.09977 + b * 245.12632 + c * 361.17367 + d * 391.18423 + e * 320.14710 + 46.04186 + 1.0073  # 20260517 fix B-05: PerMe-KDN per GlycoMod (sister to v4; Codex Finding 34)
         # M = a x Fucose (triangle) + b x Hexose (circle) + c x HexNAc (Square) + d * Neu5Ac (purple diamond) + e * Neu5Gc (aqua diamond) + reducing end + [H+]
         # a, b, c, d, e >=0, is integer
         if reduced == True:

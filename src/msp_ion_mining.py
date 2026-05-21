@@ -1,6 +1,7 @@
 # msp_ion_mining.py
-version = "0.1"
-last_update = 20250906
+version = "0.2"
+last_update = 20260520
+#v0.2 20260520 fix B-29: wrap known.sort() with np.sort() at suggest_ions_from_pre_df:168 so the bisect_left input survives read-only arrays returned by pandas .values on recent numpy/pandas (Codex-voted Option A; downstream only reads known, so writability is irrelevant after the fix). v1.11+ backlog: migrate .values → .to_numpy() across pandas-array consumers + add "do not in-place mutate pandas-derived arrays" convention.
 #from __future__ import annotations
 import math, re
 from ast import literal_eval
@@ -165,8 +166,10 @@ def suggest_ions_from_pre_df(
     }).sort_values(["lift","support_glycan"], ascending=[False, False]).reset_index(drop=True)
 
     if ion_df is not None and "mass" in ion_df.columns:
-        known = np.asarray(pd.to_numeric(ion_df["mass"], errors="coerce").dropna().values, dtype=float)
-        known.sort()
+        # 20260520 fix B-29: np.sort() returns a new sorted copy; the original .sort()
+        # in-place fails on read-only views returned by .values in recent numpy/pandas.
+        # Downstream only reads `known` via bisect_left, so writability is irrelevant.
+        known = np.sort(np.asarray(pd.to_numeric(ion_df["mass"], errors="coerce").dropna().values, dtype=float))
         def _already(mz):
             idx = bisect_left(known, mz)
             for j in (idx-1, idx, idx+1):

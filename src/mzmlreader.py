@@ -1,7 +1,7 @@
 import os
 import numpy as np
-version = 0.6
-last_update = 20260411
+version = 0.7
+last_update = 20260518
 #data-loading and saving
 import glob
 import os
@@ -19,6 +19,7 @@ except:
     mzmlavailable = False
 
 #changelog:
+#v0.7 [s7-mzml-fold / B-23, 20260518]: CSV serialization fix — peaklist/peakintensity tuple-cast (matches RAW path repr; eliminates str(np.array) line-wrap that broke tab-row structure); CV-term-aware monoisotopic m/z extraction with ms1mz fallback (was hardcoded 0).
 #v0.6 code review 1.
 #v0.5 functional mzmlreader (proto) - may not be flexible on different parameters during extraction
 
@@ -139,7 +140,33 @@ def peaklist_validation(peaklist, peakintensity, debug = False):
             peaklist_length = [len(peaklist), len(peakintensity)]
             print(f"[debug] peaklist and intensity are not matched, {peaklist_length}")
             return False, peaklist_length
-        return False, None    
+        return False, None
+
+# 20260518 [B-23] Walk precursor XML for PSI/Thermo monoisotopic-m/z, else fall back.
+# Why: many converters (incl. the one that produced our smoke #2a fixture) drop the
+# monoisotopic CV term; hardcoding 0 silently zeros the column. Fallback to ms1mz
+# matches RAW-path semantics for the common case monoisotopic == isolation.
+def _extract_monoiso_mz(precursor_dict, fallback_mz):
+    element = precursor_dict.get('element') if isinstance(precursor_dict, dict) else None
+    if element is not None:
+        for sub in element.iter():
+            tag = sub.tag.rsplit('}', 1)[-1]
+            if tag == 'cvParam' and sub.attrib.get('accession') == 'MS:1002817':
+                try:
+                    return float(sub.attrib.get('value'))
+                except (TypeError, ValueError):
+                    pass
+            elif tag == 'userParam':
+                name = (sub.attrib.get('name') or '').lower()
+                if 'monoisotopic' in name and 'm/z' in name:
+                    try:
+                        return float(sub.attrib.get('value'))
+                    except (TypeError, ValueError):
+                        pass
+    try:
+        return float(fallback_mz)
+    except (TypeError, ValueError):
+        return 0
 
 def save_to_csv(csvname, data, debug=False):
     """
@@ -245,12 +272,12 @@ def extract_mzML(mzmlfilepath=None, outdir=None, round=False, mzmlavailable=Fals
                 ms2count,
                 ms1scan,#parent scan
                 ms1mz,#isolation mass
-                0, #monoisotopic isolation mass if present
+                _extract_monoiso_mz(precursor_list, ms1mz),  # 20260518 [B-23] CV/userParam-aware; ms1mz fallback (was hardcoded 0)
                 charge,
                 protonatedmass,
                 spectrum.ID,
-                p_peaklist,
-                p_intensity
+                tuple(float(x) for x in p_peaklist),   # 20260518 [B-23] cast to tuple of py floats; str(np.array) wraps at 75 chars and breaks tab rows
+                tuple(float(x) for x in p_intensity)   # 20260518 [B-23] same; also forces float to bypass numpy.float32 scalar repr
             )
             ms2data.append(ms2spectrumdata)
             ms2count += 1
@@ -293,10 +320,10 @@ def extract_mzML(mzmlfilepath=None, outdir=None, round=False, mzmlavailable=Fals
                 ms3count,
                 ms2scan,
                 ms2mz,
-                0,
+                _extract_monoiso_mz(precursor_list, ms2mz),  # 20260518 [B-23] CV/userParam-aware; ms2mz fallback (was hardcoded 0)
                 spectrum.ID,
-                p_peaklist,
-                p_intensity
+                tuple(float(x) for x in p_peaklist),   # 20260518 [B-23] cast to tuple of py floats
+                tuple(float(x) for x in p_intensity)   # 20260518 [B-23] same
                 )
             ms3data.append(ms3spectrumdata)
             ms3count +=1

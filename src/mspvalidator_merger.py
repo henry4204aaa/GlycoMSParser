@@ -1,5 +1,7 @@
 version = 0.94
-last_update = 20260411
+last_update = 20260520
+#v0.94 20260520 fix B-28: relax string-dtype gate in validate_csv_structure + validate_annotation_structure to accept pandas 3.x default 'str' dtype in addition to legacy 'object' (gate-only relaxation; downstream isinstance(x, str) check unchanged) + guarded process-global opt-out from future.infer_string at module-top (Codex-reviewed: guard tolerates pandas <2.x where option does not exist); restores validate-pass on fresh pandas 3.0+ installs. (B-27 was reserved for peaks_ppm_duplicate_collapse_stub, now closed; this renumber avoids collision.)
+#v0.94 20260517 fix B-17: add v5 MAS header (GlyToucan Access Number, WURCS) accept; propagate label metadata through slice/iondfindex/negatives/writer; fix ionlistcheck indent
 #v0.94 code review 1. Need deep analysis
 #v0.93 add negative label (non-glycans) back to manual annotation workflow
 #v0.9 workable file and awaiting to be merged to main workflow. Validation prototype built and tested.
@@ -19,6 +21,18 @@ last_update = 20260411
 import os
 import re
 import pandas as pd
+# 20260520 fix B-28 (Patch C, revised per Codex same-day): opt out of pandas 3.x
+# future.infer_string=True default. Restores legacy 'object' dtype for string
+# columns, which the codebase relies on for in-place list assignments
+# (expandpeaklist, sample_real_negatives). Pandas options are process-global, so
+# this also protects downstream callers (v14) that import this module. v14 sets
+# the same option at its top for defense-in-depth. Guard: option does not exist
+# in pandas <2.x (src/requirements.txt still pins pandas==1.4.4); swallow
+# AttributeError/KeyError so the import still succeeds against an older pinned env.
+try:
+    pd.options.future.infer_string = False
+except (AttributeError, KeyError):
+    pass
 from ast import literal_eval
 import numpy as np
 #add R before path string in Windows environment
@@ -331,16 +345,20 @@ def extractannotation(annotationdf, extractiondf, debug = False):
 #slice the combined dataframe to the columns we need
 #added MS2scan_no for further id tracking (developing)
 def slice_combined_df(df):
-    #20251012 
+    #20251012
+    # 20260517 fix B-17: propagate GlyToucan ID + WURCS as label metadata through MAS slice; empty-fill if absent so downstream writer can rely on column presence (closes silent-discard bug where v4 'GlyToucan ID' column was validated but never carried through to trainable CSV).
     cols = ["protonatedmass","peaklist","peakintensity","Structure",
-            "IUPACname(optional)","Glycanannotation2","MS2scan_no"]
+            "IUPACname(optional)","Glycanannotation2","GlyToucan ID","WURCS","MS2scan_no"]
+    for _meta in ("GlyToucan ID", "WURCS"):
+        if _meta not in df.columns:
+            df[_meta] = ""
     existing = [c for c in cols if c in df.columns]
     missing  = [c for c in cols if c not in df.columns]
     if missing:
         # keep going; these may be optional labels
         print(f"[WARN] Missing columns in slice: {missing}")  # or logger.debug
         pass
-    return df[["protonatedmass","peaklist","peakintensity","Structure", "IUPACname(optional)","Glycanannotation2", "MS2scan_no"]] 
+    return df[["protonatedmass","peaklist","peakintensity","Structure", "IUPACname(optional)","Glycanannotation2","GlyToucan ID","WURCS", "MS2scan_no"]]
 
 
 def intensity_normalization(ion, intensity):
@@ -423,7 +441,8 @@ def expandpeaklist(df):
 def extract_ionmasslist(ionmass_sheet):
     ion_df = ionmass_sheet[["mass"]]
     iondfindex = ion_df.values.flatten().tolist()
-    iondfindex.extend(['Structure', 'IUPACname(optional)', 'Glycanannotation2'])
+    # 20260517 fix B-17: extend label metadata to include GlyToucan ID + WURCS; trainable CSV header carries them per Z1+W1 propagation.
+    iondfindex.extend(['Structure', 'IUPACname(optional)', 'Glycanannotation2', 'GlyToucan ID', 'WURCS'])
     iondfindex.insert(0, 'protonatedmass')
     return iondfindex
 
@@ -466,6 +485,11 @@ def validate_csv_structure(csv_path):
                 print(f"Missing column: {col}")
                 return False
             actual_type = df[col].dtype.name
+            # 20260520 fix B-28: pandas 3.x with future.infer_string=True (default) returns 'str'
+            # for string columns instead of legacy 'object'. Accept both; downstream code is
+            # dtype-label agnostic (operates on actual cell content via apply/literal_eval/merge).
+            if expected_type == 'object' and actual_type in ('object', 'str'):
+                continue
             if actual_type != expected_type:
                 print(f"Type mismatch for column '{col}': expected {expected_type}, got {actual_type}")
                 return False
@@ -480,6 +504,8 @@ def validate_csv_structure(csv_path):
 #validate annotation file and ion list in same Excel#
 def validate_annotation_structure(excel_df):#extra arguments may be asked in future
 
+    # 20260517 fix B-17: invent v5 header (adds 'GlyToucan Access Number' as the official Glycosmos term, renamed from v4's 'GlyToucan ID'; adds 'WURCS' placeholder for future Glycosmos API integration). v5 strictly additive — v4/v3/basic remain accepted. Downstream canonicalizes 'GlyToucan Access Number' → 'GlyToucan ID' in directassign_files for back-compat with existing v4 trainable CSVs.
+    v5_expected_headers = ['Structure', 'MS2scan_no', 'peak', 'charge', 'mass shift', 'adduct', 'diff profile (integer for groups if different from same annotation)', 'IUPACname(optional)', 'Glycanannotation2', 'note', 'GlyToucan Access Number', 'WURCS']
     v4_expected_headers = ['Structure', 'MS2scan_no', 'peak', 'charge', 'mass shift', 'adduct', 'diff profile (integer for groups if different from same annotation)', 'IUPACname(optional)', 'Glycanannotation2', 'note', 'GlyToucan ID']
     v3_expected_headers = ['Structure', 'MS2scan_no', 'peak', 'charge', 'mass shift', 'adduct', 'diff profile (integer for groups if different from same annotation)', 'IUPACname(optional)', 'Glycanannotation2', 'note']
     basic_expected_headers = ['Structure', 'MS2scan_no', 'charge', 'mass shift', 'adduct', 'note']
@@ -504,15 +530,25 @@ def validate_annotation_structure(excel_df):#extra arguments may be asked in fut
     'Glycanannotation2': 'str', #placeholder, put some formats to test  #LABEL#
     'GlyToucan ID': 'str' #glycan in database, mind if there are stem/parent ID use that instead to avoid undefined linkage #LABEL#
     }
+    # 20260517 fix B-17: v5 dtype scaffold (currently inert — dtype loop at line 531 only enforces needcheck_expected_dtypes; v5/v4/v3 dicts are placeholders per pre-existing convention).
+    v5_added_dtypes ={
+    'GlyToucan Access Number': 'str', #official Glycosmos term; canonicalized to 'GlyToucan ID' downstream by directassign_files
+    'WURCS': 'str' #reference column for future Glycosmos API integration; excluded from ML features
+    }
     dv3 = {**needcheck_expected_dtypes, **v3_added_dtypes}
     dv4 = {**needcheck_expected_dtypes, **v4_added_dtypes}
+    dv5 = {**needcheck_expected_dtypes, **v3_added_dtypes, **v4_added_dtypes, **v5_added_dtypes}
     version_flags = 0 #default is 0
     #print(f"the columns here are {list(excel_df.columns)} and the types are {type(list(excel_df.columns))}")
     try:
         #df = pd.read_excel(excel_path, sheet_name="MSlist")
 
         # Check headers match, always start from latest version
-        if list(excel_df.columns) == v4_expected_headers: 
+        # 20260517 fix B-17: v5 branch first (greedy newest-first); strict list equality means v5 (12 cols) and v4 (11 cols) cannot ambiguously match.
+        if list(excel_df.columns) == v5_expected_headers:
+            print("Header version is v5")
+            version_flags = 5
+        elif list(excel_df.columns) == v4_expected_headers:
             print("Header version is v4")
             version_flags = 4
         elif   list(excel_df.columns) == v3_expected_headers:
@@ -546,7 +582,9 @@ def validate_annotation_structure(excel_df):#extra arguments may be asked in fut
 
             actual = col_data.dtype.name
             if expected_type == 'str':
-                if actual != 'object' or not col_data.map(lambda x: isinstance(x, str)).all():
+                # 20260520 fix B-28: accept pandas 3.x 'str' dtype in addition to legacy 'object';
+                # the isinstance(x, str) cell-by-cell check below is the actual validator.
+                if actual not in ('object', 'str') or not col_data.map(lambda x: isinstance(x, str)).all():
                     print(f"Column '{col}' is not all strings.")
                     return False
             else:
@@ -576,6 +614,9 @@ def directassign_files(annotation_file, raw_csv, derivatizationtags, debug = Fal
         df = pd.read_excel(anno, sheet_name="MSlist")
         if validate_annotation_structure(df):
             print("annotation list validated")
+            # 20260517 fix B-17: B2 canonicalize — v5 input column 'GlyToucan Access Number' renamed to 'GlyToucan ID' so downstream code (slice/index/writer/v14 trainable CSV reader/feature_exclude/label dropdown) stays uniform on the v4 column name.
+            if "GlyToucan Access Number" in df.columns:
+                df = df.rename(columns={"GlyToucan Access Number": "GlyToucan ID"})
             MSlistcheck = True
         else:
             print("Annotation list invalid")
@@ -595,7 +636,7 @@ def directassign_files(annotation_file, raw_csv, derivatizationtags, debug = Fal
             ionlistcheck = True
         else:
             print(f"Column 'mass' has dtype {ion_df['mass'].dtype}, expected float64.")
-        ionlistcheck = False
+            ionlistcheck = False
     else:
         notfounderror.append[2]
         print("No ion list in sheet names")
@@ -760,9 +801,10 @@ def sample_real_negatives(
     all_scans = set(raw["MS2scan_no"].unique())
     cand_scans = list(all_scans - annotated_set)
     if not cand_scans:
+        # 20260517 fix B-17: extend empty-frame schema to include GlyToucan ID + WURCS so MAS trainable CSV column set is consistent across positives + negatives.
         return pd.DataFrame(columns=[
             "MS2scan_no","protonatedmass","peaklist","peakintensity",
-            "Structure","IUPACname(optional)","Glycanannotation2"
+            "Structure","IUPACname(optional)","Glycanannotation2","GlyToucan ID","WURCS"
         ])
 
     # Prepare ion masses
@@ -792,6 +834,7 @@ def sample_real_negatives(
         r = gdf.iloc[0]
         hits = count_hits(r["peaklist"])
         if hits < min_hits:
+            # 20260517 fix B-17: add empty GlyToucan ID + WURCS defaults to negative rows so MAS trainable CSV stays schema-consistent with the v5 / Z1+W1 propagation.
             rows.append({
                 "MS2scan_no": int(scan_id),
                 "protonatedmass": float(r.get("protonatedmass", np.nan)),
@@ -799,7 +842,9 @@ def sample_real_negatives(
                 "peakintensity": list(map(float, r["peakintensity"])),
                 "Structure": "Non-glycan",
                 "IUPACname(optional)": "",
-                "Glycanannotation2": ""
+                "Glycanannotation2": "",
+                "GlyToucan ID": "",
+                "WURCS": ""
             })
 
     neg = pd.DataFrame(rows)
@@ -819,7 +864,9 @@ def sample_real_negatives(
 def createnormailzedionlistcsv(ionindex, converted_df, ion_df, filename):
     niondf = pd.DataFrame(columns=ionindex)
     for i in range(len(converted_df)):
-        annotationlist = [['protonatedmass',converted_df.iloc[i]['protonatedmass']],['Structure',converted_df.iloc[i]['Structure']], ['IUPACname(optional)' ,converted_df.iloc[i]['IUPACname(optional)']],['Glycanannotation2',converted_df.iloc[i]['Glycanannotation2']],['unique_ID',converted_df.iloc[i]['MS2scan_no']]]
+        # 20260517 fix B-17: pull GlyToucan ID + WURCS values from converted_df (slice_combined_df guarantees presence with empty defaults).
+        # FUTURE-API-HOOK: secondary Glycosmos composition API integration point — populate empty GlyToucan ID + WURCS values from converted_df.iloc[i]['Structure'] here when API caller/collector lands post-freeze. Today values are user-supplied via v4/v5 MAS Excel (preserved as-is).
+        annotationlist = [['protonatedmass',converted_df.iloc[i]['protonatedmass']],['Structure',converted_df.iloc[i]['Structure']], ['IUPACname(optional)' ,converted_df.iloc[i]['IUPACname(optional)']],['Glycanannotation2',converted_df.iloc[i]['Glycanannotation2']],['GlyToucan ID',converted_df.iloc[i]['GlyToucan ID']],['WURCS',converted_df.iloc[i]['WURCS']],['unique_ID',converted_df.iloc[i]['MS2scan_no']]]
         tempions = findingions(converted_df.iloc[i], ion_df, 10)
         #print(f"[DEBUG] tempions for row {i}: {tempions}")
         #tempions1 = sorted(tempions, key=lambda x: x[0])
