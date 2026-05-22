@@ -1,6 +1,6 @@
 import os
-version = "1.09.3"
-last_update = 20260521
+version = "1.09.9"
+last_update = 20260523
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -368,13 +368,13 @@ def _macos_append_compound_suffix(path, compound_suffix):
         return path[:-5] + compound_suffix
     return path + compound_suffix
 # ===========================
-
 # Changelogs:
-# v1.5 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
-# v1.3 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
+# v1.3 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
+# v1.21 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
 # v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
+# v1.1+ refactoring v1.09.23 fix conversion early fire issue. If conversion at Thermo COM level fails, need to close app to release. Marked for future fix.
 # v1.1 [stable version for publish] fix the old macos crash issue in tkinter, confirmed full pipeline executable on both Windows (fixed package version) and MacOS (py3.12+, latest packages) 
-# v1.09.5 refactoring v1.09.23 fix conversion early fire issue. If conversion at Thermo COM level fails, need to close app to release. Marked for future fix.
+# v1.09.4 minor fixes
 # v1.09.3 deep review and add comments for further refactor work (Claude Code involved)
 # v1.09.1 dead code cleanup
 # v1.09 (manuscript version): CGA score b implemented
@@ -1036,8 +1036,10 @@ class CGASetupWindow(tk.Toplevel):
 
         # Attach ion list (optional)
         def _attach_ionlist():
+            # 20260522 fix B-30 sister: macOS Tk setAllowedFileTypes crashes
             p = filedialog.askopenfilename(title="Attach Ion List (CSV/XLSX)",
-                                        filetypes=[("CSV/XLSX", "*.csv;*.xlsx;*.xls"), ("All files", "*.*")])
+                                        filetypes=_macos_safe_filetypes(
+                                            [("CSV/XLSX", "*.csv *.xlsx *.xls"), ("All files", "*.*")]))
             if not p:
                 return
             self.ionlist_path_var.set(p)
@@ -4295,7 +4297,20 @@ def open_prepare_dataset_window():
             if ion_df is None or "mass" not in ion_df.columns:
                 log(f"[ERROR 1] Require an ion list with mass column to define features for peak extraction (is file corrupted?)")
                 raise RuntimeError("Ion list with a 'mass' column is required to to define features for peak extraction")
-            ion_masses = ion_df["mass"].astype(float).tolist()
+            # 20260522 fix B-36: dedupe duplicate m/z in ion list (prevents InvalidIndexError + _count_hits_to_ionlist over-count) #consider wrapping to single callable function
+            raw_masses = pd.to_numeric(ion_df["mass"], errors="coerce").dropna().astype(float).tolist()
+            seen, ion_masses, dup_keys = set(), [], []
+            for m in raw_masses:
+                key = str(float(m))  # same identity used by feature column names at ml_ng_utils.py:53
+                if key in seen:
+                    dup_keys.append(key)
+                    continue
+                seen.add(key)
+                ion_masses.append(float(m))
+            if dup_keys:
+                dup_unique = sorted(set(dup_keys), key=lambda x: float(x))
+                log(f"[CGA→Train][WARN] Ion list contained {len(raw_masses) - len(ion_masses)} duplicate m/z entries;Dropped duplicate m/z: {dup_unique}")
+                ion_df = pd.DataFrame({"mass": ion_masses})
 
             # require long-form peaks to build features
             if not {"peaklist","peakintensity"}.issubset(pl.columns):
@@ -4531,7 +4546,7 @@ def open_prepare_dataset_window():
             outdir = os.path.dirname(cga_path)
             # suffix reflects whether MS1 is part of the feature set
             mass_suffix = "_withMass" if include_mass_feature else "_noMass"
-            outname = f"{sample_name}_trainable_fromPL_{datetime.now().strftime('%Y%m%d_%H%M%S')}{mass_suffix}.csv"
+            outname = f"{sample_name}_trainable_fromCGA_{datetime.now().strftime('%Y%m%d_%H%M%S')}{mass_suffix}.csv"
             output_path = os.path.join(outdir, outname)
 
         log(f"[CGA→Train] include_mass_feature={include_mass_feature} → {os.path.basename(output_path)}")
@@ -5029,7 +5044,7 @@ def open_prepare_dataset_window():
        #20250930 fix win11 issue
        # 7) Save TSV next to converted CSV  (ABSOLUTE + explicit encoding)
         outdir  = os.path.dirname(os.path.abspath(csv_path))
-        outname = f"{sample_name}_pseudolabels_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv" #added HMS to avoid overwriting
+        outname = f"{sample_name}_CGA_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv" #added HMS to avoid overwriting
         outpath = os.path.abspath(os.path.join(outdir, outname))
         out.to_csv(outpath, index=False, sep="\t", encoding="utf-8")
 
@@ -5939,10 +5954,6 @@ def open_prepare_dataset_window():
                 parent=root
             )
 
-            if not out_tsv:
-                # Since run_pseudolabeling won't return any value, we reuse the stored value from files["pseudolabel_csv"]
-                out_tsv = files.get("pseudolabel_csv")
-
             # Part 2: Score B runtime enrichment
             if out_tsv and score_b_workbook_path:
                 out_tsv = run_score_b_enrichment(
@@ -5959,14 +5970,14 @@ def open_prepare_dataset_window():
                     "action": "score_b_enrichment",
                     "sample": sample_name,
                     "input": {
-                        "pseudolabel_tsv_before_enrichment": out_tsv,
+                        "CGA_tsv_before_enrichment": out_tsv,
                         "score_b_workbook_path": score_b_workbook_path,
                     },
                     "params": {
                         "ppm_tolerance": 20.0,
                     },
                     "output": {
-                        "pseudolabel_tsv_after_enrichment": out_tsv,
+                        "CGA_tsv_after_enrichment": out_tsv,
                     },
                 })
 
@@ -6035,7 +6046,7 @@ def open_prepare_dataset_window():
     # CGA setup & data passing block ends
 
     # 20250911 CGA → Trainable window
-    def open_pl_to_trainable_modal(root, sample_name, files, logger):
+    def open_pl_to_trainable_modal(root, exp_name, sample_name, files, logger):
         import tkinter as tk
         from tkinter import filedialog, messagebox
 
@@ -6197,6 +6208,12 @@ def open_prepare_dataset_window():
                 # 20260417 code review: add trainable csv (CGA route) with tree update
                 files["trainable_csv"] = outpath
                 print(f"[DEBUG] files['trainable_csv'] set to: {files.get('trainable_csv')}")
+                # 20260522 fill missing CGA->Trainable autosave/update on CGA method json
+                try:
+                    save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="CGA", auto=True)
+                    logger.log(f"[CGA][preML] trainable csv generated {outpath}")
+                except Exception as e_method:
+                    logger.log(f"[CGA→Train] post-trainable method update failed: {e_method}")
                 refresh_tree()
             except Exception as e:
                 import traceback; traceback.print_exc()
@@ -6211,7 +6228,7 @@ def open_prepare_dataset_window():
             return
         
         files = experiment_projects[exp_name]["samples"][sample_name]
-        open_pl_to_trainable_modal(root, sample_name, files, logger)
+        open_pl_to_trainable_modal(root, exp_name, sample_name, files, logger)
 
 
 
@@ -8694,6 +8711,7 @@ def open_ml_analysis_window():
         # 20260521 confirmed list object
         if isinstance(raw_samples, list):
             # v1 format: list of dicts with "sample_name" and optionally "methods"
+            samples = {}
             for s in raw_samples:
                 if not isinstance(s, dict):
                     continue
@@ -9007,7 +9025,7 @@ def set_main_status(text, fg=None):
 
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.10 Build 20260521 --finalcheck-CGA")
+root.title("GlycoMSP File Manager GUI v1.10 (20260523 Public Preview version)")
 root.geometry("800x560")
 root.minsize(800, 560)
 
