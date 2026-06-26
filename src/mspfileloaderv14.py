@@ -1,6 +1,6 @@
 import os
-version = "1.09.9"
-last_update = 20260523
+version = "1.10"
+last_update = 20260626
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -18,13 +18,6 @@ import shutil
 import traceback
 import mspvalidator_merger as mspval
 import pandas as pd
-# 20260520 fix B-28 (Patch D, revised per Codex same-day): opt out of pandas 3.x
-# future.infer_string=True default. Mirrors the same opt-out in
-# mspvalidator_merger.py top (Patch C) for defense in depth — if v14 is launched
-# standalone or before mspval is imported, this still applies. Restores legacy
-# 'object' dtype for string columns; required for v14's read_csv on trainable /
-# prediction / converted CSVs and any downstream list-into-string assignment.
-# Guard: tolerate older pandas where the option does not exist (see mspval Patch C).
 try:
     pd.options.future.infer_string = False
 except (AttributeError, KeyError):
@@ -437,7 +430,6 @@ def _macos_append_compound_suffix(path, compound_suffix):
 # add logger
 # test of adding tkinter windows with the help of GPT4o
 # add GUI, add progress bar and making buttons work
-
 # version: 0.4
 # added mzml support function (waiting mzml extractor implementation - will be noted as v0.5 then, while MSP will be v0.6)
 # version: 0.3
@@ -450,6 +442,14 @@ def _macos_append_compound_suffix(path, compound_suffix):
 # re-organized the code structure and readability using copilot and ChatGPT4-o
 # no sensitive contents were sent to the server for this part
 # ============================
+# 20260520 fix B-28 (Patch D, revised per Codex same-day): opt out of pandas 3.x
+# future.infer_string=True default. Mirrors the same opt-out in
+# mspvalidator_merger.py top (Patch C) for defense in depth — if v14 is launched
+# standalone or before mspval is imported, this still applies. Restores legacy
+# 'object' dtype for string columns; required for v14's read_csv on trainable /
+# prediction / converted CSVs and any downstream list-into-string assignment.
+# Guard: tolerate older pandas where the option does not exist (see mspval Patch C).
+
 
 # tkinter-safe init
 try: 

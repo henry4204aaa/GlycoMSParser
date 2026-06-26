@@ -1,292 +1,144 @@
 # GlycoMSP
 
-**GlycoMSP** (Glyco Mass Spectra Parser) is a Python-based workflow for glycomic LC–MS/MS data preprocessing, glycan annotation support, dataset preparation, and machine-learning-assisted glycan spectral analysis.
+**GlycoMSP** (Glyco Mass Spectra Parser) is a Python (tkinter) desktop workflow for
+glycan MS/MS data: RAW/mzML → MS2-indexed tables → MAS / CGA annotation →
+selected-fragment-ion feature matrices → local Random Forest training and
+scan-level prediction reports.
 
-Current version: **v1.09**  
-Last README update: **2026-05-09**
-
-> This repository is under active development for PhD thesis and manuscript preparation. The codebase is being reorganized toward a cleaner publication-ready structure.
+Current version: **v1.10**
 
 ---
 
 ## Overview
 
-GlycoMSP is designed to support glycan LC–MS/MS analysis by connecting several steps that are often handled separately:
+GlycoMSP connects several steps of a glycan LC–MS/MS analysis that are usually
+handled by separate tools, while preserving traceability between source spectra,
+annotations, and the datasets generated from them:
 
-1. Raw spectral data conversion and preprocessing
-2. Manual annotation dataset preparation
-3. Constraint-based glycan annotation (CGA)
-4. Fragment-ion-aware scoring and label refinement
-5. Machine-learning dataset construction
-6. Random Forest-based glycan spectral classification and prediction
+1. RAW / mzML conversion to MS2-indexed spectral tables
+2. Manual annotation support (MAS) for trainable-dataset preparation
+3. Constraint-based glycan annotation (CGA) of candidate compositions
+4. Selected-fragment-ion feature-matrix construction
+5. Local Random Forest training and scan-level prediction reports
 
-The project was originally developed for permethylated glycan LC–MS/MS datasets and is currently being extended and reorganized for broader usability.
-
----
-
-## Main Features
-
-### 1. Raw / mzML Data Preprocessing
-
-GlycoMSP supports conversion and extraction of MS/MS spectral information from compatible mass spectrometry data files.
-
-Current support includes:
-
-- Thermo RAW file extraction through Thermo MSFileReader / pymsfilereader
-- mzML reader support under active development
-- Export of converted spectral tables for downstream annotation and ML processing
-- Metadata generation for traceability
-
-Thermo RAW extraction requires a Windows environment with the Thermo library installed.
+GlycoMSP was originally developed for positive-ion-mode permethylated N-glycan
+LC–MS/MS datasets.
 
 ---
 
-### 2. Manual Annotation Support
+## Key features
 
-The manual annotation workflow supports preparation of trainable datasets from:
+- **Two annotation routes** — Manual Annotation Support (MAS) and Constraint-based
+  Glycan Annotation (CGA), both producing MS2-indexed, traceable tables.
+- **Traceable MS2-indexed data** — links are preserved between source spectra,
+  annotations, metadata JSON, and the generated trainable datasets.
+- **Local machine learning** — selected-fragment-ion feature matrices feed a local
+  Random Forest classifier; no data leaves the machine.
+- **Scan-level prediction reports** — per-scan predictions with summary reporting.
+- **Score B (optional, experimental)** — a motif-aware re-ranking module driven by a
+  user-curated Excel workbook. Score B was *not* used in the main analyses and is
+  provided as an optional advanced feature. See
+  [`docs/score_b_design.md`](docs/score_b_design.md).
 
-- Converted MS/MS CSV or TSV files
-- Annotation Excel workbooks
-- Fragment ion lists
-- Metadata JSON files
-
-The workflow is intended to preserve links between source spectra, annotations, metadata, and generated datasets.
-
----
-
-### 3. Constraint-Based Glycan Annotation
-
-The CGA workflow generates candidate glycan compositions based on user-defined biological and structural constraints.
-
-Supported concepts include:
-
-- N-glycan and O-glycan composition generation
-- Permethylated glycan mass calculation
-- User-configurable glycan composition boundaries
-- Optional glycan motif / glycotope constraints
-- In-silico composition export
-- Pseudo-label generation for ML training support
-
-Composition notation currently follows the project convention:
+Composition notation follows the project convention:
 
 ```text
-H = Hexose
-N = HexNAc
-S = Neu5Ac
-G = Neu5Gc
-K = KDN
-F = Fucose
+H = Hexose      N = HexNAc      S = Neu5Ac
+G = Neu5Gc      KDN = KDN         F = Fucose
 ```
 
-Example:
-
-```text
-F1H5N4S1
-```
-
----
-
-### 4. Score B / Motif-Aware Re-ranking
-
-GlycoMSP includes an experimental motif-aware scoring workflow for improving CGA-derived candidate ranking.
-
-The scoring system can use:
-
-- Fragment ion evidence
-- Motif-support rules
-- Composition-consistency checks
-- Unexpected-evidence penalties
-- User-selected motif policies
-
-This component is currently being refined for manuscript and supplementary documentation.
-
----
-
-### 5. Machine Learning Workflow
-
-GlycoMSP includes tools for building ML-compatible glycan spectral datasets and training Random Forest models.
-
-Current ML-related functions include:
-
-- Trainable dataset construction
-- Optional Non-glycan class handling
-- Class filtering by minimum sample count
-- Majority-class balancing
-- Train/test/validation splitting
-- Random Forest model training
-- Label encoding and prediction export
-- Prediction summary report generation
-
-The current ML implementation primarily uses `scikit-learn`.
-
----
-
-## Repository Structure
-
-The repository is currently being reorganized into the following structure:
-
-```text
-GlycoMSParser/
-├── README.md
-├── .gitignore
-├── src/
-│   └── active GlycoMSP source code
-├── docs/
-│   └── documentation, workflow notes, and method descriptions
-├── templates/
-│   └── reusable annotation, metadata, and workbook templates
-├── tmpdata/
-│   └── local-only temporary data and archived development files
-├── logs/
-│   └── local-only log files
-└── .venv/
-    └── local Python virtual environment
-```
-
-`tmpdata/`, `logs/`, `.venv/`, and editor-specific folders are intended to remain local and are excluded from normal repository tracking.
+Example: `F1H5N4S1`
 
 ---
 
 ## Installation
 
-A stable package installation workflow is still under preparation.
-
-For current development use, clone the repository and create a Python environment manually:
+GlycoMSP is currently used from source. Clone the repository and create a Python
+environment:
 
 ```bash
 git clone https://github.com/henry4204aaa/GlycoMSParser
-cd GlycoMSParser
+cd GlycoMSParser/src
+pip install -r requirements.txt          # Python 3.10–3.12
+# Python 3.13+:
+# pip install -r requirementspy313.txt
 ```
 
-Install commonly required packages:
+**Environment**
 
-```bash
-cd src
-pip install requirements.txt
-```
+- Python 3.10–3.12 recommended. Python 3.13 has also been tested (H.-C. Chang);
+use requirementspy313.txt, as a separate pin is needed because some dependency wheels are not yet available for 3.13.
 
-If you are using Python3.13+
-
-```bash
-cd src
-pip install requirementspy313.txt
-```
-
-Additional packages may be required depending on the workflow being used.
+- Core packages: `pandas`, `numpy`, `scikit-learn`, `openpyxl`, `pymzml`,
+  `joblib` / `skops` (and `pymsfilereader` on Windows). See the repo
+  `requirements*.txt` for the full list.
+- **Windows is required for Thermo RAW conversion** (`pymsfilereader` + the Thermo
+  libraries). **mzML input is cross-platform.**
 
 ---
 
-## Requirements
+## Quick start
 
-### General Python Requirements
+Launch the GUI (the active, code-reviewed entry point):
 
-- Python 3.10+ recommended
-- pandas
-- numpy
-- openpyxl
-- scikit-learn
-- joblib
-- tkinter (built-in)
-
-### Thermo RAW File Extraction
-
-Thermo RAW support requires:
-
-- Windows OS
-- Thermo MSFileReader installed
-- pymsfilereader installed and correctly linked
-
-If these are not available, use mzML-based workflows where possible.
-
----
-
-## Basic Usage
-
-The current GUI entry point is under `src/`.
-The current active code-reviewed GlycoMSP GUI is `mspfileloaderv14.py`
-Please run the file 
 ```bash
-python .\src\mspfileloaderv14.py
+python ./src/mspfileloaderv14.py
 ```
 
 Typical workflow:
 
-1. Launch the GlycoMSP GUI
-2. Convert RAW or mzML files into spectral CSV / TSV format
-3. Create or link metadata JSON files
-4. Prepare manual annotation or CGA-derived datasets
-5. Generate trainable datasets
-6. Train or apply ML models
-7. Export prediction results and reports
+1. Convert RAW or mzML files into MS2-indexed spectral CSV / TSV tables.
+2. Create or link metadata JSON files.
+3. Prepare a MAS or CGA-derived annotation set.
+4. Build a trainable dataset (selected-fragment-ion feature matrix).
+5. Train or apply a Random Forest model.
+6. Export prediction results and the scan-level report.
 
-Example command structure may change as the repository is reorganized.
+For the full GUI walkthrough, see the **user manual** (maintained separately) and the
+documentation wiki under [`docs/`](docs/).
 
----
+### Default ML configuration
 
-## Current Development Status
+The default training configuration matches the manuscript:
 
-As of **2026-05-09**, GlycoMSP is in an active pre-publication development stage.
-
-Current priorities include:
-
-- Repository cleanup and restructuring
-- README and documentation updates
-- Template file organization
-- GUI workflow stabilization
-- JSON schema clarification
-- Score B documentation
-- Manuscript- and thesis-aligned software release preparation
+- Random Forest, **400 trees**, `class_weight="balanced"`, `random_state=42`,
+  `min_samples_split=2`, `min_samples_leaf=1`
+- Class-eligibility filter: **≥ 5 spectra** per class
+- **80/20 stratified** train/test split (no validation fold by default)
 
 ---
 
-## Notes on Data and Templates
+## Data & reproducibility
 
-This repository may include small template files or demonstration files only.
-
-Large raw files, private experimental datasets, generated intermediate files, logs, and temporary JSON files should not be committed to the repository.
-
-Recommended local-only folders:
-
-```text
-tmpdata/
-logs/
-archive/
-```
-
----
-
-## Citation
-
-A formal citation will be added after manuscript submission or publication.
-
-For now, please cite the repository or contact the author if using GlycoMSP in collaborative work.
-
----
-
-## Author
-
-Developed by **Huan-Chuan Tseng**  
-PhD research project, glycomics / mass spectrometry / bioinformatics
+- **Primary data (zebrafish RAW + original annotations):** GlycoPOST —
+  <http://doi.org/10.50821/GLYCOPOST-GPST000224>
+- **Reproducibility archive (code + reference workbook + U-937 reanalysis files
+  where redistribution is permitted):** Zenodo —
+  <https://doi.org/10.5281/zenodo.20823042>
+- The reference Score B workbook for positive-ion-mode permethylated N-glycans is
+  provided with GlycoMSP and in the Zenodo package.
 
 ---
 
 ## License
 
-License information will be added before public release.
+GlycoMSP is released under the **MIT License**.
+Copyright (c) 2026 Huan-Chuan Tseng. See [`LICENSE.md`](LICENSE.md).
 
 ---
 
-## Changelog
+## Citation
 
-### v1.09 — 2026-05-09
+> Tseng, H.-C. *GlycoMSP enables traceable glycan MS/MS annotation and local
+> machine-learning-ready dataset construction.* Manuscript under submission to
+> *Bioinformatics* (2026).
 
-- Repository cleanup and restructuring initiated
-- Active code moved toward `src/`
-- Temporary data and archived development files separated from active source code
-- README updated for publication-preparation stage
-- Documentation and template folders introduced
+A formal citation will be added once the reference is available. Until then, please
+cite this repository and the Zenodo DOI above.
 
-### Early Development
+---
 
-- 2023-01-02: Initial GitHub repository upload
-- 2022-12: Fundamental core scripts and early pipeline prototypes created
+## Author
+
+Developed by **Huan-Chuan Tseng** as a PhD research project at the University of Tokyo 
+(glycomics / mass spectrometry / bioinformatics).
