@@ -130,8 +130,8 @@ Copyright (c) 2026 Huan-Chuan Tseng. See [`LICENSE.md`](LICENSE.md).
 ## Citation
 
 > Tseng, H.-C. *GlycoMSP enables traceable glycan MS/MS annotation and local
-> machine-learning-ready dataset construction.* Manuscript under submission to
-> *Bioinformatics* (2026).
+> machine-learning-ready dataset construction.* Manuscript submitted to
+> *Bioinformatics Advances* (2026).
 
 A formal citation will be added once the reference is available. Until then, please
 cite this repository and the Zenodo DOI above.
