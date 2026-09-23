@@ -1,5 +1,6 @@
-version = 0.94
-last_update = 20260520
+version = 0.95
+last_update = 20260921
+#v0.95 20260921 S1 (v1.20 T1): createnormailzedionlistcsv gains additive kwarg enrich_fn=None (GlyTouCan/WURCS run-time fill hook H3); default path unchanged
 #v0.94 20260520 fix B-28: relax string-dtype gate in validate_csv_structure + validate_annotation_structure to accept pandas 3.x default 'str' dtype in addition to legacy 'object' (gate-only relaxation; downstream isinstance(x, str) check unchanged) + guarded process-global opt-out from future.infer_string at module-top (Codex-reviewed: guard tolerates pandas <2.x where option does not exist); restores validate-pass on fresh pandas 3.0+ installs. (B-27 was reserved for peaks_ppm_duplicate_collapse_stub, now closed; this renumber avoids collision.)
 #v0.94 20260517 fix B-17: add v5 MAS header (GlyToucan Access Number, WURCS) accept; propagate label metadata through slice/iondfindex/negatives/writer; fix ionlistcheck indent
 #v0.94 code review 1. Need deep analysis
@@ -861,11 +862,21 @@ def sample_real_negatives(
 
 
 #autofilled by copilot. Need manual validation
-def createnormailzedionlistcsv(ionindex, converted_df, ion_df, filename):
+def createnormailzedionlistcsv(ionindex, converted_df, ion_df, filename, *, enrich_fn=None):
+    # 20260921 S1 (v1.20 T1): additive `enrich_fn` — optional callable applied ONCE to converted_df before the row loop
+    # (v14 passes a GlyTouCan/WURCS run-time fill from the local reference database when the user option is on).
+    # Default None keeps v1.10 behaviour byte-for-byte for every caller (v14/v11/v14db/CLI scripts untouched).
+    # Contract: enrich_fn(df) -> df; fills EMPTY 'GlyToucan ID'/'WURCS' cells only, never overwrites MAS sheet values,
+    # never touches 'Structure'. Spec: handoff/WURCS_designspec20260921.md (API-HOOK H3; landed).
+    if enrich_fn is not None:
+        try:
+            converted_df = enrich_fn(converted_df)
+        except Exception as _e:
+            print(f"[glytoucan][WARN] enrich_fn failed; writing trainable CSV without fill: {_e}")
     niondf = pd.DataFrame(columns=ionindex)
     for i in range(len(converted_df)):
         # 20260517 fix B-17: pull GlyToucan ID + WURCS values from converted_df (slice_combined_df guarantees presence with empty defaults).
-        # FUTURE-API-HOOK: secondary Glycosmos composition API integration point — populate empty GlyToucan ID + WURCS values from converted_df.iloc[i]['Structure'] here when API caller/collector lands post-freeze. Today values are user-supplied via v4/v5 MAS Excel (preserved as-is).
+        # 20260921 S1: values may now also come from the reference database via `enrich_fn` above (user-supplied v4/v5 MAS Excel values preserved as-is; they win).
         annotationlist = [['protonatedmass',converted_df.iloc[i]['protonatedmass']],['Structure',converted_df.iloc[i]['Structure']], ['IUPACname(optional)' ,converted_df.iloc[i]['IUPACname(optional)']],['Glycanannotation2',converted_df.iloc[i]['Glycanannotation2']],['GlyToucan ID',converted_df.iloc[i]['GlyToucan ID']],['WURCS',converted_df.iloc[i]['WURCS']],['unique_ID',converted_df.iloc[i]['MS2scan_no']]]
         tempions = findingions(converted_df.iloc[i], ion_df, 10)
         #print(f"[DEBUG] tempions for row {i}: {tempions}")

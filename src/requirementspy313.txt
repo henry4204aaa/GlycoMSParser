@@ -6,3 +6,4 @@ scikit_learn
 skops
 pymsfilereader
 pymzml
+certifi  # 20260921 S1: CA bundle for the GlyCosmos client (msp_glytoucan_resolver); python.org macOS builds ship none

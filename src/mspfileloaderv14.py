@@ -1,6 +1,6 @@
 import os
-version = "1.10"
-last_update = 20260626
+version = "1.11"
+last_update = 20260923
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -17,6 +17,76 @@ from tkinter import messagebox
 import shutil
 import traceback
 import mspvalidator_merger as mspval
+# 20260921 S1 (v1.20 T1): GlyTouCan accession / WURCS run-time fill. Database only — never network at run time
+# (the API is called only by src/msp_CLI_glytoucan_prebuild.py). Spec: handoff/WURCS_designspec20260921.md.
+try:
+    import msp_glytoucan_resolver as gtr
+except Exception as _gtr_err:  # module missing/broken must never block v1.10 workflows
+    gtr = None
+    print(f"[glytoucan][WARN] resolver unavailable; fill option disabled: {_gtr_err}")
+# Single user option shared by the CGA (H1), MAS (H3) and prediction (H4) sites. Default OFF => v1.10 behaviour.
+# Set from the Prepare Dataset checkbox; a plain dict so closures in different windows can read it without tk vars.
+GLYTOUCAN_FILL = {"enabled": False}
+
+def _glytoucan_fill_df(df, comp_col, *, id_col="GlyToucan ID", wurcs_col="WURCS"):
+    """Fill EMPTY id/wurcs cells of `df` from the local reference database (in place) when the option is on.
+    Returns the artifacts-block dict (status/db/counts) or None when the option is off / resolver missing.
+    Never raises; a missing database is reported as status 'db_missing' (fields left empty)."""
+    if not GLYTOUCAN_FILL.get("enabled") or gtr is None:
+        return None
+    try:
+        db = gtr.ReferenceDB(readonly=True)  # Codex S1 F5: mode=ro, no DDL/meta writes, never creates or touches files
+        try:
+            fr = gtr.annotate_dataframe(df, comp_col, db, id_col=id_col, wurcs_col=wurcs_col)
+        finally:
+            db.close()
+        blk = fr.to_artifact_block()
+        _msg = (f"[glytoucan] fill ({comp_col}): status={blk['status']} compositions={blk['n_compositions']} "
+                f"filled={blk['n_filled']} missing={blk['n_missing']} user_accession={blk['n_user_accession']} "
+                f"db={blk['db'].get('version')} entries={blk['db'].get('n_entries')} updated={blk['db'].get('updated_utc')}")
+        print(_msg)
+        try:
+            logger.log(_msg)          # Henry obs. a (2026-09-22): also show in the main-window log
+        except NameError:
+            pass                      # helper defined before AppLogger; only matters if called at import time
+        return blk
+    except Exception as e:
+        print(f"[glytoucan][WARN] fill skipped: {e}")
+        return None
+
+def _glytoucan_record(files: dict, family: str, block):
+    """Stash the fill status on the sample tree entry (family-keyed) so build_method_v1_from_tree emits
+    artifacts.glytoucan_resolution, and refresh the family-keyed method cache if one already exists
+    (MAS saves reuse the cache instead of rebuilding).
+    block=None (Codex S1 F2): a NEW output for this family was produced WITHOUT a fill — clear the stale
+    provenance from both the tree entry and the cache. Only call with None from a site that just replaced
+    the family's results; never on export/save of existing results or on a checkbox toggle."""
+    if not isinstance(files, dict):
+        return
+    fam = (family or "").upper()
+    cached = files.get(f"_method_v1_cache_{fam}")
+    if block is None:
+        files.pop(f"_glytoucan_resolution_{fam}", None)
+        if isinstance(cached, dict) and isinstance(cached.get("artifacts"), dict):
+            cached["artifacts"].pop("glytoucan_resolution", None)
+        return
+    if not isinstance(block, dict):
+        return
+    files[f"_glytoucan_resolution_{fam}"] = dict(block)
+    if isinstance(cached, dict) and isinstance(cached.get("artifacts"), dict):
+        cached["artifacts"]["glytoucan_resolution"] = dict(block)
+
+def _cga_cache_link_trainable(files: dict, outpath: str):
+    """Codex S1 R5-F1 (20260923): save_method_v1_for_sample reuses `_method_v1_cache_CGA` verbatim and never rebuilds
+    artifacts from the tree, so after a trainable CSV write the cached method must be told the NEW path — otherwise
+    the autosaved JSON pairs a fresh H5 resolution block with an absent/stale `artifacts.trainable_csv`.
+    Called right after `files["trainable_csv"] = outpath`, independent of the fill option (the stale-path issue
+    predates H5). No cache => nothing to do (the builder reads the tree on the next save)."""
+    if not isinstance(files, dict) or not outpath:
+        return
+    cached = files.get("_method_v1_cache_CGA")
+    if isinstance(cached, dict) and isinstance(cached.get("artifacts"), dict):
+        cached["artifacts"]["trainable_csv"] = {"path": os.path.normpath(outpath)}
 import pandas as pd
 try:
     pd.options.future.infer_string = False
@@ -2271,8 +2341,9 @@ def combine_trainable_datasets_ui(parent=None):
 # ==============================
 
 def _utc_now_iso():
-    # RFC3339-ish without microseconds
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    # RFC3339-ish without microseconds. 20260923: timezone-aware (utcnow() deprecated in 3.12); output unchanged.
+    from datetime import timezone as _tz
+    return datetime.now(_tz.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
 
 # Avoid status symbol contaminate the tree contexts
 def clean_sample_name(text):
@@ -2432,6 +2503,18 @@ def normalize_method_json(method_obj: dict, method_path: str, base_dir: str = No
     }
     # drop empty
     tree_entry = {k: v for k, v in tree_entry.items() if v}
+
+    # 20260921 S1 / Codex F1: restore GlyTouCan/WURCS resolution provenance into the tree entry (family-keyed)
+    # so build_method_v1_from_tree re-emits it on Export Method / experiment-load autosave instead of dropping it.
+    # Both loaders copy tree_entry into the sample dict; the key name matches _glytoucan_record().
+    if is_v1:
+        try:
+            _gt_blk = ((method_obj.get("artifacts") or {}).get("glytoucan_resolution"))
+            _gt_fam = str(((method_obj.get("method") or {}).get("family") or method_family or "")).upper()
+            if isinstance(_gt_blk, dict) and _gt_fam in ("MAS", "CGA"):
+                tree_entry[f"_glytoucan_resolution_{_gt_fam}"] = dict(_gt_blk)
+        except Exception as _gt_e:
+            print(f"[glytoucan][WARN] could not restore resolution provenance from {method_path}: {_gt_e}")
 
     # ----------------------------
     # D) Produce canonical v1 method dict (in-memory)
@@ -3168,6 +3251,12 @@ def open_prepare_dataset_window():
     ion_suggest_minsupp_var  = tk.IntVar(value=5)     # min glycan support per ion
     ion_suggest_topk_var     = tk.IntVar(value=60)    # how many to export
     last_suggest_csv_var = tk.StringVar(value="")
+    # --- 20260921 S1: GlyTouCan/WURCS run-time fill option (shared by CGA/MAS/prediction via GLYTOUCAN_FILL) ---
+    glytoucan_fill_var = tk.BooleanVar(value=bool(GLYTOUCAN_FILL.get("enabled")))
+    def _on_glytoucan_fill_toggle():
+        GLYTOUCAN_FILL["enabled"] = bool(glytoucan_fill_var.get())
+        print(f"[glytoucan] run-time fill {'ON' if GLYTOUCAN_FILL['enabled'] else 'OFF'} "
+              f"(reference db: {gtr.default_db_path() if gtr else 'resolver unavailable'})")
     # ===========================
 
     # --- Treeview UI: panel of sample nodes showing ---
@@ -3829,7 +3918,18 @@ def open_prepare_dataset_window():
                     except Exception as e:
                         messagebox.showwarning("Ion Mining", f"Suggestion failed:\n{e}")
 
-            mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath)
+            # 20260921 S1 (v1.20 T1), API-HOOK H3: optional GlyTouCan/WURCS fill applied inside the writer via the additive
+            # `enrich_fn` kwarg (database only; MAS sheet values win; None when the option is off => v1.10 call).
+            _gt_enrich = None
+            _gt_holder = {}                                   # Codex R2-F3: stage the block; publish only after the write
+            if GLYTOUCAN_FILL.get("enabled") and gtr is not None:
+                def _gt_enrich(_df, _holder=_gt_holder):
+                    _holder["block"] = _glytoucan_fill_df(_df, "Structure")
+                    return _df
+            mspval.createnormailzedionlistcsv(iondfindex, pre_df,ion_df, outpath, enrich_fn=_gt_enrich)
+            # The trainable CSV now exists (the writer raises otherwise) → publish this family's provenance, or clear it
+            # when no fill happened (option off, resolver error, or enrich_fn failure swallowed by the writer). Codex S1 F2 + R2-F3.
+            _glytoucan_record(files, "MAS", _gt_holder.get("block"))
             messagebox.showinfo("Merge Complete", f"Dataset saved:\n{os.path.basename(outpath)}")
             #fixed 20260313 ML-2: update method after merge completes
             # 20260416 add trainable_csv tracking (in future we may need subnode, or separated ML method under same MAS/CGA method)
@@ -4601,6 +4701,12 @@ def open_prepare_dataset_window():
 
         final_df = final_df[["MS2scan_no","Structure","Glycanannotation2","GlyToucan ID","WURCS"] + feature_cols]
 
+        # API-HOOK H5 (landed 20260923 S1, Henry-approved): fill EMPTY GlyToucan ID / WURCS cells of the trainable from
+        # the local reference database (database only, never network) when the user option is on. Covers the case where
+        # the CGA TSV was produced with the option off. Values inherited from the TSV are kept (empty-cell rule);
+        # `Structure` and feature columns are never touched. Option off => None => this block is a no-op (v1.10 output).
+        _gt_block = _glytoucan_fill_df(final_df, "Structure")
+
         final_df.to_csv(output_path, index=False)
         log(f"[CGA→Train] saved: {output_path}")
         # summary
@@ -4613,7 +4719,9 @@ def open_prepare_dataset_window():
             "feature_mode": feature_mode,
             "ion_masses": len(ion_masses or []),
             "thresholds": thresholds,
-            "neg_opts": neg_opts
+            "neg_opts": neg_opts,
+            # H5: fill provenance for the caller to record on the sample (None when the option was off / no fill)
+            "glytoucan_resolution": _gt_block,
         }
         return output_path, summary
     # ---------- end CGA (PSEUDOLABEL) → TRAINABLE ----------
@@ -5037,16 +5145,23 @@ def open_prepare_dataset_window():
         # just in case it sneaks in from elsewhere:
         out.drop(columns=["observed_mass"], errors="ignore", inplace=True)
         # 20260517 fix B-17: seed label metadata columns with empty defaults so CGA-produced TSVs match the v5 MAS schema. Preserves user-supplied values when upstream `df` already carries them (MAS-converted-reused-for-CGA path).
-        # FUTURE-API-HOOK: primary Glycosmos composition API integration point — when the external API caller/collector lands post-freeze, fill GlyToucan ID + WURCS from `selected_composition` / `composition` here, replacing the empty-string defaults below. Single composition string → (glytoucan_id, wurcs) round trip; no structural change to this block needed.
+        # API-HOOK H1 (landed 20260921 S1, v1.20 T1): GlyTouCan ID + WURCS are filled from the local reference database
+        # right after the empty-default seeding below, only when the user option is on (GLYTOUCAN_FILL). Database only,
+        # never network; empty cells only; `composition` untouched. Option off => this block is byte-identical to v1.10.
         for _b17_label_col in ("Glycanannotation2", "GlyToucan ID", "WURCS"):
             if _b17_label_col not in out.columns:
                 out[_b17_label_col] = ""
+        _gt_block = _glytoucan_fill_df(out, comp_col_out or "composition")
+        # Codex R2-F3: provenance is published/cleared only AFTER the TSV write below succeeds (see after to_csv).
        #20250930 fix win11 issue
        # 7) Save TSV next to converted CSV  (ABSOLUTE + explicit encoding)
         outdir  = os.path.dirname(os.path.abspath(csv_path))
         outname = f"{sample_name}_CGA_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv" #added HMS to avoid overwriting
         outpath = os.path.abspath(os.path.join(outdir, outname))
         out.to_csv(outpath, index=False, sep="\t", encoding="utf-8")
+        # 20260921 S1 / Codex R2-F3: the new TSV now exists → publish (or, with None, clear) this family's provenance.
+        # A failed write above raises before this line, so the previous result keeps its provenance.
+        _glytoucan_record(files, "CGA", _gt_block)   # None => new TSV without fill: clear stale provenance (Codex S1 F2)
 
         # store absolute path so refresh_tree can always find it
         files["pseudolabel_csv"] = outpath
@@ -5585,7 +5700,10 @@ def open_prepare_dataset_window():
                 "ml": {}
             },
 
-            # FUTURE-API-HOOK: when Glycosmos composition API integration lands post-freeze, add a sibling `glytoucan_resolution` block here with shape {"status": "manual"|"api"|"not_attempted", "api_endpoint": "https://doc.glycosmos.org/api/composition", "last_resolved_utc": <iso>}. Deferred for freeze v1.10 per Henry Q1: no schema bump without a reachable consumer.
+            # API-HOOK H2 (landed 20260921 S1, v1.20 T1): `artifacts.glytoucan_resolution` is appended after the family
+            # blocks below, ONLY when the run-time fill stage ran for this family (tree entry `_glytoucan_resolution_<FAMILY>`).
+            # Absent block == not attempted, so v1.10 method JSON is unchanged when the option is off. Kept as a plain
+            # sibling dict so a future `inputs.method_status` (B-17 Note 2) can land without touching it. schema_version stays 1.0.0.
             "artifacts": {
                 "reports": []
             },
@@ -5628,6 +5746,12 @@ def open_prepare_dataset_window():
                 v1["artifacts"]["trainable_csv"] = {"path": os.path.normpath(train_path)}
             if unlabeled_path:
                 v1["artifacts"]["unlabeled_csv"] = {"path": os.path.normpath(unlabeled_path)}
+
+        # 20260921 S1: GlyTouCan/WURCS resolution status (see API-HOOK H2 note above). Family-keyed so a CGA fill never
+        # shows up in the MAS method of the same sample. Shape: handoff/WURCS_designspec20260921.md §4.
+        _gt = s.get(f"_glytoucan_resolution_{family}")
+        if isinstance(_gt, dict):
+            v1["artifacts"]["glytoucan_resolution"] = dict(_gt)
 
         return v1
     # ==
@@ -6208,6 +6332,14 @@ def open_prepare_dataset_window():
                 # 20260417 code review: add trainable csv (CGA route) with tree update
                 files["trainable_csv"] = outpath
                 print(f"[DEBUG] files['trainable_csv'] set to: {files.get('trainable_csv')}")
+                # Codex S1 R5-F1 (20260923): keep the cached CGA method (reused verbatim by the autosave below) linked
+                # to the NEW trainable so path and resolution block are saved together. Runs regardless of the option.
+                _cga_cache_link_trainable(files, outpath)
+                # H5 (20260923): the trainable CSV is written -> record this fill as the CGA family's latest provenance.
+                # Option off (None) does NOT clear: the trainable inherits the TSV's values rather than replacing a
+                # fresh annotation, so the round-2 clear-on-new-output rule does not apply here (spec §4, H5 rules).
+                if summary.get("glytoucan_resolution") is not None:
+                    _glytoucan_record(files, "CGA", summary["glytoucan_resolution"])
                 # 20260522 fill missing CGA->Trainable autosave/update on CGA method json
                 try:
                     save_method_v1_for_sample(exp_name=exp_name, sample_name=sample_name, kind="CGA", auto=True)
@@ -6256,6 +6388,11 @@ def open_prepare_dataset_window():
     #GPT said without () it only passes the function, and work only if clicked
     tk.Button(button_frame, text="CGA → Trainable",
           command=try_pl_to_trainable).grid(row=3, column=1, padx=5)
+    # 20260921 S1: one checkbox, default off; read by CGA (H1), MAS merge (H3) and prediction (H4). Moves to the
+    # future "Manage References" panel. Disabled when the resolver module failed to import.
+    tk.Checkbutton(button_frame, text="Fill GlyToucan ID / WURCS from reference DB",
+                   variable=glytoucan_fill_var, command=_on_glytoucan_fill_toggle,
+                   state=("normal" if gtr is not None else "disabled")).grid(row=3, column=2, columnspan=2, padx=5, sticky="w")
 
 
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
@@ -8041,8 +8178,22 @@ def open_ml_analysis_window():
             else:
                 logger.log("[ML][Predict][WARN] No label decoder available — predictions are raw integers") 
             # Append prediction labels back to original dataframe
-            # FUTURE-API-HOOK: when Glycosmos API integration + dynamic prediction column naming lands post-freeze (Option A from B-17 item 4), rename column from `Predicted_Label` to `Predicted_<label_col>` (e.g., `Predicted_GlyToucan_ID`, `Predicted_WURCS`). Today static for freeze v1.10; reporter expects literal `pred_label` alias retained at the rename below.
+            # FUTURE-API-HOOK (H4, rename part still deferred): dynamic `Predicted_<label_col>` naming (Option A from B-17 item 4) is NOT done — `Predicted_Label` stays literal because the reporter expects the `pred_label` alias.
+            # API-HOOK H4 (landed 20260921 S1, v1.20 T1): when the GlyTouCan/WURCS option is on, two ADDED columns
+            # `Predicted_GlyToucan_ID` / `Predicted_WURCS` are filled for predicted compositions from the local reference
+            # database (never network). Option off => no new columns, v1.10 output unchanged.
             df['Predicted_Label'] = y_pred
+            if GLYTOUCAN_FILL.get("enabled") and gtr is not None:
+                try:
+                    _gt_tmp = pd.DataFrame({"__comp": [str(v) for v in df['Predicted_Label'].tolist()],
+                                            "Predicted_GlyToucan_ID": "", "Predicted_WURCS": ""})
+                    _gt_blk = _glytoucan_fill_df(_gt_tmp, "__comp",
+                                                 id_col="Predicted_GlyToucan_ID", wurcs_col="Predicted_WURCS")
+                    df["Predicted_GlyToucan_ID"] = _gt_tmp["Predicted_GlyToucan_ID"].tolist()
+                    df["Predicted_WURCS"] = _gt_tmp["Predicted_WURCS"].tolist()
+                    logger.log(f"[ML][Predict] GlyToucan/WURCS fill: {_gt_blk}")
+                except Exception as _gt_e:
+                    logger.log(f"[ML][Predict][WARN] GlyToucan/WURCS fill skipped: {_gt_e}")
 
             # 20260420 code review Stage 6 - make sure columns are there
             # --- ensure gate columns always exist --- (If we don't want this to show when gate is off, remove it.)
@@ -9025,7 +9176,7 @@ def set_main_status(text, fg=None):
 
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.10 (20260523 Public Preview version)")
+root.title("GlycoMSP File Manager GUI v1.11 (20260923 preview)")  # 20260923 S1 pass: header bumped to v1.11; GUI panels still v1.10-level until Manage References lands
 root.geometry("800x560")
 root.minsize(800, 560)
 

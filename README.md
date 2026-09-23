@@ -5,7 +5,7 @@ glycan MS/MS data: RAW/mzML → MS2-indexed tables → MAS / CGA annotation →
 selected-fragment-ion feature matrices → local Random Forest training and
 scan-level prediction reports.
 
-Current version: **v1.10**
+Current version: **v1.11** (preview, 2026-09-23) — v1.10 remains the published, manuscript-cited release; see [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -39,6 +39,9 @@ LC–MS/MS datasets.
   user-curated Excel workbook. Score B was *not* used in the main analyses and is
   provided as an optional advanced feature. See
   [`docs/score_b_design.md`](docs/score_b_design.md).
+- **GlyTouCan / WURCS references (optional, v1.11 preview)** — annotate compositions
+  with GlyTouCan accessions and WURCS strings from a local reference database that a
+  CLI populates once per dataset; filling at run time never contacts the network.
 
 Composition notation follows the project convention:
 
@@ -97,6 +100,15 @@ Typical workflow:
 For the full GUI walkthrough, see the **user manual** (maintained separately) and the
 documentation wiki under [`docs/`](docs/).
 
+### Optional: GlyTouCan / WURCS references (v1.11 preview)
+
+1. Populate the local reference database once per dataset (network required):
+   `python ./src/msp_CLI_glytoucan_prebuild.py --source path/to/sample_CGA.tsv`
+   Re-running over the same source makes no API calls.
+2. In *Prepare Dataset*, tick **Fill GlyToucan ID / WURCS from reference DB**
+   before running CGA, a MAS merge, a trainable conversion, or a prediction.
+   The option is off by default and resets on restart.
+
 ### Default ML configuration
 
 The default training configuration matches the manuscript:
@@ -124,6 +136,13 @@ The default training configuration matches the manuscript:
 
 GlycoMSP is released under the **MIT License**.
 Copyright (c) 2026 Huan-Chuan Tseng. See [`LICENSE.md`](LICENSE.md).
+
+**Third-party data.** GlyTouCan accessions and WURCS strings that GlycoMSP
+(v1.11 preview and later) stores in its local reference database are obtained from
+[GlyTouCan](https://glytoucan.org) via the [GlyCosmos](https://glycosmos.org)
+composition API and are licensed **CC BY 4.0**. Please attribute GlyTouCan /
+GlyCosmos when redistributing a reference database or outputs that embed
+these identifiers. GlycoMSP never registers structures with GlyTouCan.
 
 ---
 
