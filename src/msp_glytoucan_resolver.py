@@ -19,6 +19,7 @@ Rules of record (Henry, 2026-09-20/21):
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -42,6 +43,11 @@ DEFAULT_DB_VERSION = "v0.01.20260921"
 
 ENV_DB = "GLYCOMSP_REFERENCE_DB"
 ENV_LOG = "GLYCOMSP_GLYTOUCAN_LOG"
+
+# DB1 §7 (decision 13a): meta keys written by prebuild() on every return path (writable handle only).
+LAST_PREBUILD_KEYS = ("last_prebuild_source", "last_prebuild_utc", "last_prebuild_status")
+# meta keys exposed by ReferenceDB.summary() — additive over S1's three (DB1 §7)
+_SUMMARY_META_KEYS = ("db_name", "db_version", "schema_version", "updated_utc") + LAST_PREBUILD_KEYS
 
 # ---------------------------------------------------------------------------
 # 1. Canonicalisation and symbol mapping
@@ -302,6 +308,24 @@ class ReferenceDB:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value))
         conn.commit()
 
+    def set_meta_many(self, items: Dict[str, str]) -> None:
+        """Write several meta keys as ONE transaction (all or none). Refused on a read-only handle. (DB1 §7)"""
+        if self._readonly:
+            raise sqlite3.OperationalError("read-only reference database")
+        conn = self._connect()
+        try:
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+            for k, v in items.items():
+                conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (k, v))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+
     def sha256(self) -> str:
         """Content hash of the database file (after flushing). '' if the file does not exist."""
         # Codex R2-F1: never commit here — an inspection must not make an unfinished write durable.
@@ -313,15 +337,40 @@ class ReferenceDB:
                 h.update(chunk)
         return h.hexdigest()
 
+    @contextlib.contextmanager
+    def _read_txn(self):
+        """One read transaction on this handle for the duration of the block (G1 + Codex DB1 F1/F6). In SQLite's
+        default rollback-journal mode the SHARED lock taken by the first SELECT is held until the rollback, so no
+        writer can commit (a commit needs EXCLUSIVE) — every read inside, and the file bytes, describe one committed
+        state. A writer meanwhile waits (busy timeout) instead of interleaving. If the handle already has an open
+        transaction (a writer mid-way), read inside it and leave it untouched: an inspection must neither end nor
+        make durable someone else's transaction (such a read may include that caller's uncommitted rows).
+        WAL-mode databases (never created by this resolver) are not covered: the hash sees the main file only."""
+        conn = self._connect()
+        own = not conn.in_transaction
+        if own:
+            conn.execute("BEGIN")
+        try:
+            yield conn
+        finally:
+            if own:
+                conn.rollback()     # read-only transaction: nothing to keep, never makes a write durable
+
     def identity(self) -> Dict[str, object]:
-        m = self.meta()
+        # G1 (DB1 §7, T1-g slice; Codex DB1 F1): meta, count AND the file hash are taken inside one read
+        # transaction, so name/version/n_entries/updated_utc/sha256 describe the same committed state.
+        # Output shape unchanged.
+        with self._read_txn() as conn:
+            m = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
+            n = int(conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0])
+            h = self.sha256()
         return {
             "name": m.get("db_name", ""),
             "version": m.get("db_version", ""),
             "schema_version": m.get("schema_version", ""),
             "path": str(self.path),
-            "sha256": self.sha256(),
-            "n_entries": self.count(),
+            "sha256": h,
+            "n_entries": n,
             "updated_utc": m.get("updated_utc", m.get("created_utc", "")),   # Henry obs. c: same-day updates distinguishable
         }
 
@@ -331,13 +380,16 @@ class ReferenceDB:
         return int(conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0])
 
     def summary(self) -> Dict[str, object]:
-        conn = self._connect()
-        by_status = {r[0]: int(r[1]) for r in conn.execute(
-            "SELECT status, COUNT(*) FROM entries GROUP BY status")}
-        by_source = {r[0]: int(r[1]) for r in conn.execute(
-            "SELECT source, COUNT(*) FROM entries GROUP BY source")}
-        return {"n_entries": self.count(), "by_status": by_status, "by_source": by_source,
-                **{k: v for k, v in self.meta().items() if k in ("db_name", "db_version", "schema_version")}}
+        # Codex DB1 F6: all aggregates + meta from one read transaction, so the totals reconcile.
+        with self._read_txn() as conn:
+            by_status = {r[0]: int(r[1]) for r in conn.execute(
+                "SELECT status, COUNT(*) FROM entries GROUP BY status")}
+            by_source = {r[0]: int(r[1]) for r in conn.execute(
+                "SELECT source, COUNT(*) FROM entries GROUP BY source")}
+            n = int(conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0])
+            meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
+        return {"n_entries": n, "by_status": by_status, "by_source": by_source,
+                **{k: v for k, v in meta.items() if k in _SUMMARY_META_KEYS}}
 
     def lookup(self, keys: Iterable[str]) -> Dict[str, Entry]:
         """Canonical keys -> Entry for rows that exist. Non-composition keys are skipped."""
@@ -710,7 +762,9 @@ class PrebuildResult:
 
 def prebuild(keys: Iterable[str], db: ReferenceDB, log_path: Optional[os.PathLike | str] = None,
              *, allow_network: bool = True, progress: Optional[Callable[[str], None]] = None,
-             **fetch_kw) -> PrebuildResult:
+             source_label: str = "", **fetch_kw) -> PrebuildResult:
+    """`source_label` (basename of the source file; DB1 §7) is recorded with the outcome as meta
+    last_prebuild_source / _utc / _status on every return path of a writable handle."""
     say = progress or (lambda s: None)
     res = PrebuildResult()
     want = sorted({canonical_composition(k) for k in keys} - {""})
@@ -726,13 +780,29 @@ def prebuild(keys: Iterable[str], db: ReferenceDB, log_path: Optional[os.PathLik
             res_.errors.append(f"identity() failed: {type(ex).__name__}: {ex}")
             res_.db = {"path": str(db.path)}
 
+    def _record_last_prebuild(res_: PrebuildResult) -> None:
+        # DB1 §7 (13a): one meta transaction per return path; never on a read-only handle; a failure is
+        # recorded in res.errors and never raised. Written BEFORE _identity_into so the sha256 reported in
+        # res.db is the hash of the file as it is left. On persist_failed the entries transaction has already
+        # rolled back; this separate write records that status, which is the useful fact.
+        if db._readonly:
+            return
+        try:
+            db.set_meta_many({"last_prebuild_source": os.path.basename(source_label or ""),
+                              "last_prebuild_utc": _utc_now(),
+                              "last_prebuild_status": res_.status})
+        except Exception as ex:
+            res_.errors.append(f"last_prebuild meta write failed: {type(ex).__name__}: {ex}")
+
     if not miss:
         res.status = "nothing_to_do"
+        _record_last_prebuild(res)
         _identity_into(res)
         return res
     if not allow_network:
         res.status = "disabled"
         res.unsent = miss
+        _record_last_prebuild(res)
         _identity_into(res)
         return res
     m = db.meta()
@@ -764,6 +834,7 @@ def prebuild(keys: Iterable[str], db: ReferenceDB, log_path: Optional[os.PathLik
     res.status = fr.status
     if res.unlogged and res.status in ("ok", "partial", "offline"):
         res.status = "log_failed"
+    _record_last_prebuild(res)
     _identity_into(res)
     say(f"done: {res.n_fetched} rows committed, {res.api_calls} API calls, status={res.status}")
     return res

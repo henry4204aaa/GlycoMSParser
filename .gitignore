@@ -30,3 +30,7 @@ tmpdata/
 .tmp.driveupload/
 .venv/
 .vscode/
+
+
+# pre-flight tests needs me to check before deploying
+_candidates/

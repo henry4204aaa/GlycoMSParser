@@ -5,7 +5,7 @@ glycan MS/MS data: RAW/mzML → MS2-indexed tables → MAS / CGA annotation →
 selected-fragment-ion feature matrices → local Random Forest training and
 scan-level prediction reports.
 
-Current version: **v1.11** (preview, 2026-09-23) — v1.10 remains the published, manuscript-cited release; see [`CHANGELOG.md`](CHANGELOG.md)
+Current version: **v1.12** (preview, 2026-10-01) — v1.10 remains the published, manuscript-cited release; see [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -39,9 +39,9 @@ LC–MS/MS datasets.
   user-curated Excel workbook. Score B was *not* used in the main analyses and is
   provided as an optional advanced feature. See
   [`docs/score_b_design.md`](docs/score_b_design.md).
-- **GlyTouCan / WURCS references (optional, v1.11 preview)** — annotate compositions
+- **GlyTouCan / WURCS references (optional, v1.11/v1.12 preview)** — annotate compositions
   with GlyTouCan accessions and WURCS strings from a local reference database that a
-  CLI populates once per dataset; filling at run time never contacts the network.
+  CLI populates once per dataset; filling at run time never contacts the network; v1.12 adds a *Manage References* window to select, build and inspect the database from the GUI.
 
 Composition notation follows the project convention:
 
@@ -100,8 +100,9 @@ Typical workflow:
 For the full GUI walkthrough, see the **user manual** (maintained separately) and the
 documentation wiki under [`docs/`](docs/).
 
-### Optional: GlyTouCan / WURCS references (v1.11 preview)
+### Optional: GlyTouCan / WURCS references (v1.11/v1.12 preview)
 
+0. (v1.12) Open *Prepare Dataset → Manage References…* to select a database — for example the snapshot in references/ — or to run the prebuild from the GUI with a live log. The command-line tool below remains the scriptable route.
 1. Populate the local reference database once per dataset (network required):
    `python ./src/msp_CLI_glytoucan_prebuild.py --source path/to/sample_CGA.tsv`
    Re-running over the same source makes no API calls.

@@ -1,6 +1,6 @@
 import os
-version = "1.11"
-last_update = 20260923
+version = "1.12"   # 20261001 DB1 (T1-b): Manage References window, settings.json, prebuild CLI runner (v1.12 preview)
+last_update = 20261001
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -19,14 +19,149 @@ import traceback
 import mspvalidator_merger as mspval
 # 20260921 S1 (v1.20 T1): GlyTouCan accession / WURCS run-time fill. Database only — never network at run time
 # (the API is called only by src/msp_CLI_glytoucan_prebuild.py). Spec: handoff/WURCS_designspec20260921.md.
+GTR_IMPORT_ERROR = ""   # DB1 §3.2: shown in Manage References when the resolver failed to import
 try:
     import msp_glytoucan_resolver as gtr
 except Exception as _gtr_err:  # module missing/broken must never block v1.10 workflows
     gtr = None
+    GTR_IMPORT_ERROR = f"{type(_gtr_err).__name__}: {_gtr_err}"
     print(f"[glytoucan][WARN] resolver unavailable; fill option disabled: {_gtr_err}")
 # Single user option shared by the CGA (H1), MAS (H3) and prediction (H4) sites. Default OFF => v1.10 behaviour.
 # Set from the Prepare Dataset checkbox; a plain dict so closures in different windows can read it without tk vars.
-GLYTOUCAN_FILL = {"enabled": False}
+# DB1 (v1.12, T1-b): db_path/log_path = the session's active reference DB / log (switchable between runs from
+# Manage References). None => resolver defaults (env -> data dir). Spec: handoff/T1b_manage_references_spec_20260929.md
+GLYTOUCAN_FILL = {"enabled": False, "db_path": None, "log_path": None}
+# DB1 §5.2: "Remember these settings" state of this session (True when loaded from, or ticked in, the manager).
+GLYTOUCAN_REMEMBER = {"on": False}
+GLYTOUCAN_SETTINGS_SCHEMA = "1.0.0"
+
+def _glytoucan_settings_path():
+    """<data_dir>/settings.json (decision 12a; no env override for the file itself). None if resolver missing."""
+    return None if gtr is None else gtr.default_data_dir() / "settings.json"
+
+def _glytoucan_log_for_db(db_path):
+    """DB1 §3.3: the log follows the DB. None/default DB => None (resolver default/env log);
+    any other DB => <db_dir>/<db_stem>.jsonl."""
+    from pathlib import Path
+    if db_path is None or gtr is None:
+        return None
+    p = Path(db_path)
+    try:
+        is_default = p.resolve() == gtr.default_db_path().resolve()
+    except Exception:
+        is_default = str(p) == str(gtr.default_db_path())
+    return None if is_default else p.with_name(p.stem + ".jsonl")
+
+def _glytoucan_read_settings_file(path):
+    """Parsed settings dict, {} when the file does not exist. Raises on unreadable/corrupt/non-object content."""
+    if path is None or not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or not isinstance(data.get("glytoucan", {}), dict):
+        raise ValueError("settings.json is not a JSON object with a 'glytoucan' object")
+    return data
+
+def _glytoucan_apply_settings(fill, path, environ=None):
+    """DB1 §5.2 load rules, applied to `fill` (the GLYTOUCAN_FILL dict). Returns the printed messages.
+    Only glytoucan.remember == true applies fill_on_run / db_path. GLYCOMSP_REFERENCE_DB set => settings db_path
+    ignored. A db_path that does not exist is still applied (the label then says "not found"). Unreadable or
+    corrupt file => defaults kept + a [settings][WARN]. Never writes."""
+    import pathcanon as _pc
+    environ = os.environ if environ is None else environ
+    msgs = []
+    try:
+        data = _glytoucan_read_settings_file(path)
+    except Exception as e:
+        msgs.append(f"[settings][WARN] could not read {path}: {type(e).__name__}: {e} -- using defaults")
+        return msgs
+    g = data.get("glytoucan") or {}
+    if g.get("remember") is not True:
+        return msgs
+    # Codex DB1 F4: derive everything first, apply only when all of it succeeded (no partial state).
+    staged = {}
+    try:
+        if isinstance(g.get("fill_on_run"), bool):
+            staged["enabled"] = g["fill_on_run"]
+        dbp = g.get("db_path")
+        if isinstance(dbp, str) and dbp.strip():
+            if gtr is not None and environ.get(gtr.ENV_DB):
+                msgs.append(f"[settings] {gtr.ENV_DB} is set; remembered database path ignored ({dbp})")
+            else:
+                staged["db_path"] = _pc.to_native_path(dbp)
+                staged["log_path"] = _glytoucan_log_for_db(staged["db_path"])
+    except Exception as e:
+        msgs.append(f"[settings][WARN] could not apply {path}: {type(e).__name__}: {e} -- using defaults")
+        return msgs
+    fill.update(staged)
+    GLYTOUCAN_REMEMBER["on"] = True
+    return msgs
+
+_GT_KEEP = object()
+
+def _glytoucan_save_settings(*, remember=_GT_KEEP, fill_on_run=_GT_KEEP, db_path=_GT_KEEP, path=None):
+    """DB1 §5.2 save: read -> update the given 'glytoucan' keys -> write settings.json.tmp -> os.replace (atomic,
+    same directory). Unknown keys (top level and inside 'glytoucan') are preserved. db_path stored absolute, POSIX
+    form. Call ONLY from an explicit user action (Set as default / Remember). Returns None on success, else the
+    error text (never raises)."""
+    import pathcanon as _pc
+    path = path if path is not None else _glytoucan_settings_path()
+    if path is None:
+        return "resolver unavailable; settings location unknown"
+    try:
+        try:
+            data = _glytoucan_read_settings_file(path)
+        except Exception as e:
+            print(f"[settings][WARN] existing {path} unreadable ({type(e).__name__}: {e}); rewriting it")
+            data = {}
+        g = dict(data.get("glytoucan") or {})
+        if remember is not _GT_KEEP:
+            g["remember"] = bool(remember)
+        if fill_on_run is not _GT_KEEP:
+            g["fill_on_run"] = bool(fill_on_run)
+        if db_path is not _GT_KEEP:
+            g["db_path"] = None if db_path is None else _pc.to_posix_str(os.path.abspath(str(db_path)))
+        g.setdefault("remember", False)
+        g.setdefault("fill_on_run", False)
+        g.setdefault("db_path", None)
+        data["schema_version"] = GLYTOUCAN_SETTINGS_SCHEMA
+        data["updated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["glytoucan"] = g
+        d = os.path.dirname(str(path))
+        os.makedirs(d, exist_ok=True)            # mirrors _excepthook's mkdir(parents=True, exist_ok=True)
+        # Codex DB1 F2: a unique, exclusively created temp file per save (two windows never share one), removed
+        # on failure. Concurrent saves are last-writer-wins; each published file is one complete JSON document.
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix="settings.", suffix=".json.tmp", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, str(path))
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+def _glytoucan_save_remembered(path=None):
+    """Remember is ticked: persist this session's fill flag and DB. While GLYCOMSP_REFERENCE_DB governs the session
+    (db_path None), the remembered db_path in the file is kept rather than overwritten with 'default'."""
+    dbp = GLYTOUCAN_FILL.get("db_path")
+    keep_db = dbp is None and gtr is not None and bool(os.environ.get(gtr.ENV_DB))
+    return _glytoucan_save_settings(remember=True, fill_on_run=bool(GLYTOUCAN_FILL.get("enabled")),
+                                    db_path=_GT_KEEP if keep_db else dbp, path=path)
+
+try:   # DB1 §5.2: load once at import; any failure keeps the v1.10 defaults (fill off, default path)
+    for _m in _glytoucan_apply_settings(GLYTOUCAN_FILL, _glytoucan_settings_path()):
+        print(_m)
+except Exception as _settings_err:
+    print(f"[settings][WARN] settings not applied: {_settings_err}")
 
 def _glytoucan_fill_df(df, comp_col, *, id_col="GlyToucan ID", wurcs_col="WURCS"):
     """Fill EMPTY id/wurcs cells of `df` from the local reference database (in place) when the option is on.
@@ -35,7 +170,8 @@ def _glytoucan_fill_df(df, comp_col, *, id_col="GlyToucan ID", wurcs_col="WURCS"
     if not GLYTOUCAN_FILL.get("enabled") or gtr is None:
         return None
     try:
-        db = gtr.ReferenceDB(readonly=True)  # Codex S1 F5: mode=ro, no DDL/meta writes, never creates or touches files
+        # Codex S1 F5: mode=ro, no DDL/meta writes, never creates or touches files. DB1 §5.1: session DB (None => default)
+        db = gtr.ReferenceDB(GLYTOUCAN_FILL.get("db_path"), readonly=True)
         try:
             fr = gtr.annotate_dataframe(df, comp_col, db, id_col=id_col, wurcs_col=wurcs_col)
         finally:
@@ -87,6 +223,368 @@ def _cga_cache_link_trainable(files: dict, outpath: str):
     cached = files.get("_method_v1_cache_CGA")
     if isinstance(cached, dict) and isinstance(cached.get("artifacts"), dict):
         cached["artifacts"]["trainable_csv"] = {"path": os.path.normpath(outpath)}
+
+# ---- DB1 §6 (decisions 7a / 8a / 14a): the prebuild CLI as a subprocess for Manage References ----------------
+# The CLI stays the ONLY network path; this runner never touches Tk. A daemon reader thread pushes stdout lines and
+# an exit sentinel into a queue; the owning window drains it with poll() from root.after(). Never shell=True.
+import sys, re, queue, subprocess
+
+_GT_CLI_SCRIPT = "msp_CLI_glytoucan_prebuild.py"
+# anchored on the CLI's own summary line: print(f"[prebuild] status={res.status} committed=... api_calls=...")
+_GT_STATUS_RE = re.compile(r"^\[prebuild\] status=(?P<status>\S+)(?P<rest>(?: [A-Za-z_]+=\S*)*)\s*$")
+_GT_CANCELLED_MSG = {
+    "prebuild": "cancelled \u2014 batches already committed are kept; rerun to resume",
+    "rebuild_log": "cancelled \u2014 the live log is only replaced as the last step; rerun Rebuild log",
+}
+
+def _gt_cli_result(op, rc, lines, cancelled=False):
+    """Map a finished CLI run to (text, level); level is 'ok' | 'warn' | 'error'. Pure (DB1 §6 result mapping)."""
+    if cancelled and rc != 0:
+        return _GT_CANCELLED_MSG.get(op, "cancelled"), "warn"
+    if op == "rebuild_log":
+        txt = "\n".join(lines)
+        i = txt.find("{")
+        try:
+            obj = json.loads(txt[i:]) if i >= 0 else None
+        except ValueError:
+            obj = None
+        if not isinstance(obj, dict):
+            return f"process ended without a JSON result, exit {rc}", "error"
+        if obj.get("status") == "ok":
+            return (f"rebuilt {obj.get('rebuilt_lines')} lines \u2192 {obj.get('log')} "
+                    f"(previous kept as .bak)"), "ok"
+        return str(obj.get("error") or f"rebuild-log failed: {obj}"), "error"
+    m = None
+    for ln in reversed(lines):
+        m = _GT_STATUS_RE.match(ln.strip())
+        if m:
+            break
+    if m is None:
+        return f"process ended without a status line, exit {rc}", "error"
+    st = m.group("status")
+    kv = dict(tok.split("=", 1) for tok in m.group("rest").split())
+    if rc == 2:
+        return f"storage problem: {st}; see log pane", "error"
+    if rc != 0:
+        return f"process ended with exit {rc} (status={st}); see log pane", "error"
+    if st in ("partial", "offline"):
+        return f"network fail-soft \u2014 rerun to resume (n_unsent={kv.get('unsent', '?')})", "warn"
+    return f"done: status={st} committed={kv.get('committed', '?')} api_calls={kv.get('api_calls', '?')}", "ok"
+
+class _GtCliRunner:
+    """One CLI subprocess at a time. Tk-free: start() -> the owner calls poll() periodically on its own thread;
+    on_line(text) / on_exit(text, level, rc) are invoked from poll(), never from the reader thread."""
+
+    def __init__(self, python=None, script=None, kill_after=3.0):
+        self.python = python if python is not None else sys.executable
+        self.script = script if script is not None else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), _GT_CLI_SCRIPT)
+        self.kill_after = float(kill_after)
+        self.proc = None
+        self.op = None
+        self._q = queue.Queue()
+        self._lines = []
+        self._cancelled = False
+        self._on_line = None
+        self._on_exit = None
+
+    # -- availability (14a) --
+    @property
+    def reason(self):
+        if not self.python or not os.path.isfile(self.python):
+            return f"Python interpreter not found ({self.python or 'sys.executable is empty'})"
+        if not os.path.isfile(self.script):
+            return f"prebuild CLI not found beside GlycoMSP ({self.script})"
+        if gtr is None:
+            return "reference resolver unavailable"
+        return ""
+
+    @property
+    def available(self):
+        return not self.reason
+
+    @property
+    def running(self):
+        return self.proc is not None
+
+    # -- argv (pure) --
+    def argv(self, op, *, db, log, source=None, column=None, sheet=None, no_network=False,
+             batch_size=30, pause=10.0):
+        """Argument list for the CLI. --db/--log are ALWAYS explicit (None => resolved resolver defaults) so the
+        panel and the process never disagree. prebuild: no --json (live lines); rebuild_log: --rebuild-log --json."""
+        db = str(db if db is not None else gtr.default_db_path())
+        log = str(log if log is not None else gtr.default_log_path())
+        base = [self.python, self.script]
+        # Codex DB1 F3: every valued option is ONE "--opt=value" token, so a value starting with "-" (a relative
+        # file name, a column or sheet name) is never parsed by argparse as an option.
+        if op == "rebuild_log":
+            return base + ["--rebuild-log", f"--db={db}", f"--log={log}", "--json"]
+        if op != "prebuild":
+            raise ValueError(f"unknown op {op!r}")
+        if not source:
+            raise ValueError("prebuild needs a source file")
+        a = base + [f"--source={source}", f"--db={db}", f"--log={log}"]
+        if column:
+            a.append(f"--column={column}")
+        if sheet:
+            a.append(f"--sheet={sheet}")
+        if no_network:
+            a.append("--no-network")
+        a += [f"--batch-size={int(batch_size)}", f"--pause={float(pause)}"]
+        return a
+
+    # -- lifecycle --
+    def start(self, argv, op, on_line=None, on_exit=None):
+        if self.proc is not None:
+            raise RuntimeError("a reference-database process is already running")
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"      # child stdout encoding == our decode, on every platform
+        env["PYTHONUNBUFFERED"] = "1"          # lines arrive as printed
+        self._q = queue.Queue()
+        self._lines = []
+        self._cancelled = False
+        self._on_line, self._on_exit, self.op = on_line, on_exit, op
+        self.proc = subprocess.Popen(
+            list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
+            creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
+        proc, q = self.proc, self._q
+
+        def _reader():
+            try:
+                for ln in proc.stdout:
+                    q.put(("line", ln.rstrip("\r\n")))
+            except Exception as e:
+                q.put(("line", f"[runner] output read failed: {type(e).__name__}: {e}"))
+            finally:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                q.put(("exit", proc.wait()))   # wait() reaps the child (no zombie)
+        threading.Thread(target=_reader, daemon=True).start()
+        return proc.pid
+
+    def poll(self):
+        """Drain queued output on the caller's thread. Returns True while the process is still running."""
+        if self.proc is None:
+            return False
+        while True:
+            try:
+                kind, val = self._q.get_nowait()
+            except queue.Empty:
+                return True
+            if kind == "line":
+                self._lines.append(val)
+                if self._on_line is not None:
+                    self._on_line(val)
+                continue
+            text, level = _gt_cli_result(self.op, val, self._lines, self._cancelled)
+            self.proc = None
+            if self._on_exit is not None:
+                self._on_exit(text, level, val)
+            return False
+
+    def cancel(self):
+        """terminate(); kill() if still alive after kill_after seconds. The exit still arrives through poll()."""
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return False
+        self._cancelled = True
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+        def _kill_if_alive():
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        t = threading.Timer(self.kill_after, _kill_if_alive)
+        t.daemon = True
+        t.start()
+        return True
+
+    def shutdown(self):
+        """Main-window close: stop a live child without waiting for the GUI loop."""
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            self._cancelled = True
+            try:
+                proc.terminate()
+                proc.wait(timeout=self.kill_after)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+# ---- DB1 §3 / §4: shared state and text builders for Manage References (no Tk calls; Tk variables are passed in) ----
+# prepare: [{"widget", "label_var" (or None), "fill_var"}] registered by Prepare Dataset windows and the manager;
+# runner: the session's _GtCliRunner (read by the "(updating…)" label and main-window on_closing); manager: its Toplevel.
+_GT_UI = {"prepare": [], "runner": None, "manager": None}
+
+def _glytoucan_active_paths():
+    """(db_path, log_path) this session uses, None entries resolved to the resolver defaults (env -> data dir)."""
+    from pathlib import Path
+    if gtr is None:
+        return None, None
+    dbp, logp = GLYTOUCAN_FILL.get("db_path"), GLYTOUCAN_FILL.get("log_path")
+    return (Path(dbp) if dbp else gtr.default_db_path()), (Path(logp) if logp else gtr.default_log_path())
+
+def _glytoucan_runner_busy():
+    r = _GT_UI.get("runner")
+    return r is not None and r.running
+
+def _glytoucan_db_label_text():
+    """Prepare Dataset row-4 label (§4.1). Read-only: meta + count only (no hash), never creates a file."""
+    if gtr is None:
+        return "Active DB: resolver unavailable"
+    if _glytoucan_runner_busy():
+        return "Active DB: (updating\u2026)"
+    dbp, _ = _glytoucan_active_paths()
+    if not dbp.is_file():
+        return f"Active DB: not found ({dbp})"
+    try:
+        db = gtr.ReferenceDB(dbp, readonly=True)
+        try:
+            m, n = db.meta(), db.count()
+        finally:
+            db.close()
+    except Exception:
+        return f"Active DB: unreadable ({dbp})"
+    return f"Active DB: {m.get('db_name', '?')} {m.get('db_version', '')} \u00b7 {n:,} entries"
+
+def _glytoucan_register_prepare(widget, label_var, fill_var):
+    _GT_UI["prepare"].append({"widget": widget, "label_var": label_var, "fill_var": fill_var})
+
+def _glytoucan_refresh_labels():
+    """Push the active-DB text and the fill flag into every open Prepare Dataset window and the manager. Called by
+    the manager after Select / subprocess start and exit, and by _glytoucan_set_enabled. No polling."""
+    alive, text = [], None
+    for e in _GT_UI["prepare"]:
+        if not widget_alive(e["widget"]):
+            continue
+        alive.append(e)
+        try:
+            if e.get("label_var") is not None:
+                if text is None:
+                    text = _glytoucan_db_label_text()
+                e["label_var"].set(text)
+            if e.get("fill_var") is not None:
+                e["fill_var"].set(bool(GLYTOUCAN_FILL.get("enabled")))
+        except Exception:
+            pass
+    _GT_UI["prepare"][:] = alive
+
+def _glytoucan_set_enabled(flag):
+    """Fill-on-run flag shared by the Prepare Dataset checkbox and the manager (§3.3; was the body of the Prepare
+    Dataset closure `_on_glytoucan_fill_toggle`). Saves settings only while "Remember" is on. Returns error text or None."""
+    GLYTOUCAN_FILL["enabled"] = bool(flag)
+    dbp, _ = _glytoucan_active_paths()
+    print(f"[glytoucan] run-time fill {'ON' if GLYTOUCAN_FILL['enabled'] else 'OFF'} "
+          f"(reference db: {dbp if gtr else 'resolver unavailable'})")
+    err = _glytoucan_save_remembered() if GLYTOUCAN_REMEMBER["on"] else None
+    if err:
+        print(f"[settings][WARN] settings not saved: {err}")
+    _glytoucan_refresh_labels()
+    return err
+
+def _glytoucan_shutdown_runner():
+    """Main-window on_closing: terminate a live prebuild/rebuild child (§6)."""
+    r = _GT_UI.get("runner")
+    if r is not None:
+        r.shutdown()
+
+def _gt_count_lines(path):
+    n, last = 0, b"\n"
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            n += chunk.count(b"\n")
+            last = chunk[-1:]
+    return n + (0 if last == b"\n" else 1)
+
+def _glytoucan_manager_summary():
+    """Manage References summary block (§3.2) as display strings. Read-only opens only: never creates or modifies a
+    database or log (§9 invariant 3). db_state: 'ok' | 'missing' | 'error' | 'unavailable'."""
+    out = {k: "" for k in ("path", "name", "entries", "updated", "hash", "last", "log", "resolver", "schema")}
+    out.update(sha_full="", db_state="unavailable")
+    if gtr is None:
+        out["resolver"] = f"unavailable: {GTR_IMPORT_ERROR or 'resolver module not loaded'}"
+        return out
+    dbp, logp = _glytoucan_active_paths()
+    out["path"] = str(dbp)
+    out["resolver"] = "available"
+    if not dbp.is_file():
+        out["db_state"] = "missing"
+        for k in ("name", "entries", "updated", "hash", "last"):
+            out[k] = "not found \u2014 run Prebuild to create it"
+    else:
+        try:
+            db = gtr.ReferenceDB(dbp, readonly=True)
+            try:
+                ident, summ, meta = db.identity(), db.summary(), db.meta()
+            finally:
+                db.close()
+        except Exception as e:
+            out["db_state"] = "error"
+            for k in ("name", "entries", "updated", "hash", "last"):
+                out[k] = str(e)
+        else:
+            out["db_state"] = "ok"
+            out["name"] = f"{ident.get('name', '')}    Version {ident.get('version', '')}"
+            if ident.get("schema_version") != gtr.SCHEMA_VERSION:
+                out["schema"] = (f"schema {ident.get('schema_version') or '(none)'} \u2014 this GlycoMSP expects "
+                                 f"{gtr.SCHEMA_VERSION}")
+            bst, bsrc = summ.get("by_status", {}), summ.get("by_source", {})
+            st = " \u00b7 ".join(f"{k} {bst.get(k, 0):,}" for k in (gtr.STATUS_RESOLVED, gtr.STATUS_WURCS_ONLY,
+                                                                       gtr.STATUS_UNRESOLVABLE))
+            src = " \u00b7 ".join(f"{k} {v:,}" for k, v in sorted(bsrc.items())) or "\u2014"
+            out["entries"] = f"{int(ident.get('n_entries') or 0):,}   {st}      by source {src}"
+            out["updated"] = str(ident.get("updated_utc") or "")
+            out["sha_full"] = str(ident.get("sha256") or "")
+            out["hash"] = (out["sha_full"][:12] + "\u2026") if out["sha_full"] else ""
+            if meta.get("last_prebuild_utc"):
+                out["last"] = (f"{meta.get('last_prebuild_source') or '(no source name)'} \u00b7 "
+                               f"{meta.get('last_prebuild_utc')} \u00b7 {meta.get('last_prebuild_status', '')}")
+            else:
+                out["last"] = "never"
+    bak = logp.with_suffix(logp.suffix + ".bak")      # same rule as gtr.rebuild_log
+    if logp.is_file():
+        try:
+            nl = f"{_gt_count_lines(logp):,} lines"
+        except Exception as e:
+            nl = f"unreadable ({type(e).__name__})"
+        out["log"] = f"{logp} \u00b7 {nl} \u00b7 {'.bak present' if bak.exists() else 'no .bak'}"
+    else:
+        out["log"] = f"{logp} \u00b7 not found"
+    return out
+
+def _reference_info_text(sample_entry):
+    """Sample right-click "Reference database info\u2026" message (§4.2). Pure: reads the tree entry's
+    `_glytoucan_resolution_<FAMILY>` blocks only (the keys _glytoucan_record writes and normalize_method_json
+    restores). Per P-1 a user WURCS with a blank accession is a local annotation, never reported as missing."""
+    paras = []
+    for fam in ("CGA", "MAS"):
+        b = sample_entry.get(f"_glytoucan_resolution_{fam}") if isinstance(sample_entry, dict) else None
+        if not isinstance(b, dict):
+            continue
+        db = b.get("db") if isinstance(b.get("db"), dict) else {}
+        last = b.get("last_resolved_utc") or "\u2014"
+        paras.append("\n".join([
+            f"{fam}: reference fill {b.get('status', '?')}",
+            f"  database: {db.get('name', '')} {db.get('version', '')}",
+            f"  path: {db.get('path', '')}",
+            f"  entries: {db.get('n_entries', '')}   updated: {db.get('updated_utc', '')}",
+            f"  compositions: {b.get('n_compositions', 0)}   filled: {b.get('n_filled', 0)}   "
+            f"not in database: {b.get('n_missing', 0)}",
+            f"  user accessions kept: {b.get('n_user_accession', 0)}   "
+            f"user WURCS kept (local annotation): {b.get('n_user_wurcs', 0)}",
+            f"  last resolved: {last}",
+        ]))
+    return "\n\n".join(paras) if paras else "No reference fill recorded for this sample."
 import pandas as pd
 try:
     pd.options.future.infer_string = False
@@ -435,6 +933,7 @@ def _macos_append_compound_suffix(path, compound_suffix):
 # v1.3 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
 # v1.21 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
 # v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
+# v1.12 (20261001 preview, DB1/T1-b): Manage References window (summary, Select/Set as default/Remember, prebuild + rebuild-log via the CLI subprocess), settings.json, Prepare Dataset row 4, sample right-click reference info. Flag off = v1.10 behaviour.
 # v1.1+ refactoring v1.09.23 fix conversion early fire issue. If conversion at Thermo COM level fails, need to close app to release. Marked for future fix.
 # v1.1 [stable version for publish] fix the old macos crash issue in tkinter, confirmed full pipeline executable on both Windows (fixed package version) and MacOS (py3.12+, latest packages) 
 # v1.09.4 minor fixes
@@ -3254,9 +3753,7 @@ def open_prepare_dataset_window():
     # --- 20260921 S1: GlyTouCan/WURCS run-time fill option (shared by CGA/MAS/prediction via GLYTOUCAN_FILL) ---
     glytoucan_fill_var = tk.BooleanVar(value=bool(GLYTOUCAN_FILL.get("enabled")))
     def _on_glytoucan_fill_toggle():
-        GLYTOUCAN_FILL["enabled"] = bool(glytoucan_fill_var.get())
-        print(f"[glytoucan] run-time fill {'ON' if GLYTOUCAN_FILL['enabled'] else 'OFF'} "
-              f"(reference db: {gtr.default_db_path() if gtr else 'resolver unavailable'})")
+        _glytoucan_set_enabled(bool(glytoucan_fill_var.get()))   # DB1: shared with Manage References
     # ===========================
 
     # --- Treeview UI: panel of sample nodes showing ---
@@ -5453,10 +5950,24 @@ def open_prepare_dataset_window():
                 label="Link and Validate Sample",
                 command=lambda: link_and_validate_sample(exp_name, sample_name)
             )
+            # DB1 (v1.12, T1-b §4.2): read-only provenance popup + T1-h placeholder, after the existing item
+            menu.add_command(label="Reference database info\u2026",
+                             command=lambda en=exp_name, sn=sample_name: _show_reference_info(en, sn))
+            menu.add_command(label="Resolve missing references (T1-h)", state="disabled")
+        elif filetype in ("cga result tsv", "cga-based trainable csv", "excel"):
+            # DB1 §4.2: position reserved for DB2 (T1-c write-back) on the files a fill can update
+            menu.add_command(label="Update GlyToucan ID / WURCS in this file\u2026 (T1-c)", state="disabled")
 
         # Add remove option if it's a valid file
         menu.add_command(label=f"Remove {filetype.upper()}",command=lambda: remove_file(exp_name, clean_sample_name(sample_name), filetype))  
         menu.post(event.x_root, event.y_root)
+
+    def _show_reference_info(exp_name, sample_name):
+        """DB1 §4.2: reads the tree entry only (no DB open, no network, no tree mutation)."""
+        exp_name, sample_name = (exp_name or "").strip(), clean_sample_name(sample_name or "")
+        entry = experiment_projects.get(exp_name, {}).get("samples", {}).get(sample_name)
+        messagebox.showinfo(f"Reference database info \u2014 {sample_name}", _reference_info_text(entry or {}),
+                            parent=subwin)
 
     # move file shared by drag release and right click menu
     def move_file(from_exp, from_sample, ftype, filename, to_exp, to_sample):
@@ -6390,9 +6901,16 @@ def open_prepare_dataset_window():
           command=try_pl_to_trainable).grid(row=3, column=1, padx=5)
     # 20260921 S1: one checkbox, default off; read by CGA (H1), MAS merge (H3) and prediction (H4). Moves to the
     # future "Manage References" panel. Disabled when the resolver module failed to import.
-    tk.Checkbutton(button_frame, text="Fill GlyToucan ID / WURCS from reference DB",
+    tk.Checkbutton(button_frame, text="Fill GlyToucan ID / WURCS from reference DB (see Manage References)",
                    variable=glytoucan_fill_var, command=_on_glytoucan_fill_toggle,
                    state=("normal" if gtr is not None else "disabled")).grid(row=3, column=2, columnspan=2, padx=5, sticky="w")
+    # DB1 (v1.12, T1-b §4.1): row 4 = Manage References launcher + active-DB label (refreshed by the manager)
+    tk.Button(button_frame, text="Manage References\u2026",
+              command=open_manage_references_window).grid(row=4, column=0, padx=5, pady=5)
+    glytoucan_db_label_var = tk.StringVar(value=_glytoucan_db_label_text())
+    _gt_db_label = tk.Label(button_frame, textvariable=glytoucan_db_label_var, anchor="w")
+    _gt_db_label.grid(row=4, column=1, columnspan=3, padx=5, sticky="w")
+    _glytoucan_register_prepare(_gt_db_label, glytoucan_db_label_var, glytoucan_fill_var)
 
 
     tk.Button(subwin, text="Close", command=subwin.destroy).pack(pady=10)
@@ -9151,9 +9669,307 @@ elif platform.system() in ("Darwin", "Linux") and os.path.exists(png_path):
     icon_img = tk.PhotoImage(file=png_path)
     root.iconphoto(True, icon_img)
 
+# ---- DB1 (v1.12, T1-b): Manage References window. Spec handoff/T1b_manage_references_spec_20260929.md §3 ----
+_GT_LEVEL_FG = {"ok": "#1b5e20", "warn": "#8a5a00", "error": "#b00020", "info": "black"}
+
+def open_manage_references_window():
+    """One manager per session (re-opening raises it). Toplevel of root, so it survives closing Prepare Dataset.
+    Opening never creates or modifies a database or log; Prebuild / Rebuild log are explicit subprocess actions."""
+    mgr = _GT_UI.get("manager")
+    if widget_alive(mgr):
+        mgr.deiconify()
+        mgr.lift()
+        return mgr
+    win = tk.Toplevel(root)
+    win.title(f"Manage References \u2014 GlycoMSP v{version} preview")
+    _GT_UI["manager"] = win
+    runner = _GT_UI.get("runner") or _GtCliRunner()
+    _GT_UI["runner"] = runner
+    cur = {"sha": "", "db_state": "missing"}
+    pad = dict(padx=6, pady=2)
+
+    # ---- actions (defined first; widgets below reference them) ----
+    def _status(text, level="info"):
+        status_var.set(text)
+        status_lbl.config(fg=_GT_LEVEL_FG.get(level, "black"))
+
+    def _log(text):
+        log_txt.config(state="normal")
+        log_txt.insert("end", text + "\n")
+        log_txt.see("end")
+        log_txt.config(state="disabled")
+
+    def _apply_states():
+        busy = runner.running
+        def st(flag):
+            return "normal" if flag else "disabled"
+        db_ok = cur["db_state"] == "ok"
+        select_btn.config(state=st(not busy and gtr is not None))
+        default_btn.config(state=st(not busy and db_ok))
+        copy_btn.config(state=st(bool(cur["sha"])))
+        prebuild_btn.config(state=st(not busy and runner.available))
+        rebuild_btn.config(state=st(not busy and runner.available and db_ok))
+        cancel_btn.config(state=st(busy))
+        close_btn.config(state=st(not busy))
+        fill_cb.config(state=st(gtr is not None))
+        remember_cb.config(state=st(gtr is not None))
+
+    def _refresh():
+        s = _glytoucan_manager_summary()
+        for k, var in sv.items():
+            var.set(s.get(k, ""))
+        if gtr is not None and not runner.available:
+            sv["resolver"].set(f"available; prebuild/rebuild disabled: {runner.reason}")
+        cur["sha"], cur["db_state"] = s.get("sha_full", ""), s.get("db_state", "missing")
+        if s.get("schema"):
+            schema_lbl.grid(row=len(rows), column=1, sticky="w", **pad)
+        else:
+            schema_lbl.grid_remove()
+        fill_var.set(bool(GLYTOUCAN_FILL.get("enabled")))
+        remember_var.set(bool(GLYTOUCAN_REMEMBER["on"]))
+        _apply_states()
+
+    def _save_if_remember():
+        if GLYTOUCAN_REMEMBER["on"]:
+            err = _glytoucan_save_remembered()
+            if err:
+                _status(f"settings not saved: {err}", "error")
+                return False
+        return True
+
+    def _select():
+        p = filedialog.askopenfilename(parent=win, title="Select reference database",
+                                       filetypes=[("Reference database", "*.db"), ("All files", "*.*")])
+        if not p:
+            return
+        try:
+            db = gtr.ReferenceDB(p, readonly=True)          # read-only identity check (4a)
+            try:
+                ident = db.identity()
+            finally:
+                db.close()
+        except Exception as e:
+            messagebox.showerror("Not a reference database", f"{p}\n\n{e}", parent=win)
+            _status(f"{os.path.basename(p)} refused \u2014 previous database kept", "error")
+            return
+        GLYTOUCAN_FILL["db_path"] = Path(p)
+        GLYTOUCAN_FILL["log_path"] = _glytoucan_log_for_db(Path(p))
+        ok = _save_if_remember()
+        _refresh()
+        _glytoucan_refresh_labels()
+        if ok:
+            _status(f"active database: {ident.get('name', '')} {ident.get('version', '')} ({p})", "ok")
+
+    def _set_default():
+        err = _glytoucan_save_settings(db_path=GLYTOUCAN_FILL.get("db_path"))
+        if err:
+            _status(f"settings not saved: {err}", "error")
+            return
+        msg = f"default database saved to {_glytoucan_settings_path()}"
+        if not GLYTOUCAN_REMEMBER["on"]:
+            msg += " \u2014 applied at next launch only while \u201cRemember these settings\u201d is ticked"
+        _status(msg, "ok")
+
+    def _on_remember():
+        GLYTOUCAN_REMEMBER["on"] = bool(remember_var.get())
+        if GLYTOUCAN_REMEMBER["on"]:
+            if _save_if_remember():
+                _status(f"settings saved to {_glytoucan_settings_path()}", "ok")
+        else:
+            _status("\u201cRemember\u201d off: settings.json is left as it is and is still read at next launch", "info")
+
+    def _on_fill():
+        err = _glytoucan_set_enabled(bool(fill_var.get()))
+        if err:
+            _status(f"settings not saved: {err}", "error")
+
+    def _copy_hash():
+        if cur["sha"]:
+            win.clipboard_clear()
+            win.clipboard_append(cur["sha"])
+            _status("full sha256 copied to the clipboard", "ok")
+
+    def _pump():
+        if runner.poll() and widget_alive(win):       # callbacks run here, on the Tk thread
+            win.after(100, _pump)
+
+    def _on_exit(text, level, rc):
+        if not widget_alive(win):
+            return
+        _log(f"[exit {rc}]")
+        _refresh()
+        _glytoucan_refresh_labels()
+        _status(text, level)
+
+    def _launch(argv, op):
+        _log("$ " + " ".join(str(a) for a in argv[1:]))
+        try:
+            pid = runner.start(argv, op, on_line=_log, on_exit=_on_exit)
+        except Exception as e:
+            _status(f"could not start: {type(e).__name__}: {e}", "error")
+            return
+        what = "prebuild" if op == "prebuild" else "rebuild log"
+        _status(f"running {what} (pid {pid}) \u2014 do not start a run until it finishes", "warn")
+        _apply_states()
+        _glytoucan_refresh_labels()
+        win.after(100, _pump)
+
+    def _prebuild_dialog():
+        dlg = tk.Toplevel(win)
+        dlg.title("Prebuild / Update from source")
+        dlg.transient(win)
+        src_v, col_v, sheet_v = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        nonet_v, bs_v, pause_v = tk.BooleanVar(value=False), tk.StringVar(value="30"), tk.StringVar(value="10")
+
+        def _browse():
+            f = filedialog.askopenfilename(parent=dlg, title="Composition source",
+                                           filetypes=[("Composition sources", "*.tsv *.csv *.xlsx"), ("All files", "*.*")])
+            if f:
+                src_v.set(f)
+
+        def _start():
+            src = src_v.get().strip()
+            if not src or not os.path.isfile(src):
+                messagebox.showerror("Source", "Choose an existing source file.", parent=dlg)
+                return
+            try:
+                bs, pz = int(bs_v.get()), float(pause_v.get())
+            except ValueError:
+                messagebox.showerror("Settings", "Batch size must be a whole number and pause a number of seconds.", parent=dlg)
+                return
+            if not (1 <= bs <= 30) or pz < 0:
+                messagebox.showerror("Settings", "Batch size must be 1\u201330 and pause 0 s or more.", parent=dlg)
+                return
+            argv = runner.argv("prebuild", db=GLYTOUCAN_FILL.get("db_path"), log=GLYTOUCAN_FILL.get("log_path"),
+                               source=src, column=col_v.get().strip() or None, sheet=sheet_v.get().strip() or None,
+                               no_network=bool(nonet_v.get()), batch_size=bs, pause=pz)
+            dlg.grab_release()
+            dlg.destroy()
+            _launch(argv, "prebuild")
+
+        tk.Label(dlg, text="Source file (CGA TSV / trainable CSV / MAS sheet / in-silico library)").grid(row=0, column=0, columnspan=3, sticky="w", **pad)
+        tk.Entry(dlg, textvariable=src_v, width=60).grid(row=1, column=0, columnspan=2, sticky="ew", **pad)
+        tk.Button(dlg, text="Browse\u2026", command=_browse).grid(row=1, column=2, **pad)
+        tk.Label(dlg, text="Column (optional, auto-detect)").grid(row=2, column=0, sticky="w", **pad)
+        tk.Entry(dlg, textvariable=col_v, width=24).grid(row=2, column=1, sticky="w", **pad)
+        tk.Label(dlg, text="Sheet (optional, Excel)").grid(row=3, column=0, sticky="w", **pad)
+        tk.Entry(dlg, textvariable=sheet_v, width=24).grid(row=3, column=1, sticky="w", **pad)
+        tk.Checkbutton(dlg, text="Diff only \u2014 no network (--no-network)", variable=nonet_v).grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        tk.Label(dlg, text="Batch size (max 30)").grid(row=5, column=0, sticky="w", **pad)
+        tk.Entry(dlg, textvariable=bs_v, width=6).grid(row=5, column=1, sticky="w", **pad)
+        tk.Label(dlg, text="Pause between batches (s)").grid(row=6, column=0, sticky="w", **pad)
+        tk.Entry(dlg, textvariable=pause_v, width=6).grid(row=6, column=1, sticky="w", **pad)
+        dbp, logp = _glytoucan_active_paths()
+        tk.Label(dlg, text=f"Database: {dbp}\nLog: {logp}", justify="left", fg="gray30").grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+        bf = tk.Frame(dlg)
+        bf.grid(row=8, column=0, columnspan=3, pady=6)
+        tk.Button(bf, text="Start", command=_start).pack(side="left", padx=4)
+        tk.Button(bf, text="Close", command=dlg.destroy).pack(side="left", padx=4)
+        dlg.grab_set()
+
+    def _rebuild():
+        dbp, logp = _glytoucan_active_paths()
+        if not messagebox.askyesno(
+                "Rebuild log",
+                f"Regenerate the transaction log from the database?\n\nDatabase (read-only): {dbp}\nLog: {logp}\n\n"
+                f"The current log is copied to {logp.name}.bak (an older .bak is overwritten), then replaced.",
+                parent=win):
+            return
+        _launch(runner.argv("rebuild_log", db=GLYTOUCAN_FILL.get("db_path"), log=GLYTOUCAN_FILL.get("log_path")),
+                "rebuild_log")
+
+    def _cancel():
+        if runner.cancel():
+            _status("cancelling\u2026", "warn")
+
+    def _close():
+        if runner.running:
+            _status("a process is running \u2014 cancel or wait first", "error")
+            win.bell()
+            return
+        if GLYTOUCAN_REMEMBER["on"]:
+            err = _glytoucan_save_remembered()
+            if err:
+                print(f"[settings][WARN] settings not saved on close: {err}")
+        _GT_UI["manager"] = None
+        win.destroy()
+
+    # ---- summary block (§3.2) ----
+    sf = tk.LabelFrame(win, text="Reference database", padx=8, pady=6)
+    sf.pack(fill="x", padx=10, pady=(10, 4))
+    sv = {k: tk.StringVar(value="") for k in ("path", "name", "entries", "updated", "hash", "last", "log", "resolver", "schema")}
+    rows = [("Path", "path"), ("Name", "name"), ("Entries", "entries"), ("Updated", "updated"), ("Hash", "hash"),
+            ("Last prebuild", "last"), ("Log", "log"), ("Resolver", "resolver")]
+    for i, (lab, key) in enumerate(rows):
+        tk.Label(sf, text=lab, anchor="w").grid(row=i, column=0, sticky="nw", **pad)
+        tk.Label(sf, textvariable=sv[key], anchor="w", justify="left", wraplength=620).grid(row=i, column=1, sticky="w", **pad)
+    schema_lbl = tk.Label(sf, textvariable=sv["schema"], fg=_GT_LEVEL_FG["error"], anchor="w")
+    select_btn = tk.Button(sf, text="Select database\u2026", command=_select)
+    select_btn.grid(row=0, column=2, sticky="ew", **pad)
+    default_btn = tk.Button(sf, text="Set as default", command=_set_default)
+    default_btn.grid(row=1, column=2, sticky="ew", **pad)
+    copy_btn = tk.Button(sf, text="Copy hash", command=_copy_hash)
+    copy_btn.grid(row=4, column=2, sticky="ew", **pad)
+    sf.columnconfigure(1, weight=1)
+
+    # ---- options ----
+    of = tk.LabelFrame(win, text="Options", padx=8, pady=4)
+    of.pack(fill="x", padx=10, pady=4)
+    fill_var = tk.BooleanVar(value=bool(GLYTOUCAN_FILL.get("enabled")))
+    remember_var = tk.BooleanVar(value=bool(GLYTOUCAN_REMEMBER["on"]))
+    fill_cb = tk.Checkbutton(of, text="Fill GlyToucan ID / WURCS from reference DB on run", variable=fill_var, command=_on_fill)
+    fill_cb.pack(side="left", padx=4)
+    remember_cb = tk.Checkbutton(of, text="Remember these settings", variable=remember_var, command=_on_remember)
+    remember_cb.pack(side="left", padx=24)
+    _glytoucan_register_prepare(win, None, fill_var)       # kept in step with the Prepare Dataset checkbox
+
+    # ---- actions + log pane + status ----
+    af = tk.LabelFrame(win, text="Actions", padx=8, pady=4)
+    af.pack(fill="both", expand=True, padx=10, pady=4)
+    bar = tk.Frame(af)
+    bar.pack(fill="x")
+    prebuild_btn = tk.Button(bar, text="Prebuild / Update from source\u2026", command=_prebuild_dialog)
+    prebuild_btn.pack(side="left", padx=3)
+    rebuild_btn = tk.Button(bar, text="Rebuild log", command=_rebuild)
+    rebuild_btn.pack(side="left", padx=3)
+    check_btn = tk.Button(bar, text="Check again (T1-e)", state="disabled")
+    check_btn.pack(side="left", padx=3)
+    check_btn.bind("<Enter>", lambda e: _status("Re-query wurcs_only rows \u2014 ticket T1-e, not in v1.12", "info"))
+    refresh_btn = tk.Button(bar, text="Refresh", command=_refresh)
+    refresh_btn.pack(side="left", padx=3)
+    cancel_btn = tk.Button(bar, text="Cancel", command=_cancel, state="disabled")
+    cancel_btn.pack(side="left", padx=3)
+    lf = tk.Frame(af)
+    lf.pack(fill="both", expand=True, pady=4)
+    log_txt = tk.Text(lf, height=10, width=100, state="disabled", wrap="none")
+    log_sb = tk.Scrollbar(lf, command=log_txt.yview)
+    log_txt.config(yscrollcommand=log_sb.set)
+    log_sb.pack(side="right", fill="y")
+    log_txt.pack(side="left", fill="both", expand=True)
+    status_var = tk.StringVar(value="")
+    status_lbl = tk.Label(af, textvariable=status_var, anchor="w", justify="left", wraplength=760)
+    status_lbl.pack(fill="x")
+
+    tk.Label(win, text=(gtr.ATTRIBUTION if gtr is not None else
+                        "GlyTouCan / GlyCosmos composition data, CC BY 4.0 (https://glytoucan.org, https://glycosmos.org)"),
+             fg="gray30").pack(anchor="w", padx=12, pady=(4, 0))
+    close_btn = tk.Button(win, text="Close", command=_close)
+    close_btn.pack(anchor="e", padx=10, pady=8)
+    win.protocol("WM_DELETE_WINDOW", _close)
+
+    _refresh()
+    if runner.running:                                   # re-opened while a child lives (defensive)
+        win.after(100, _pump)
+    if runner.available:
+        _status("ready", "info")
+    else:
+        _status(runner.reason, "error")
+    return win
+
 def on_closing():
     if messagebox.askokcancel("Quit", "Do you really want to quit?"):
         logger.log("Application closed by user.")
+        _glytoucan_shutdown_runner()   # DB1 §6: never leave a prebuild/rebuild child behind
         root.destroy()  # Clean exit
     #if logger.entries:
         #logger.save("autosave.log", include_debug=True)
@@ -9176,7 +9992,7 @@ def set_main_status(text, fg=None):
 
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.11 (20260923 preview)")  # 20260923 S1 pass: header bumped to v1.11; GUI panels still v1.10-level until Manage References lands
+root.title("GlycoMSP File Manager GUI v1.12 (20261001 preview)")  # 20261001 DB1 (T1-b): v1.12 = Manage References; 20260923 S1 was v1.11
 root.geometry("800x560")
 root.minsize(800, 560)
 

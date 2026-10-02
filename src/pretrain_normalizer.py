@@ -31,35 +31,6 @@ def _parse_tuple_like(x):
 def _compose_label_from_counts(counts, order=COMP_ORDER):
     return "".join(f"{sym}{cnt}" for sym, cnt in zip(order, counts) if cnt > 0)
 
-def _canon_structure_label(x, order=COMP_ORDER):
-    # 1) tuple-like → canonical string
-    if _tuple_like(x):
-        counts = _parse_tuple_like(x)  # [H,N,F,S,G,K]
-        return _compose_label_from_counts(counts, order=order)
-
-    # 2) string-like paths handled as before (your previous normalization rules) …
-    s = str(x).strip()
-    # already H#N#F#...
-    if re.fullmatch(r'(?:[HNFSGK]\d+)+', s):
-        return s
-    z = re.sub(r'[\s,_\-:;]+', '', s).lower()
-    token_map = {
-        "hexnac":"N","n":"N","gna":"N",
-        "hex":"H","h":"H",
-        "neuac":"S","sia":"S","s":"S",
-        "neugc":"G","g":"G",
-        "kdn":"K","k":"K",
-        "fuc":"F","f":"F",
-    }
-    for k,v in sorted(token_map.items(), key=lambda kv: -len(kv[0])):
-        z = z.replace(k, v.lower())
-    parts = re.findall(r'([hnfsgk])(\d+)', z)
-    counts = {k:0 for k in COMP_ORDER}
-    for letter,num in parts:
-        counts[letter.upper()] += int(num)
-    if any(counts.values()):
-        return "".join(f"{k}{counts[k]}" for k in order if counts[k] > 0)
-    return s
 
 
 

@@ -45,8 +45,7 @@ def main():
 
     # 4) Optional: append feature-space decoys directly to the wide CSV file
     if args.add_decoys:
-        #updates to v14
-        from mspfileloaderv14 import append_feature_space_decoys  # or place it in a shared utils file
+        from mspvalidator_merger import append_feature_space_decoys  # 20261001 hygiene H2: lives in the merger, never in v14 (old import raised ImportError and loaded the GUI)
         wide = pd.read_csv(args.out)
         wide2 = append_feature_space_decoys(
             wide, method=args.decoy_method, ratio=args.decoy_ratio

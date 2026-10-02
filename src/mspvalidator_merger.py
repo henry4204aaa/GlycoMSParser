@@ -68,8 +68,8 @@ monosaccharide_masses = {
 'N': 245.12632,
 'S': 361.17367,
 'G': 391.18423,
-'KDN': 320.1465,
-'K': 320.1465,
+'KDN': 320.14710, # 20261001 hygiene H5: aligned to compnewv4 B-05 PerMe-KDN (GlycoMod); was 320.1465 (+0.0006 Da), MAS mass not carried past slice_combined_df
+'K': 320.14710,
 #20250922 data from glycoworkbench
  'GluA': 218.0790
 }

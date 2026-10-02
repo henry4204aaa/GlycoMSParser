@@ -7,6 +7,32 @@ GlycoMSP is developed **additively**: the default behaviour of the published
 v1.10 is preserved, and new behaviour ships behind explicit options, so results
 produced with v1.10 remain reproducible.
 
+
+## 1.12 (preview, 2026-10-01)
+
+Preview build on top of 1.11; GUI panels and the user manual remain at the v1.10 level except where noted. With the reference-database option off, all outputs are identical to v1.10.
+
+### Added
+- **Manage References window** (Prepare Dataset → *Manage References…*): shows the active reference database (path, name/version, entry counts by status, last update, content hash, log size), lets you select another database file for the session, run *Prebuild / Update from source…* on a composition table or MAS workbook with a live log and Cancel, rebuild the transaction log, and set the chosen database as default. Prebuild runs the existing command-line tool in a child process, so the window stays responsive; batches already committed are kept when a run is cancelled and a rerun resumes from them.
+- **Active database label** in Prepare Dataset, next to the fill option.
+- **Reference database info** on a sample's right-click menu: which database filled the sample's CGA/MAS results, how many compositions were filled, and when.
+- **Settings file** (`settings.json` in the GlycoMSP data folder) that remembers the fill option and the chosen database — written only when you press *Set as default* or tick *Remember these settings*; never created by browsing.
+- **`references/` folder** with a showcase reference-database snapshot and its data attribution (GlyTouCan / GlyCosmos, CC BY 4.0). Select it through *Manage References…*; see `references/README.md`.
+- Placeholders (disabled) for the next steps: *Check again* for unresolved rows, *Resolve missing references*, and *Update GlyToucan ID / WURCS in this file…*.
+
+### Changed
+- The reference database now records the source, time and status of its last prebuild, and its identity (hash, entry count, version) is read in a single consistent snapshot.
+- Score B composition parsing is case-sensitive: lowercase `s` (sulfate) and `p` (phosphate) are no longer read as NeuAc / another residue. Tokens that Score B does not know are left out of scoring, recorded per row, and reported once at the end of the run instead of stopping it.
+- The MAS KDN residue mass is aligned with the CGA value (320.1471).
+
+### Fixed
+- `msp_CLI_make_trainable_with_negatives.py` imported its decoy helper from the wrong module.
+- Two functions in the in-silico marker and pre-training normaliser modules were defined twice; the shadowed copies are removed (no behaviour change).
+
+### Notes
+- The reference-database option is still off by default. Prebuild needs network access and the `certifi` package (listed in `src/requirements.txt`); macOS Python builds without a system certificate store fail with `CERTIFICATE_VERIFY_FAILED` until it is installed.
+- Shipped database snapshots carry no compatibility promise; merging a shipped snapshot into your own database is planned for a later preview.
+
 ## [1.11] – 2026-09-23 (preview)
 
 Preview of the first v1.20 feature. The application header and window title

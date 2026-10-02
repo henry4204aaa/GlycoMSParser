@@ -100,6 +100,7 @@ def main(argv=None) -> int:
         say = (lambda s: None) if args.json else (lambda s: print(f"[prebuild] {s}", flush=True))
         say(f"source {os.path.basename(args.source)}: {len(keys)} distinct compositions")
         res = gtr.prebuild(keys, db, args.log, allow_network=not args.no_network, progress=say,
+                           source_label=os.path.basename(args.source),
                            batch_size=args.batch_size, pause_s=args.pause, timeout_s=args.timeout)
         out = {
             "status": res.status, "n_source": res.n_source, "n_already": res.n_already,

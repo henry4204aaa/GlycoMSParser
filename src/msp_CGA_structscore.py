@@ -1791,7 +1791,24 @@ def evaluate_candidate_score_b(
 # Runtime TSV enrichment helpers for CGA integration
 # ---------------------------------------------------------------------------
 
-_COMP_PAT = re.compile(r"(KDN|F|H|N|S|G)(\d+)", re.IGNORECASE)
+# 20261001 hygiene H1 (LF1): case-sensitive. IGNORECASE read sulfate "s1" as NeuAc S1
+# and silently dropped HexA "A1" / phosphate "p1".
+_COMP_PAT = re.compile(r"(KDN|F|H|N|S|G)(\d+)")
+# letters(+digits) | digits | any other alphanumeric run (Unicode-aware; separators ignored)
+_RESIDUAL_TOKEN_PAT = re.compile(r"[^\W\d_]+\d*|\d+|[^\W_]+")
+
+# Labels that parsed but carried unrecognized tokens (one entry per call).
+# Cleared at the start of each enrich_cga_tsv_with_score_b run and summarized
+# in a single warning line at its end.
+_UNPARSED_TOKEN_LABELS: list[str] = []
+_UNPARSED_WARN_EXAMPLES = 5
+
+
+def unparsed_composition_tokens(label: str) -> list[str]:
+    """Return tokens of ``label`` left over after removing recognized
+    F/H/N/S/G/KDN tokens, e.g. ``H3N2A1p1 -> ['A1', 'p1']``.
+    Separators (spaces, punctuation) are not reported."""
+    return _RESIDUAL_TOKEN_PAT.findall(_COMP_PAT.sub(" ", label))
 
 
 def parse_compact_composition_label(label: str) -> tuple[int, int, int, int, int, int]:
@@ -1799,10 +1816,16 @@ def parse_compact_composition_label(label: str) -> tuple[int, int, int, int, int
     Parse compact composition labels into internal tuple order:
     (H, N, S, G, KDN, F)
 
+    Tokens are case-sensitive. Unrecognized tokens (sulfate ``s``, phosphate
+    ``p``, HexA ``A``, lowercase residues, ...) do not raise: the tuple is built
+    from the recognized tokens and the label is recorded in
+    ``_UNPARSED_TOKEN_LABELS``. A label with no recognized token raises.
+
     Examples
     --------
     F1H3N3KDN1 -> (3, 3, 0, 0, 1, 1)
     H5N4S1     -> (5, 4, 1, 0, 0, 0)
+    H3N2s1     -> (3, 2, 0, 0, 0, 0)  + recorded as unparsed
     """
     if not isinstance(label, str) or not label.strip():
         raise ValueError(f"Invalid composition label: {label!r}")
@@ -1811,9 +1834,11 @@ def parse_compact_composition_label(label: str) -> tuple[int, int, int, int, int
     if not matches:
         raise ValueError(f"Composition label contains no recognized tokens: {label!r}")
 
+    if unparsed_composition_tokens(label):
+        _UNPARSED_TOKEN_LABELS.append(label)
+
     counts = {"F": 0, "H": 0, "N": 0, "S": 0, "G": 0, "KDN": 0}
     for token, value in matches:
-        token = "KDN" if token.upper() == "KDN" else token.upper()
         counts[token] = counts.get(token, 0) + int(value)
 
     return (
@@ -1965,6 +1990,25 @@ def _build_score_b_motif_summary(result: ScoreBResult) -> str:
     return "; ".join(parts)
 
 
+def _warn_unparsed_composition_tokens() -> None:
+    """Emit one warning line summarizing labels recorded in this run."""
+    if not _UNPARSED_TOKEN_LABELS:
+        return
+    distinct = list(dict.fromkeys(_UNPARSED_TOKEN_LABELS))
+    def _one_line(text: str) -> str:
+        return text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+
+    examples = ", ".join(
+        f"{_one_line(lab)} [{' '.join(unparsed_composition_tokens(lab))}]"
+        for lab in distinct[:_UNPARSED_WARN_EXAMPLES]
+    )
+    more = f", +{len(distinct) - _UNPARSED_WARN_EXAMPLES} more" if len(distinct) > _UNPARSED_WARN_EXAMPLES else ""
+    print(
+        f"[score_b][WARN] {len(_UNPARSED_TOKEN_LABELS)} row(s) / {len(distinct)} label(s) carried "
+        f"unparsed composition tokens (scored on recognized F/H/N/S/G/KDN only): {examples}{more}"
+    )
+
+
 def enrich_cga_tsv_with_score_b(
     pseudolabel_tsv_path: str | Path,
     workbook_path: str | Path,
@@ -1995,6 +2039,7 @@ def enrich_cga_tsv_with_score_b(
     rows_skipped_empty_comp = 0
     rows_skipped_invalid_comp = 0
     ## debug prints ends##
+    _UNPARSED_TOKEN_LABELS.clear()
 
 
     # initialize output columns
@@ -2096,6 +2141,7 @@ def enrich_cga_tsv_with_score_b(
     print(f"[score_b] rows skipped (invalid composition): {rows_skipped_invalid_comp}")
     print(f"[score_b] selected rows: {selected_rows}")
     #debug prints end#
+    _warn_unparsed_composition_tokens()
 
     df.to_csv(pseudolabel_tsv_path, sep="\t", index=False)
     return pseudolabel_tsv_path
