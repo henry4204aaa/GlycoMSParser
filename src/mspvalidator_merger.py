@@ -1,5 +1,7 @@
-version = 0.95
-last_update = 20260921
+version = 0.97
+last_update = 20261031
+#v0.97 20261031 CGA-TOLERANCE T2: peaks_ppm / findingions gain additive kwarg tol_da=None (symmetric Da window via _peaks_da); default ppm path unchanged
+#v0.96 20261013 READER-DIAG: validate_csv_structure gains additive kwarg return_reason=False; directassign_files raises ValueError naming the failed check when the converted CSV is invalid (was UnboundLocalError on df2)
 #v0.95 20260921 S1 (v1.20 T1): createnormailzedionlistcsv gains additive kwarg enrich_fn=None (GlyTouCan/WURCS run-time fill hook H3); default path unchanged
 #v0.94 20260520 fix B-28: relax string-dtype gate in validate_csv_structure + validate_annotation_structure to accept pandas 3.x default 'str' dtype in addition to legacy 'object' (gate-only relaxation; downstream isinstance(x, str) check unchanged) + guarded process-global opt-out from future.infer_string at module-top (Codex-reviewed: guard tolerates pandas <2.x where option does not exist); restores validate-pass on fresh pandas 3.0+ installs. (B-27 was reserved for peaks_ppm_duplicate_collapse_stub, now closed; this renumber avoids collision.)
 #v0.94 20260517 fix B-17: add v5 MAS header (GlyToucan Access Number, WURCS) accept; propagate label metadata through slice/iondfindex/negatives/writer; fix ionlistcheck indent
@@ -370,8 +372,13 @@ def intensity_normalization(ion, intensity):
     return [ion, intensity]
 
 
-def peaks_ppm(inputpeaklist, peakintensity, reflist, setppm):
+def peaks_ppm(inputpeaklist, peakintensity, reflist, setppm, tol_da=None):
     #print(f"The items in reference list is {len(reflist)}")
+    # 20261031 CGA-TOLERANCE T2: tol_da=None keeps the ppm window below unchanged (known issue 10 asymmetry kept).
+    # With tol_da set, setppm is ignored and the window is |peak - ref| <= tol_da on both sides; the loop shape
+    # (one hit per peak inside the window, stop at the first peak above the window) is the same as the ppm path.
+    if tol_da is not None:
+        return _peaks_da(inputpeaklist, peakintensity, reflist, float(tol_da))
     hitlist = []
     peaklist = inputpeaklist.copy()  # 建立一個副本來進行操作，避免改動原來的列表
     for ref in reflist:
@@ -420,14 +427,35 @@ def peaks_ppm(inputpeaklist, peakintensity, reflist, setppm):
     return nhitlist
 #peaks_ppm.counthelp = 0
 
-def findingions(dfrow, iondf, ppm):
+def _peaks_da(peaklist, peakintensity, reflist, tol_da):
+    """Da-window twin of peaks_ppm (CGA-TOLERANCE T2): same hit / zero-fill / normalisation output."""
+    peaklist = list(peaklist)
+    hitlist = []
+    for ref in reflist:
+        for peaks in peaklist:
+            if peaks <= ref:
+                if ref - peaks <= tol_da:
+                    hitlist.append([ref, peakintensity[peaklist.index(peaks)]])
+            elif peaks - ref <= tol_da:
+                hitlist.append([ref, peakintensity[peaklist.index(peaks)]])
+            else:
+                break
+    nhitlist = [intensity_normalization(h[0], h[1]) for h in hitlist]
+    for logi in reflist:   # same zero-fill as peaks_ppm (a duplicated ref is filled once)
+        if logi not in [item[0] for item in nhitlist]:
+            nhitlist.append([logi, 1])
+    return nhitlist
+
+def findingions(dfrow, iondf, ppm, tol_da=None):
     peaks = list(dfrow['peaklist'])
     intensity = list(dfrow['peakintensity'])
     #print(type(peaks))
     #print(f"peaks are {peaks[0:5]}")
     ions = []
     ions = iondf.values.flatten().tolist() #values in object
-    return peaks_ppm(peaks, intensity, ions,ppm)
+    if tol_da is None:
+        return peaks_ppm(peaks, intensity, ions,ppm)
+    return peaks_ppm(peaks, intensity, ions, ppm, tol_da=tol_da)   # 20261031 CGA-TOLERANCE T2
 
 #wrap below codes into a function
 #need variables: ion_df, pre_df, setppm
@@ -457,7 +485,10 @@ def is_string_column(series):
     return series.map(lambda x: isinstance(x, str) or pd.isna(x)).all()
 #validate csv file from raw#
 #update columns if we change the file conversion logic#  
-def validate_csv_structure(csv_path):
+def validate_csv_structure(csv_path, return_reason=False):
+    # return_reason=True returns (ok, reason) instead of ok; reason is None when ok.
+    def result(ok, reason=None):
+        return (ok, reason) if return_reason else ok
     expected_headers = ['entry_no', 'MS1scan_no', 'MS1_isolationmass', 'MS1_monoisolationmass', 'chargeState', 'protonatedmass', 'MS2scan_no', 'peaklist', 'peakintensity']
     expected_dtypes = {
     'entry_no': 'int64',
@@ -478,13 +509,13 @@ def validate_csv_structure(csv_path):
             print("Header mismatch:")
             print("Expected:", expected_headers)
             print("Found:", list(df.columns))
-            return False
+            return result(False, f"header mismatch (expected {expected_headers}, found {list(df.columns)})")
 
         # Check dtypes
         for col, expected_type in expected_dtypes.items():
             if col not in df.columns:
                 print(f"Missing column: {col}")
-                return False
+                return result(False, f"missing column {col}")
             actual_type = df[col].dtype.name
             # 20260520 fix B-28: pandas 3.x with future.infer_string=True (default) returns 'str'
             # for string columns instead of legacy 'object'. Accept both; downstream code is
@@ -493,14 +524,14 @@ def validate_csv_structure(csv_path):
                 continue
             if actual_type != expected_type:
                 print(f"Type mismatch for column '{col}': expected {expected_type}, got {actual_type}")
-                return False
+                return result(False, f"column '{col}' has type {actual_type}, expected {expected_type}")
 
         #print("CSV structure is valid.")
-        return True
+        return result(True)
 
     except Exception as e:
         print(f"Error during validation: {e}")
-        return False
+        return result(False, f"could not be read ({type(e).__name__}: {e})")
 
 #validate annotation file and ion list in same Excel#
 def validate_annotation_structure(excel_df):#extra arguments may be asked in future
@@ -643,12 +674,15 @@ def directassign_files(annotation_file, raw_csv, derivatizationtags, debug = Fal
         print("No ion list in sheet names")
         ionlistcheck = False
     #TODO raw file validation
-    if validate_csv_structure(raw_csv):
+    csv_ok, csv_problem = validate_csv_structure(raw_csv, return_reason=True)
+    if csv_ok:
         print("raw converted csv is valid")
         df2 = pd.read_csv(raw_csv, sep='\t')
     else:
         csvfilecheck = False
         print("No raw csv file valid in sheet names")
+        # 20261013 [READER-DIAG] stop here with the reason; continuing raised UnboundLocalError on df2 below.
+        raise ValueError(f"Converted spectra CSV '{os.path.basename(str(raw_csv))}' failed structure validation: {csv_problem}")
 
     #converting annotation file
     #add 2 mass information to dataframe

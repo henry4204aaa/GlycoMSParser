@@ -7,8 +7,135 @@ GlycoMSP is developed **additively**: the default behaviour of the published
 v1.10 is preserved, and new behaviour ships behind explicit options, so results
 produced with v1.10 remain reproducible.
 
+## [1.14] – 2026-11-01
 
-## 1.12 (preview, 2026-10-01)
+Publication build for the manuscript revision: the first version that can
+annotate low-resolution (ion-trap) MS2 data. The header and window titles
+report v1.14 and no longer say "preview". With every new field left at its
+default, results produced with v1.10 are unchanged (verified on a v1.10 project
+end to end).
+
+### Added
+- **Configurable CGA mass tolerances.** *CGA Setup* has a *Mass tolerances*
+  frame with two fields — *Precursor match* (default 20 ppm) and *Score A
+  fragment match* (default 10 ppm) — each accepting a value in ppm or Da. A Da
+  window is symmetric around the target mass. Invalid or empty values stop the
+  run with a message before anything is written.
+- **Tolerances are recorded.** A run with non-default tolerances is marked in
+  the log pane, the run log and the CGA method JSON (`parameters.cga`), and the
+  value is carried forward: *CGA → Trainable* and the prediction dialogs are
+  prefilled from the method or model record, and a different value entered by
+  hand produces a notice. The data files themselves (CGA TSV, trainable CSV,
+  prediction tables) are unchanged in layout and carry no marker.
+- **Precursor gate in *CGA → Trainable*.** The 10 ppm precursor gate that
+  v1.10 applied silently when building a training set is now a visible,
+  adjustable field (checkbox + ppm) in box *4) Thresholds / selection*; the
+  default reproduces v1.10.
+- **Unlabeled-dataset dialog** accepts decimal values (1–500 ppm) and is
+  prefilled from the selected model's tolerance record.
+- **Controlled validation scripts** (`tools/validation/`, not part of the
+  application): a decoy-library count that reports how many scans pass the
+  precursor and Score A criteria against the real library and a +3.37 Da
+  shifted copy at chosen tolerances, and two Score A peak-counting checks.
+  They document the method used to choose tolerances for ion-trap data.
+- **Negative-mode native N-glycan ion lists** in `templates/`:
+  `GlycoMSP_ionlist_native_neg_14.xlsx` (primary set) and
+  `GlycoMSP_ionlist_native_neg_candidate_97.xlsx` (extended set), for use as the
+  Score A ion list and the feature ion list with *Native(Reduced)*, negative mode.
+
+### Changed
+- The CGA Setup window re-packs its footer buttons so the new frame does not
+  push *Start CGA analysis* / *Close* off a small screen.
+- The user manual (`docs/glycomsp_user_manual_v1.0.md`) describes the new
+  fields, the ion-trap workflow (§7.2), the defaults table (§5.5, corrected
+  against the code) and the method JSON provenance block (§5.2).
+
+### Known limitations
+- Score A counts peak–ion pairs: with a wide fragment window (0.3 Da or more)
+  and a dense ion list, one peak can be counted for two neighbouring ions. With
+  the 14-ion native list no scan is affected; with a 97-ion list about one scan
+  in eight is. The counts are reported by the validation scripts.
+- The *ion list ppm* feature window in *CGA → Trainable* and in prediction is
+  ppm-only and capped at 500 ppm (0.13 Da at m/z 260), so low-m/z ion-trap
+  fragments get a narrower window than the CGA step's Da setting. A ppm-or-Da
+  selector for feature extraction is planned.
+- Prediction run summaries report *Accepted 0*, τ 0 and zero probability
+  statistics when thresholding is off (the default); the predicted labels and
+  per-class counts are correct. The summary will be corrected.
+- The CGA result TSV carries every converted scan, so its size follows the raw
+  file (about 1.7 GB for a run of 100,000 MS2 scans). A matched-rows-only
+  output is planned.
+- Native masses apply to the CGA route only; rows with unknown charge are kept
+  with mass `0` and are not yet excluded downstream (unchanged from 1.13).
+
+
+## [1.13] – 2026-10-31 (preview)
+
+Preview of the second group of v1.20 changes: data readers that report what
+they read and native (underivatized) glycan masses in the CGA route. With all
+new options left at their defaults, results produced with v1.10 are unchanged
+except for the corrections listed under *Fixed*. The GUI header reports v1.13;
+the user manual still describes v1.10.
+
+### Added
+- **Conversion diagnostics.** Every RAW or mzML conversion now writes, next to
+  the two CSV files, a per-scan status table (`<name>.scan_status.tsv`) and a
+  diagnostics report (`<name>.reader_diag.json` / `.txt`) with the outcome
+  (complete, complete with warnings, partial, failed), counts of exported and
+  skipped spectra, known and unknown precursor charges, and the reason for any
+  failure. The GUI shows the outcome in its log; a failed conversion is never
+  saved as if it had succeeded, and a partial one is saved with a warning.
+- **Spectra without a precursor charge are kept.** When the instrument did not
+  assign a charge (common for ion-trap data), the spectrum is exported with its
+  peaks and precursor m/z, charge `0` and mass `0`, and marked as "unknown
+  charge" in the status table, instead of stopping the conversion.
+- **Conversion options** (dialog before each GUI conversion; both off by default):
+  estimate the precursor charge (1–3) from the isotope pattern of the parent
+  MS1 scan, or supply one charge for the whole dataset. A charge reported by the
+  instrument is never overwritten. The choice is recorded in the project
+  metadata.
+- **Native glycan masses.** Choosing derivatization *Native* or *Native(Reduced)*
+  now gives correct underivatized precursor masses in the CGA library (previously
+  the masses were zero or silently permethylated). Monosaccharide, reducing-end,
+  sulfate and phosphate masses are documented in the module page.
+- **`src/msp_CLI_precursor_mass.py`** — prints the theoretical precursor mass of
+  a composition exactly as the CGA library computes it (`--composition`,
+  `--deri perme|native`, `--reduced`, `--mode +|-`, `--json`, `--table`,
+  `--selftest`).
+- **`src/msp_extract_cli.py`** — command-line conversion (`convert`) and a
+  read-only probe of the Thermo backend for selected scans (`inspect`), using the
+  same readers and options as the GUI; exit codes 0/3/4/5 mirror the outcomes.
+  General-purpose scripting support beyond these two commands is still in progress.
+
+### Changed
+- Readers (`msprawextractor`, `mzmlreader`) share one set of rules for missing
+  metadata and one CSV writer; the 9-column MS2 / 7-column MS3 format is
+  unchanged.
+
+### Fixed
+- Negative-mode precursor masses used the positive-mode formula.
+- RAW files from ion-trap instruments exported empty peak lists; peaks are now
+  read from the vendor mass list when no label data exist.
+- MS3 rows carried the parent's peaks and wrong header names; they now carry
+  their own peaks.
+- Spectra with no peaks were written as empty rows; they are no longer exported.
+- mzML files without a polarity term, or with the precursor on a second
+  `selectedIon`, were misread; polarity now comes from the filter string and
+  precursor fields from the first selected ion of the first precursor.
+- A conversion saved across different volumes failed on some systems.
+
+### Known limitations
+- The CGA precursor match (20 ppm) and Score A fragment match (10 ppm) are fixed
+  in this version; ion-trap data with isolation-m/z precursors therefore receive
+  almost no annotations. (Resolved in 1.14 by the configurable tolerances.)
+- Native masses apply to the CGA route only; manual (MAS) annotation still uses
+  permethylated residue masses.
+- Rows with unknown charge are kept in the CSV with mass `0`; downstream steps do
+  not yet exclude them.
+
+
+
+## [1.12] – 2026-10-01 (preview)
 
 Preview build on top of 1.11; GUI panels and the user manual remain at the v1.10 level except where noted. With the reference-database option off, all outputs are identical to v1.10.
 

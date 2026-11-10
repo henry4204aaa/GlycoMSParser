@@ -2,7 +2,7 @@
 
 **Version:** v1.0
 **Tool version covered:** GlycoMSP v1.10 (`mspfileloaderv14.py`)
-**Last updated:** 2026-06-28
+**Last updated:** 2026-11-01 (CGA mass-tolerance additions for GlycoMSP 1.14, each marked "GlycoMSP 1.14" in the text; everything else still describes v1.10)
 **Audience:** Users (chemists and glycobiologists), thesis defense committee, manuscript reviewers
 
 ---
@@ -134,8 +134,9 @@ Select your sample (single-click in the tree), then click **CGA manager**. This 
 
 > **[SCREENSHOT: `GlycoMSP_screenshots/CGA_setup_window_brain_librarysettings_in_GUI.jpg` — CGA Setup window (zebrafish brain library settings).]**
 > A modal dialog (~900×800). Top section: three path fields — *In-silico CSV*, *Ion List*, *Score B workbook (optional)* — each with associated *Add*, *Clear*, and (for Score B) *Validate* buttons. Middle section: metadata read-back display showing *Experiment Title*, *Glycan Type*, *Mass Analyzer charge mode* with a *Reset from file* button. Below that: a flag panel split into *Left* and *Right* columns containing checkboxes (e.g., *hybrid*, *bisecting*, *poly-LacNAc*), spinboxes (e.g., *arm count* range), and core-type selection (for O-GalNAc only). Bottom: *Advanced* toggle, action buttons: *Generate In-Silico CSV*, *Link in silico glycan list*, *Save CGA settings*, *Load CGA settings*, and *Start CGA analysis*.
+> *(GlycoMSP 1.14: the window also has a* Mass tolerances (CGA matching) *frame above the footer buttons. This screenshot predates it.)*
 
-This window has three tasks: (a) generate or link an in-silico glycan library, (b) attach an ion list, and (c) optionally attach and validate a Score B workbook.
+This window has three tasks: (a) generate or link an in-silico glycan library, (b) attach an ion list, and (c) optionally attach and validate a Score B workbook. From GlycoMSP 1.14 it also sets (d) the CGA mass tolerances.
 
 **(a) In-silico library.** If you don't have a library file already, configure the flag panel for your glycan class (the fields shown depend on whether *Glycan Type* is N-glycan or O-GalNAc) and click **Generate In-Silico CSV**. The application calls the composition generator (`compv4.NGlaunch` for N-glycans or `compv4.OGlaunch` for O-glycans), produces a CSV listing every theoretical composition consistent with your flags and modifier counts, and stores its path in the *In-silico CSV* field. The library is **reusable across samples** that share derivatization and ionization mode; if you already generated one, click **Link in silico glycan list** instead and pick the file directly.
 
@@ -143,13 +144,25 @@ This window has three tasks: (a) generate or link an in-silico glycan library, (
 
 **(c) Score B workbook (optional).** If you want motif-aware re-ranking, click **Add Score B Workbook** and pick your six-sheet Excel file (`.xlsx`, `.xlsm`, `.xltx`, or `.xltm`). Then click **Validate Score B Workbook** to run a quick load test; the application will pop up a confirmation or an error message naming the offending sheet. **Skip this for your first run** — Score B is disabled by default, and the CGA pipeline produces useful results from Score A alone. Part 3.3 covers Score B in depth.
 
+**(d) Mass tolerances (GlycoMSP 1.14, option off by default).** The *Mass tolerances (CGA matching)* frame sets the two windows that CGA analysis uses. Each is a number plus a unit, *ppm* or *Da*:
+
+- **Precursor match** (default **20 ppm**): how far a library mass may be from the scan's precursor mass. A ppm window is relative to the observed precursor mass; a Da window is ± that many Da around it.
+- **Score A fragment match** (default **10 ppm**): how far a peak may be from an ion-list mass to count as a hit (§4.1).
+
+The fields show the defaults each time the window opens, and with the defaults CGA analysis writes the same TSV as v1.10, where these two values were fixed. An empty, zero, negative or non-numeric value stops the run with an error dialog. A non-default tolerance is marked *NON-DEFAULT* in the log panel and recorded in the sample's method JSON (§5.2).
+
+Keep the defaults for Orbitrap-class data with a monoisotopic precursor m/z. Widen them only when your instrument's mass errors are larger, for example on ion-trap data whose precursor mass is the isolation m/z (§7.2). When you widen them, do two more things:
+
+- **Widen the CGA → Trainable fields too.** They are separate ppm fields and do not follow these settings (§2.6).
+- **Check the wider window against chance (decoy check).** Make copies of the in-silico library and of the ion list with every mass increased by 3.37 Da. That offset avoids residue, isotope (≈ 1.003 Da) and charge spacings, so no decoy mass is a glycan or fragment of your sample. Run CGA analysis on the same sample with the same tolerances against the decoy copies, and compare the number of matched scans, and of scans passing Score A, with the real run. Every decoy match is a chance match: real − decoy estimates the matches above chance, and decoy ÷ real the fraction expected to be chance. A wider window is worth it while real − decoy keeps growing. On a dense library with accurate-mass data, a wide window can give more decoy matches than real ones, so decide per dataset.
+
 ## 2.5 Start CGA analysis and produce the pseudolabel TSV
 
 With the in-silico library and ion list attached (Score B is optional), click **Start CGA analysis**. The application:
 
 1. Loads the in-silico library and normalises composition columns.
-2. For each MS2 scan, performs binary-search precursor mass matching against the library at your configured PPM tolerance (default 10 ppm), producing candidate compositions per scan.
-3. For each candidate, attaches an ion-fitting score (Score A) by counting how many reference fragments match peaks in the spectrum within tolerance, gated by an "anchor" requirement (a minimum number of high-intensity required ions must be present).
+2. For each MS2 scan, performs binary-search precursor mass matching against the library at the precursor match tolerance (default 20 ppm; set in CGA Setup from GlycoMSP 1.14, fixed at 20 ppm before), producing candidate compositions per scan.
+3. For each candidate, attaches an ion-fitting score (Score A) by counting how many reference fragments match peaks in the spectrum within the Score A fragment match tolerance (default 10 ppm; see §4.1 for how hits are counted), gated by an "anchor" requirement (a minimum number of high-intensity required ions must be present).
 4. If a Score B workbook was attached and validated, runs the Score B enrichment pass: each candidate is re-evaluated against motif-evidence rules and assigned a Score B value `b ∈ [0, 1]`. Score B failure is non-fatal — the original Score A TSV is preserved.
 5. Writes the result to a tab-separated file (the **pseudolabel TSV**) with columns including `MS2scan_no`, `comp_str`, `comp_tuple`, `ion_score`, `ion_hit_count`, `ion_hits_mz`, and (when Score B is active) `score_b`, `score_b_rank`, `score_b_selected`, `score_b_motif_summary`.
 
@@ -161,6 +174,7 @@ Back in the Prepare Dataset window with your sample selected, click **CGA → Tr
 
 > **[SCREENSHOT: `GlycoMSP_screenshots/CGA_to_trainable.jpg` — CGA → Trainable modal.]**
 > A modal dialog. Path fields at top (pseudolabel TSV path, ion-list path, optional salvage path, optional wide-output override) each with a *Browse...* button. Below: thresholds section — minimum ion score, top-N candidates per scan. Middle: Negatives section — checkbox to enable Non-glycan sampling, ratio control, hits gate. Below: Feature Mode section — radio buttons for *Rebuild features from peak list* (recompute) versus *Reuse pre-computed features* (faster). Below: Mass Feature checkbox (*Use protonated mass as a model feature; Non-glycan = 0*). Bottom: *Build Trainable CSV* button + status line.
+> *(GlycoMSP 1.14: the thresholds section has a second row with a* precursor gate *checkbox and ppm entry. This screenshot predates it.)*
 
 For your first run, accept the defaults. Confirm the **pseudolabel TSV** field points at the file from Step 2.5 (it should auto-fill from the sample's `files["CGAresult_tsv"]` slot) and that **ion list** points at the file from Step 2.4. Leave the negatives checkbox enabled and the feature mode at *Rebuild*.
 
@@ -170,6 +184,28 @@ Click **Build Trainable CSV**. The application:
 2. Optionally identifies low-evidence scans as Non-glycan negatives via `ml_ng_utils.collect_ng_candidates`. By default, scans with very low Score A and few or no ion hits become candidates for the *Non-glycan* class.
 3. Builds the feature matrix. Each spectrum becomes one row; each reference fragment in the ion list becomes one column. Cell values are `i_feature,n = log10(I_n) + 1` where `I_n` is the maximum intensity within the ion-matching tolerance of fragment `n`'s mass (default 10 ppm for training-set feature encoding), or `1.0` if no peak matched. The transformation compresses the dynamic range while keeping zero-intensity hits distinguishable from missing matches.
 4. Writes the **trainable CSV** with columns `MS2scan_no`, `[ion_mz_1, ion_mz_2, ..., ion_mz_N]`, and `Structure` (the composition label, or the literal string `Non-glycan` for negatives).
+
+**The thresholds box: two precursor filters and the feature window (GlycoMSP 1.14).** Box *4) Thresholds / selection* holds every tolerance this step uses. They are all in ppm, and none of them follows the CGA Setup tolerances:
+
+| Field | Default | What it does |
+|---|---|---|
+| *min ion score* | 0.07 | Score A pass mark (§4.1). |
+| *max \|ppm_error\|* | 20 | **Precursor filter 1.** Drops candidates whose `ppm_error` in the pseudolabel TSV is larger. `ppm_error` is the measured-vs-theoretical precursor error, relative to the theoretical mass. |
+| *precursor gate* checkbox and ppm entry | on, 10 | **Precursor filter 2.** Recomputes the measured-vs-theoretical precursor error from the scan CSV, relative to the theoretical mass, and drops rows beyond the value. Untick it to skip this filter. **Field added in GlycoMSP 1.14:** v1.10 applied this gate at 10 ppm, with no field to change it. |
+| *Top N per scan* | 1 | Candidates kept per scan. |
+| *ion list ppm* | 10 | **MS2 feature window**, not a precursor filter. A peak within this many ppm of an ion-list mass gives that ion's feature value (step 3). This modal's Non-glycan sampling uses the same window. |
+
+A row must pass both precursor filters, so the stricter one decides. With the defaults that is the 10 ppm gate: CGA analysis matches precursors at 20 ppm, but CGA → Trainable keeps only rows within 10 ppm. Unticking the gate leaves *max |ppm_error|* active.
+
+The *5) Negative sampling* box also has its own settings (on, max ratio 3.0, scans with fewer than 3 ion-list hits). The shared Negative Sampling Setting dialog (§3.4) does not apply to this step.
+
+**If you widened the CGA tolerances** (§2.4 (d)), widen these fields to match. Otherwise CGA → Trainable drops what the wider CGA run found:
+
+- Set *max |ppm_error|* and the *precursor gate* at least as wide as the precursor match tolerance. For a Da window, convert at the lowest precursor mass you expect: 0.5 Da at m/z 1,000 is 500 ppm.
+- The *ion list ppm* feature window is in ppm only. A 0.1 Da fragment error is 200 ppm at m/z 500 but 100 ppm at m/z 1,000, so choose a value that covers your fragment errors over the ion list's mass range.
+- Keep *ion list ppm* at 500 ppm or less. That is the largest value the unlabeled-dataset dialog accepts (§2.8), so prediction features can then be built with the same window.
+
+The values used are recorded with the trainable CSV in the method JSON (§5.2). At training they are copied into `training_run.json` when GlycoMSP can find that record (§4.5). At prediction, values that differ from the defaults prefill the precursor gate and the feature window (§2.8).
 
 The status line shows total scans processed, positive-class scans selected, and (if enabled) negatives added. When the run completes, the trainable CSV path is recorded in the sample's `files["trainable_csv"]` slot, and the path is also written into the per-sample method JSON.
 
@@ -218,9 +254,20 @@ Switch to the **Predict** tab.
 
 **Step 1 — Model.** Click **Select Model File** and pick the `.skops` file from Step 2.7. The application loads the model, the label encoder, and the feature column list. (For older models saved as `.joblib` or `.pkl`, those formats also load; the path of the sidecar files is derived from the model path with the appropriate extension.)
 
+**Prefill from the model (GlycoMSP 1.14, option off by default).** GlycoMSP looks for the `cga_tolerances` record in the `training_run.json` next to the model (§4.5). If the CGA → Trainable fields recorded there differ from the defaults, loading the model prefills the matching prediction settings, and the *Model loaded* dialog lists what was prefilled:
+
+- A non-default CGA → Trainable precursor gate becomes the *Tolerance (ppm)* below. If the gate was unticked at CGA → Trainable, *Apply precursor gate* is unticked too.
+- A non-default *ion list ppm* becomes the suggested value in the unlabeled-dataset dialog (Step 2).
+
+A model trained at the defaults, a MAS model, or a model without the record leaves everything as in v1.10. A precursor-gate field you have already changed yourself is kept (the dialog says so), also when you load another model.
+
 **Step 2 — Unlabeled input.** You have two options. **Load unlabeled dataset** lets you pick a pre-built unlabeled CSV directly — useful if you already prepared the input. **Create unlabeled dataset of certain experiment** is the integrated workflow: pick an experiment JSON, and the application traverses each sample's method JSON, calls `extract_fragment_masses` to build the column order, calls `extract_ion_intensities` to compute features for each spectrum, and writes a `<csv_stem>_unlabeled_ppm{ppm}.csv` next to each sample's converted CSV. UIDs of the form `{exp_id}:{samp_id}:{scan6digit}` are injected so predictions remain traceable to source spectra.
 
+The integrated workflow first asks for the feature window in ppm, the prediction-side counterpart of the trainable CSV's *ion list ppm* (§2.6). GlycoMSP 1.14 accepts 1–500 ppm with decimals; v1.10 accepted whole numbers from 1 to 200. When the model was trained with a non-default feature window, the dialog is prefilled with it. If you enter a different value, a notice appears and is written to the log panel.
+
 **Precursor gate.** The *Apply precursor gate* checkbox (enabled by default) tells the predictor to compare each spectrum's measured precursor mass against the theoretical mass of the predicted composition. If the deviation exceeds the *Tolerance (ppm)* setting (default 10 ppm), the prediction is moved into the review queue ("greyed out" in the manuscript Figure 4 caption). Provide an in-silico CSV via the *Select in-silico CSV file* button; this file maps composition labels to theoretical masses (the same in-silico CSV from Step 2.4 works).
+
+*(GlycoMSP 1.14.)* When the model has a non-default precursor-gate record and the gate you run with differs from it, a *Tolerance differs from the model* notice appears and is written to the log panel. `run_summary.json` records what was requested, what was applied and whether it matches the model (§5.4). The output folder name shows the gate as a whole number of ppm, rounded down (`_PG12ppm` for 12.5 ppm, as before).
 
 **Run.** Click the green **Run Prediction** button. The pipeline:
 
@@ -391,9 +438,20 @@ This Part explains the design choices behind GlycoMSP. Reading is optional for a
 Score A (manuscript variable *a*) is the **ion-fitting score**: the proportion of diagnostic ions detected in an MS2 spectrum, evaluated against the user-defined ion list. Per scan and per candidate composition, the application:
 
 1. Takes the candidate's set of expected reference ions from the ion list.
-2. For each expected ion, searches the spectrum's peak list for a peak within the configured PPM tolerance (default 10 ppm for ion-list matching).
+2. For each expected ion, searches the spectrum's peak list for a peak within the configured PPM tolerance (default 10 ppm for ion-list matching; from GlycoMSP 1.14 the *Score A fragment match* tolerance in CGA Setup, in ppm or Da).
 3. Optionally applies an "anchor" gate — a minimum number of high-intensity required reference ions that must be detected for the score to be computed at all. When the gate fails, the score is zero (or, in fallback mode, a simple fraction).
 4. Computes the score as `hit_count / total_reference_count`, normalised to `[0, 1]`.
+
+**How hits are counted.** Score A counts peak–ion matches, not distinct ions. For each ion in the list, every peak inside that ion's window counts as one hit. This has two consequences:
+
+- **Several peaks in one ion's window count several times.** With a ±0.3 Da window, peaks at 299.80, 300.10 and 300.25 all lie in the window of ion 300.00, giving 3 hits for that one ion. `ion_hits_mz` then lists 300.00 three times.
+- **One peak can count for two ions.** If two ions are closer than twice the window (for ±0.3 Da: closer than 0.6 Da), one peak between them can fall in both windows. Ions 406.20 and 406.60 with one peak at 406.42 give 2 hits.
+
+At the default 10 ppm (±0.003 Da at m/z 300), the first case almost never happens. The second depends on how closely your ion list is spaced. Both become common at wide windows: in the zebrafish brain test at 300 ppm / 0.3 Da, 32 % of matched rows had an ion counted more than once. GlycoMSP 1.14 keeps the v1.10 rule, so earlier results stay reproducible. What this means for you:
+
+- Compare Score A only between runs with the same fragment window and the same ion list.
+- Before widening the window, check your ion list for ions closer than twice the window.
+- Check a widened window against chance with a decoy count (§2.4 (d)).
 
 The manuscript frames Score A as serving "as a general filter to reject spectra having possible compositions without enough glycan-related fragments." It works at the **fragment-evidence level** — does the candidate composition predict fragments that we actually see? — without considering structural detail beyond fragment presence.
 
@@ -451,6 +509,7 @@ Each successful training run writes a JSON manifest next to the model file. The 
 - **`hashes`** — same as inputs; redundancy is intentional.
 - **`versions`** — environment versions: Python, platform, sklearn, joblib, numpy, pandas, and the GlycoMSP build version.
 - **`created_at`** — local-time ISO timestamp of when training completed.
+- **`cga_tolerances`** *(GlycoMSP 1.14, always written)*: the tolerances behind the trainable CSV. If GlycoMSP finds the CSV's CGA → Trainable record, this is `{"status": "found", "source": …, "trainable": {…}}`, with the fields listed in §5.2. Otherwise it is only a status: `not found` (MAS, pooled, moved or older-build trainables), `stale` (the CSV has changed since it was built), `ambiguous` (two different records for the same file), or `trainable CSV changed during read`. GlycoMSP finds the record when the CSV was built in the same session, or when its CGA method JSON has been loaded or sits in the CSV's folder or the linked experiment JSON's folder, and only while the CSV still has the SHA-256 recorded when it was built. Prediction prefills from this block (§2.8).
 
 This manifest accompanies the model file (`*.skops` plus `*_labelencoder.joblib` plus `*_features.json`). When you publish a model or share it with a collaborator, include all four files. The manifest is the document that lets reviewers verify a run was performed under the parameters reported in a paper.
 
@@ -573,7 +632,7 @@ Produced by `build_method_v1_from_tree`; written by `save_method_v1_for_sample` 
 
   "parameters": {
     "mas": {},
-    "cga": {},
+    "cga": {},          // GlycoMSP 1.14, CGA family: see "CGA tolerances" below; {} from older builds
     "scoring": {},
     "ml": {}
   },
@@ -610,7 +669,35 @@ Produced by `build_method_v1_from_tree`; written by `save_method_v1_for_sample` 
 - Path values are stored as **native** OS-specific paths via `os.path.normpath`. Windows produces `C:\path\file`; macOS / Linux produce `/path/file`. Cross-platform load is handled at read-time by `_resolve_path` (Windows-drive regex detection).
 - Hash fields are **not currently written** by the writer; the schema reserves them for a future addition.
 - `artifacts.CGAresult_tsv` was previously named `pseudolabels_tsv`; reads accept either key for backward compatibility, but writes always use the new name.
-- The `parameters` sub-objects are placeholder shells in the current schema; they are reserved for future per-method parameter snapshots.
+- The `parameters` sub-objects are placeholder shells in the current schema; they are reserved for future per-method parameter snapshots. (GlycoMSP 1.14 fills `parameters.cga`; see below.)
+
+**CGA tolerances in `parameters.cga` (GlycoMSP 1.14, always written).** A CGA method JSON written by GlycoMSP 1.14 records the tolerances used, at the defaults too. Its content therefore differs from a v1.10 method JSON for the same sample: the record is added provenance, and the data files (pseudolabel TSV, trainable CSV) are unchanged at the defaults. A method JSON from an older build keeps `"cga": {}` and loads as before.
+
+```jsonc
+"cga": {
+  "run": {                                   // written by Start CGA analysis
+    "tsv": "<pseudolabel TSV path>",
+    "precursor_tolerance": {"value": 20.0, "unit": "ppm"},   // or "Da"
+    "fragment_tolerance":  {"value": 10.0, "unit": "ppm"},   // Score A
+    "tolerance_non_default": false
+  },
+  "trainable": {                             // written by Build Trainable CSV
+    "csv": "<trainable CSV path>",
+    "csv_sha256": "<hex>",                   // the record is used only while the CSV has this hash
+    "cga_tsv": "<TSV the CSV was built from>",
+    "cga_run": {"precursor_tolerance": {…}, "fragment_tolerance": {…}, "tolerance_non_default": false},
+                                             // null when cga_tsv is not the TSV of the recorded run
+    "precursor_gate_ppm": 10.0,              // null = gate unticked
+    "max_abs_ppm": 20.0,
+    "min_ion_score": 0.07,
+    "feature_ion_ppm": 10.0,                 // "ion list ppm"
+    "negatives": {"enabled": true, "ion_ppm": 10.0},
+    "tolerance_non_default": false           // gate, max |ppm_error|, feature window or the CGA run non-default
+  }
+}
+```
+
+The run log of the sample (`pseudolabel_run` entries) also carries `precursor_tolerance`, `fragment_tolerance` and `tolerance_non_default`. Its old `ppm_value` / `ion_ppm` keys are `null` when that window was set in Da.
 
 ## 5.3 Experiment JSON schema
 
@@ -700,7 +787,7 @@ Tab-separated. One row per (scan, candidate composition) pair.
 | `comp_tuple` | always | `(Hex, HexNAc, NeuAc, NeuGc, KDN, Fuc)` ordered tuple |
 | `ppm_error` | always | Precursor PPM error against this candidate's theoretical mass |
 | `ion_score` | always | Score A: ion-fitting fraction in `[0, 1]` |
-| `ion_hit_count` | always | Integer count of ion-list fragments hit within tolerance |
+| `ion_hit_count` | always | Integer count of ion-list fragments hit within tolerance (counted as peak–ion matches; see §4.1, *How hits are counted*) |
 | `ion_hits_mz` | always | Semicolon-separated m/z list of hits |
 | `score_b` | Score B active | Float in `[0, 1]` |
 | `score_b_rank` | Score B active | Per-scan rank by `score_b` (1 = highest) |
@@ -730,7 +817,7 @@ Each successful prediction run creates a folder named for the run (encoding feat
 
 - **`predictions_with_conf.csv`** — main prediction output. Columns: `MS2scan_no`, `predicted_label`, `confidence` (top-class probability), `top1_proba`, `top2_proba`, `margin`, plus passthrough columns from the unlabeled input (`protonatedmass`, `theoretical_mass`, `ppm_precursor`, `pred_ok`, `uid` when present), and per-class probability columns when the gate triggered the legacy proba expansion path.
 - **`class_summary.csv`** — one row per predicted class with `count`, `mean_confidence`, and `pass_rate` (fraction passing both confidence threshold and precursor gate).
-- **`run_summary.json`** — reproducibility manifest. Records model path, unlabeled input path, threshold settings (τ, margin, enable flag), precursor gate setting (enable flag, ppm), in-silico CSV path (when gate is on), method base name, GlycoMSP version, output file inventory.
+- **`run_summary.json`** — reproducibility manifest. Records model path, unlabeled input path, threshold settings (τ, margin, enable flag), precursor gate setting (enable flag, ppm), in-silico CSV path (when gate is on), method base name, GlycoMSP version, output file inventory. GlycoMSP 1.14 adds `model_tolerances`: what was prefilled from the model, the gate requested and applied (with its ppm), whether the request differs from the model's record, and whether the gate that ran matches it (`null` when the model has no non-default gate record). The feature window is not checked here; it was set when the unlabeled CSV was built.
 - **`run_summary.md`** — human-readable rendering of `run_summary.json`. Same content, prose-formatted.
 - **`to_review_low_conf.csv`** — spectra whose top-class probability fell below τ or whose margin fell below the configured margin. Worth manual review.
 - **`to_review_gate.csv`** — spectra whose predicted composition disagreed with the measured precursor mass beyond `gate_ppm`. Includes `ppm_error` column.
@@ -749,20 +836,24 @@ Models saved by older builds may use `.joblib` or `.pkl` extensions instead of `
 
 ## 5.5 Default parameters
 
-A single reference table for every default value the application uses out-of-the-box. Source: code defaults (`mspfileloaderv14_vars.md`) and screenshots; manuscript-published values are flagged where they diverge.
+A single reference table for every default value the application uses out-of-the-box. Source: code defaults (`mspfileloaderv14_vars.md`) and screenshots; manuscript-published values are flagged where they diverge. The tolerance and negative-sampling rows were re-checked against the GlycoMSP 1.14 code on 2026-11-01.
 
 | Parameter | Default | Where set | Notes |
 |-----------|---------|-----------|-------|
-| Precursor PPM tolerance (CGA matching) | 20.0 ppm | `run_pseudolabeling` `ppm_value` | Configurable via CGA Setup |
+| Precursor match tolerance (CGA matching) | 20 ppm | CGA Setup *Precursor match* → `run_pseudolabeling` `ppm_value` / `tol_da` | Relative to the observed precursor mass. GlycoMSP 1.14: field, ppm or Da. v1.10: fixed, no field |
 | Top-N candidates per scan (CGA) | 3 | `run_pseudolabeling` `keep_top_n_per_scan` | Caps candidates by smallest `\|ppm_error\|` |
-| Ion-list PPM tolerance (Score A matching) | 10.0 ppm | `run_pseudolabeling` `ion_ppm` | |
+| Score A fragment match tolerance | 10 ppm | CGA Setup *Score A fragment match* → `run_pseudolabeling` `ion_ppm` / `ion_tol_da` | GlycoMSP 1.14: field, ppm or Da. v1.10: fixed, no field. Hits are peak–ion matches (§4.1) |
 | Score A anchors required | 2 | `run_pseudolabeling` `anchors_required` | Currently a parameter but not consumed in body |
-| Feature-extraction PPM tolerance | 20.0 ppm | `build_features_from_peaks_log10_plus1` | Used at training and prediction |
+| CGA → Trainable precursor gate | on, 10 ppm | *precursor gate* checkbox and entry | Relative to the theoretical mass; ppm only. GlycoMSP 1.14: field. v1.10: applied with no field (§2.6) |
+| CGA → Trainable max \|ppm_error\| | 20 ppm | *max \|ppm_error\|* field | Filters the TSV `ppm_error`; stays active when the gate is unticked; ppm only |
+| CGA → Trainable feature window (*ion list ppm*) | 10 ppm | *ion list ppm* field → `build_features_from_peaks_log10_plus1` `ppm` | MS2 features and this modal's Non-glycan sampling; ppm only |
+| CGA → Trainable negatives | on, ratio 3.0, < 3 ion hits | *5) Negative sampling* box | Its own settings, not the shared dialog below |
+| `build_features_from_peaks_log10_plus1` function default | 20 ppm | `ml_ng_utils` | Not used by the GUI: CGA → Trainable always passes its *ion list ppm* |
 | No-peak default cell value | 1.0 | feature extraction | `log10(1) + 0 = 0` would lose info; +1 keeps cells distinguishable |
-| Negative sampling: enabled | True | Negative Sampling Setting | |
-| Negative sampling: ratio | 1.0 | `neg_ratio_var` | neg:pos cap |
-| Negative sampling: min ion-hit gate | 0 | `min_hits_var` | Scans below this become negatives |
-| Negative sampling: PPM tolerance | 10 ppm | `ppm_tol_var` | |
+| Negative sampling: enabled | False | Negative Sampling Setting (`add_negatives_var`) | Shared dialog, used by MAS merge and the ion-mining pre-negatives of CGA analysis; not by CGA → Trainable |
+| Negative sampling: ratio | 3.0 | `neg_ratio_var` | neg:pos cap |
+| Negative sampling: min ion-hit gate | 3 | `min_hits_var` | Scans below this become negatives |
+| Negative sampling: PPM tolerance | 10 ppm | `ppm_tol_var` | Shared dialog only; ppm only |
 | Ion mining: enabled | False | `ion_suggest_enable_var` | Opt-in |
 | Ion mining: PPM tolerance | 10.0 ppm | `ion_suggest_ppm_var` | |
 | Ion mining: Da floor | 0.030 Da | `ion_suggest_dafloor_var` | Low-m/z merge floor |
@@ -783,10 +874,10 @@ A single reference table for every default value the application uses out-of-the
 | Confidence threshold τ | 0.65 | `thresh_val_var` | Only when threshold enabled |
 | Confidence margin | 0.05 | `margin_val_var` | Only when threshold enabled |
 | Threshold enabled | False | `enable_thresh_var` | Disabled by default |
-| Feature encoding ppm (training) | 10 ppm | MAS-merge / CGA→trainable | |
-| Feature encoding ppm (prediction) | 20 ppm | `extract_ion_intensities` | More permissive than training |
-| Precursor gate (predict) | True | `apply_pred_precursor_gate_var` | Opt-out at prediction time |
-| Precursor gate PPM | 10.0 ppm | `precursor_gate_ppm` | |
+| Feature encoding ppm (training) | 10 ppm | CGA → Trainable *ion list ppm*; MAS merge fixed (no field) | ppm only |
+| Feature encoding ppm (prediction) | none: you type it (the dialog suggests 20) | Unlabeled-dataset dialog → `extract_ion_intensities` (function default 20) | GlycoMSP 1.14: 1–500 ppm with decimals, prefilled from a model's non-default record. v1.10: whole numbers 1–200 |
+| Precursor gate (predict) | True | `apply_pred_precursor_gate_var` | Opt-out at prediction time. GlycoMSP 1.14: unticked on load when the model's record has the gate off |
+| Precursor gate PPM (predict) | 10 ppm | `pred_precursor_ppm_var` | Relative to the theoretical mass of the predicted composition. GlycoMSP 1.14: prefilled from the model's non-default gate record |
 | Validation policy: allow missing method | True | exp JSON | |
 | Validation policy: allow hash mismatch | True | exp JSON | |
 
@@ -851,6 +942,8 @@ The **Precursor (MS1) Gate for Predictions** panel on the Predict tab (Quickstar
 
 **When to disable.** Disable the gate when working with high-mass-error datasets (some instrument configurations don't reach 10 ppm reliably), when the in-silico CSV is known incomplete, or when running an exploratory prediction where you want the model's raw output regardless of mass agreement. Untick the *Apply precursor gate* checkbox; the application then sets `pred_ok = True` for all rows and skips the gate step.
 
+**Not the CGA → Trainable gate (GlycoMSP 1.14).** This prediction gate and the CGA → Trainable precursor gate (§2.6) are separate settings with the same 10 ppm default. If you widened the CGA tolerances and the CGA → Trainable gate, a 10 ppm prediction gate demotes nearly every prediction. Loading a model whose training record has a non-default CGA → Trainable gate (or the gate off) therefore prefills this panel with that setting (§2.8). You can still change it; a notice and `run_summary.json` record the difference.
+
 **Required input when enabled.** The gate needs an in-silico CSV mapping composition → theoretical_mass, set via the *Select in-silico CSV file* button. The same in-silico CSV used in CGA Setup (Step 2.4) works directly; if you trained on multiple CGA samples with different libraries, pick the library that covers the broadest composition range.
 
 **Gate vs confidence threshold.** The two checks are independent. A prediction must pass *both* to land in the main output:
@@ -907,11 +1000,22 @@ This Part covers the most common issues users encounter, plus the limitations ba
 
 **Predict tab gate writes lots of `to_review_gate.csv` rows but no main predictions.** The model is predicting compositions whose theoretical masses don't match the measured precursor masses. Check: (a) is your in-silico CSV the right one for this dataset? (b) is the `gate_ppm` tolerance reasonable for your instrument? (c) is the dataset actually a different glycan class from what the model was trained on? Disable the gate temporarily to see what the model would predict without filtering.
 
+**Lower CGA Setup flags are cut off (GlycoMSP 1.14).** On a small or remote display, the CGA Setup window can be shorter than its content. The file links, the *Mass tolerances* frame and both button rows always stay visible; the lowest rows of the *In-Silico Generation Flags* panel are cut off instead. Their values are still used. Maximise the window to see or edit them.
+
 **macOS file dialogs occasionally crash the application during multi-file selection.** A platform issue with tk on certain macOS versions. The application catches the underlying exception and degrades to the **Add MS2 CSV(s)** / **Add Excels** path. If repeated, prefer single-file selections.
 
 ## 7.2 Known limitations
 
 **N-glycans and O-GalNAc only.** The in-silico library generators (`compv4.NGlaunch` and `compv4.OGlaunch`) cover N-glycans and O-GalNAc glycans. Other glycan types (O-mannose, glycolipids, GAGs) are not currently supported. Adding new glycan classes requires extending the composition generator's flag schema and partition sets.
+
+**Ion-trap data whose precursor mass is the isolation m/z (GlycoMSP 1.14, option off by default).** When the scan CSV has no monoisotopic precursor m/z (common for LTQ ion-trap RAW files), its precursor mass is the isolation m/z. On such native files the measured precursor errors were about −20 to −90 ppm at charge 1 and +150 to +250 ppm at charge 2, and fragment errors 0.06–0.14 Da. With the v1.10 tolerances (20 ppm precursor, 10 ppm fragments), CGA analysis therefore annotates almost nothing. The error changes sign with charge, so a wider window is needed, not an offset. Suggested start:
+
+1. In CGA Setup (§2.4 (d)), set *Precursor match* to 300 ppm and *Score A fragment match* to 0.3 Da.
+2. Run the decoy check (§2.4 (d)) at these and at the default tolerances.
+3. In CGA → Trainable (§2.6), widen the *precursor gate* and *max |ppm_error|* to at least 300 ppm, and choose an *ion list ppm* that covers your fragment errors.
+4. Compare Score A only with runs at the same fragment window and ion list (§4.1, *How hits are counted*).
+
+Mass errors this large are not expected for Orbitrap-class data with a monoisotopic m/z; keep the defaults there.
 
 **Single classifier in v1.** The Train tab's *Choose Classifier* combobox lists Random Forest as the only option. The infrastructure (label encoding, balancing, splitting, threshold demotion) is classifier-agnostic; adding alternative classifiers (gradient-boosted trees, support vector machines, neural networks) is feasible but not in this build.
 

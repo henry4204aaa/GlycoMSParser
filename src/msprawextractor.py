@@ -1,8 +1,26 @@
 ######version info#####
 
-version= "0.55"
-last_update = 20260411
+version= "0.61"
+last_update = 20261023
 
+#v0.61 READER-DIAG R2 (Codex round 2, 20261023): a CSV is named in the diagnostics only after it is written;
+#      Ctrl-C/SystemExit also finish the diagnostics (re-raised unchanged); stage 'iterate' starts once the file is
+#      open; the open-failure message is redacted; every exported MS2 status row records mass_mz_source (was only
+#      rows without a reported charge). CSVs unchanged.
+#v0.60 READER-DIAG CP-D: every conversion also writes <stem>.scan_status.tsv (one row per MS2/MS3 scan) and
+#      <stem>.reader_diag.json/.txt (outcome, exit code, warnings, counts, coverage, failure) next to the CSVs, on
+#      success and on failure (msp_spectrum_record v0.4). Optional stem= (output name; the CLI passes the alias) and
+#      entry=. The return dict gains outcome, exit_code, warnings, diagnostics. CSVs unchanged. The MS order is
+#      read once per scan (was up to three times), and MS3 scans read their filter for the polarity.
+
+#v0.59 READER-DIAG CP-C.5: optional charge sources for MS2 scans without a valid reported charge (both off by default):
+#      charge_comb (MS1 isotope comb, msp_charge_comb) then dataset_charge (one user value). A reported charge is never
+#      overwritten. The mass uses the isolation m/z when the file has no monoisotopic m/z (was 0). Summary gains "charge".
+#v0.58 READER-DIAG: calcproton takes the scan polarity; negative mode gives the [M-H]- equivalent (was the positive formula, (z-1)*2.015 Da low).
+#v0.57 READER-DIAG: MS2/MS3 scans without peaks are not written to the CSV (counted in the summary).
+#v0.56 READER-DIAG: MS2/MS3 peaks come from read_scan_peaks (FTMS scans: label data as before;
+#      other analyzers: mass list, vendor-centroided when the scan is profile). MS3 rows read their own peaks.
+#      MS3 header names fixed: column 2 is the parent MS2 scan, column 5 the MS3 scan (names were swapped).
 #v0.55 code review 1. Remove unused blocks
 #v0.53 fix tmp file not found issue when directly click the v10 python file (cwd not specified -> fall to default)
 #v0.52 check and prepare for negative mode support
@@ -35,10 +53,16 @@ from pathlib import Path
 import os
 import pathlib
 import tempfile
+import re
 
 #suppress warning during data hanlding process
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
+#v0.59 READER-DIAG CP-C.5: shared charge rules and the MS1 isotope comb (new modules, standard library only)
+import msp_charge_comb
+from msp_spectrum_record import (normalize_charge, resolve_charge, validate_dataset_charge, CHARGE_SOURCES,
+                                 CHARGE_SOURCE_REPORTED, CHARGE_SOURCE_NONE, ReaderDiagnostics)
 
 #specific raw file extraction key module
 try:
@@ -168,7 +192,17 @@ def save_to_arff():#(arffname, data, headers, attributes, debug=False):
 
 
 #calculates and returns protonated mass for precursor in each spetrum
-def calcproton(isolatedmass, charge):
+#v0.58 READER-DIAG: negative-mode precursor mass. The in-silico library (compnewv4, mode '-') stores [M-H]-,
+#and Thermo reports the charge magnitude in negative mode too, so the scan polarity decides the formula.
+PROTON_MASS = 1.007276
+
+def calcproton(isolatedmass, charge, polarity=None):
+    if polarity == '-' or charge < 0:
+        #[M-zH]z- -> [M-H]- equivalent: m/z * z + (z - 1) * proton. A negative charge value is read as negative mode.
+        z = abs(charge)
+        if z == 0:
+            return 0
+        return isolatedmass * z + (z - 1) * PROTON_MASS
     if charge == 1 :   #change abs(charge) to charge to negative can be calculated too, 
         #A tiny nuance to keep in mind as we go forward: Thermo’s API typically returns the magnitude of charge (often positive) 
         # even for negative-mode data, depending on method/instrument
@@ -178,12 +212,128 @@ def calcproton(isolatedmass, charge):
         return conv
     elif charge == 0:
         return 0
-    elif charge < -1:
-        negconv = (isolatedmass * charge + (charge - 1) * 1.00784)
-        return negconv
     
 
 #peak extractor parts, need modification
+
+#READER-DIAG 20261013: where a scan's peaks come from.
+#GetLabelData returns the FT label stream; ion-trap (ITMS) scans have none and come back empty,
+#although their points are available from the mass list. The pilot LTQ probe confirmed this, and the
+#vendor-centroided mass list is identical to the MSConvert "Thermo/Xcalibur peak picking" output.
+PEAK_SOURCE_LABEL_DATA = "label_data"
+PEAK_SOURCE_MASS_LIST = "mass_list"
+PEAK_SOURCE_MASS_LIST_CENTROID = "mass_list_vendor_centroid"
+_FT_ANALYZER_RE = re.compile(r"\bFTMS\b")
+_POLARITY_RE = re.compile(r"(?:^|\s)([+-])\s+[pc](?:\s|$)")   # "ITMS - p ESI ...", "FTMS {1,1} + c NSI ..."
+
+def scan_polarity(scan_filter):
+    """'+', '-' or None, from the polarity token of a Thermo scan filter."""
+    match = _POLARITY_RE.search(scan_filter or "")
+    return match.group(1) if match else None
+
+def read_scan_peaks(rawfile, scan, scan_filter=None):
+    """Return (peaklist, peakintensity, peak_source) for one native scan.
+
+    FTMS scans keep the label-data path unchanged. Any other analyzer reads the mass list with no
+    filter, no intensity cutoff and no peak limit; a profile scan is centroided by the vendor library
+    (default peak width), a centroid scan is returned as stored.
+    """
+    if scan_filter is None:
+        scan_filter = rawfile.GetFilterForScanNum(scan) or ""
+    if _FT_ANALYZER_RE.search(scan_filter):
+        labels = rawfile.GetLabelData(scan)[0]
+        return labels[0], labels[1], PEAK_SOURCE_LABEL_DATA
+    centroid = bool(rawfile.IsProfileScanForScanNum(scan))
+    masslist = rawfile.GetMassListFromScanNum(scan, scanFilter='', intensityCutoffType=0, intensityCutoffValue=0,
+                                              maxNumberOfPeaks=0, centroidResult=centroid, centroidPeakWidth=0.0)[0]
+    return masslist[0], masslist[1], (PEAK_SOURCE_MASS_LIST_CENTROID if centroid else PEAK_SOURCE_MASS_LIST)
+
+def _new_peak_summary():
+    return {"ms2": {"by_source": {}, "exported": 0, "empty": []}, "ms3": {"by_source": {}, "exported": 0, "empty": []}}
+
+def _tally_peaks(block, scan, peaklist, peakintensity, source):
+    """Count one scan; return False when it has no peaks and is not to be exported (as MSConvert drops it)."""
+    block["by_source"][source] = block["by_source"].get(source, 0) + 1
+    if len(peaklist) == 0 and len(peakintensity) == 0:
+        block["empty"].append(scan)
+        return False
+    block["exported"] += 1
+    return True
+
+#READER-DIAG CP-C.5 (20261015): charge for MS2 scans without a valid reported charge.
+#Order (Henry): reported charge, never overwritten -> comb on the parent MS1 profile (charge_comb=True)
+#-> the user's dataset charge -> unknown (0, as before). The comb runs only on non-FT profile MS1, the one
+#condition it was tried on; each parent MS1 is read once.
+COMB_NOT_RUN = "not_run"                 # charge reported, or the comb is off
+COMB_NO_ISOLATION_MZ = "no_isolation_mz"
+COMB_NO_PARENT_MS1 = "no_parent_ms1"
+COMB_NO_PROFILE_MS1 = "no_profile_ms1"   # parent MS1 stored as centroids
+COMB_FT_MS1_NOT_TRIED = "ft_ms1_not_tried"
+MASS_MZ_MONOISOTOPIC = "monoisotopic"
+MASS_MZ_ISOLATION = "isolation"
+
+def _parent_ms1_profile(rawfile, parent, cache):
+    """(mz, intensity) of the parent MS1 profile, or a comb status string. Read once per parent scan."""
+    if parent in cache:
+        return cache[parent]
+    try:
+        scan = int(parent)
+        if scan <= 0 or rawfile.GetMSOrderForScanNum(scan) != 1:
+            result = COMB_NO_PARENT_MS1
+        elif _FT_ANALYZER_RE.search(rawfile.GetFilterForScanNum(scan) or ""):
+            result = COMB_FT_MS1_NOT_TRIED
+        elif not rawfile.IsProfileScanForScanNum(scan):
+            result = COMB_NO_PROFILE_MS1
+        else:
+            masslist = rawfile.GetMassListFromScanNum(scan, scanFilter='', intensityCutoffType=0, intensityCutoffValue=0,
+                                                      maxNumberOfPeaks=0, centroidResult=False, centroidPeakWidth=0.0)[0]
+            result = (masslist[0], masslist[1])
+    except Exception:
+        result = COMB_NO_PARENT_MS1
+    cache[parent] = result
+    return result
+
+def _new_charge_summary(charge_comb, dataset_charge):
+    return {"settings": {"charge_comb": charge_comb, "dataset_charge": dataset_charge,
+                         "comb": msp_charge_comb.parameters() if charge_comb else None},
+            "sources": {k: 0 for k in CHARGE_SOURCES}, "comb_status": {}, "comb_vs_dataset_disagree": 0,
+            "mass_mz_source": {MASS_MZ_MONOISOTOPIC: 0, MASS_MZ_ISOLATION: 0},
+            "scans": []}   # one entry per exported MS2 scan without a valid reported charge
+
+def _resolve_scan_charge(rawfile, scan, info, charge_comb, dataset_charge, ms1_cache, charge_summary):
+    """Return (charge cell, mass m/z, mass m/z source) for one MS2 scan and record the decision in charge_summary."""
+    isolation_mz, mono_mz, reported_cell, parent = info[0], info[1], info[2], info[3]
+    mass_mz, mz_source = (mono_mz, MASS_MZ_MONOISOTOPIC) if (mono_mz or 0) > 0 else (isolation_mz, MASS_MZ_ISOLATION)
+    charge_summary["mass_mz_source"][mz_source] += 1
+    reported = normalize_charge(reported_cell)
+    comb, status = None, COMB_NOT_RUN
+    if reported is None and charge_comb:
+        if not (isolation_mz or 0) > 0:
+            status = COMB_NO_ISOLATION_MZ
+        else:
+            profile = _parent_ms1_profile(rawfile, parent, ms1_cache)
+            if isinstance(profile, str):
+                status = profile
+            else:
+                comb = msp_charge_comb.infer_charge(profile[0], profile[1], isolation_mz)
+                status = comb.status
+    comb_z = comb.z if comb is not None else None
+    charge, source = resolve_charge(reported, comb_z, dataset_charge)
+    charge_summary["sources"][source] += 1
+    charge_summary["comb_status"][status] = charge_summary["comb_status"].get(status, 0) + 1
+    if comb_z is not None and dataset_charge is not None and comb_z != dataset_charge:
+        charge_summary["comb_vs_dataset_disagree"] += 1
+    if source != CHARGE_SOURCE_REPORTED:
+        entry = {"scan": scan, "charge_source": source, "charge": charge or 0, "mass_mz_source": mz_source,
+                 "comb_status": status}
+        if comb is not None and comb.score is not None:
+            entry.update(comb_z=comb_z, comb_best_z=max(comb.scores, key=lambda z: comb.scores[z][0]),
+                         comb_score=round(comb.score, 4), comb_margin=round(comb.margin, 4),
+                         comb_anchor=round(comb.anchor, 4))
+        charge_summary["scans"].append(entry)
+    # A reported charge, or none at all, is written exactly as the file gave it (byte-identical rows).
+    cell = reported_cell if source in (CHARGE_SOURCE_REPORTED, CHARGE_SOURCE_NONE) else charge
+    return cell, mass_mz, mz_source
 
 #return scan number limit
 #define number of spectra to parse (TODO: make time exclusion convertible and need to be added to record file.)
@@ -213,19 +363,84 @@ def peaklist_validation(peaklist, peakintensity, debug = False):
             return False, peaklist_length
         return False, None
 
+#READER-DIAG CP-D (20261020): instrument model and software version for the diagnostics (fail soft). The instrument
+#name, serial number and file creator are not read.
+def _raw_instrument(rawfile):
+    info = {}
+    for key, call in (("model", "GetInstModel"), ("software_version", "GetInstSoftwareVersion")):
+        try:
+            value = getattr(rawfile, call)()
+            info[key] = value if isinstance(value, (str, int, float)) or value is None else str(value)
+        except Exception:
+            info[key] = None
+    return info
+
+def _backend_info():
+    info = {"name": "pymsfilereader", "available": bool(pymsreader)}
+    for pkg in ("pymsfilereader", "comtypes"):
+        try:
+            from importlib import metadata
+            info[pkg] = metadata.version(pkg)
+        except Exception:
+            info[pkg] = None
+    return info
+
+def _status_row(ms_level, scan, scan_filter, peaklist, peakintensity, peaksource, exported, **fields):
+    """Status-file row for one RAW scan. Exported peaks are always centroids (label data or the mass list)."""
+    if not exported:
+        arrays = "empty"
+    elif len(peaklist) != len(peakintensity):
+        arrays = "length_mismatch"
+    else:
+        arrays = "ok"
+    return {"ms_level": ms_level, "scan": scan, "exported": exported, "arrays_status": arrays,
+            "n_peaks": len(peaklist), "polarity": scan_polarity(scan_filter), "representation": "centroid",
+            "peak_source": peaksource, **fields}
+
 #usage: peak_extractor(pathofrawfile, raw_file_examination(rawfile))
 #def peak_extractor(rawfileinput, metadata=None, filename=None, auto=True, debug=False):
-def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extractor to 2 functions
+def convert_raw_to_csv(rawfileinput, outdir=None, debug=False, charge_comb=False, dataset_charge=None, stem=None,
+                       entry=None): #split peak_extractor to 2 functions
+    """Convert one RAW file to the MS2/MS3 temp CSVs; also writes the status file and diagnostics files (CP-D).
+
+    `stem` names every output (default: the input file stem, as before); `entry` is recorded in the diagnostics
+    (the CLI passes "cli-convert"). Returns the legacy dict plus outcome, exit_code, warnings and diagnostics
+    paths, or False when the file cannot be opened. An exception during conversion is recorded and re-raised.
+    """
+    #v0.59 CP-C.5: charge_comb / dataset_charge fill MS2 charges the file does not report (both off by default)
+    dataset_charge = validate_dataset_charge(dataset_charge)
+    if not outdir:
+        outdir = os.path.dirname(rawfileinput) or os.getcwd()
+    stem = stem or pathlib.Path(rawfileinput).stem
+    diag = ReaderDiagnostics("msprawextractor", version, last_update, rawfileinput, stem, "raw", entry=entry,
+                             settings={"charge_comb": bool(charge_comb), "dataset_charge": dataset_charge,
+                                       "comb": msp_charge_comb.parameters() if charge_comb else None},
+                             backend=_backend_info())
+    try:
+        result = _convert_raw_to_csv(rawfileinput, outdir, debug, charge_comb, dataset_charge, stem, diag)
+    except BaseException as exc:   #v0.61 R2-F6: Ctrl-C / SystemExit finish the diagnostics too; re-raised unchanged
+        diag.finish(outdir, exc)
+        raise
+    done = diag.finish(outdir)
+    if isinstance(result, dict):
+        result.update(done)
+    return result
+
+def _convert_raw_to_csv(rawfileinput, outdir, debug, charge_comb, dataset_charge, stem, diag):
     try:
         rawfile = MSFileReader(rawfileinput)
     except Exception as e:
-        print(f"[Error] MSFileReader failed: {e}")
+        print(f"[Error] MSFileReader failed: {diag.redact(e)}")   #v0.61 R2-F3: redacted
+        diag.fail(e)
         return False
+    diag.stage = "iterate"   #v0.61 R2-F7: only MSFileReader(...) above counts as "could not be opened"
+    diag.instrument = _raw_instrument(rawfile)
     # Default to the raw file’s folder, else CWD
     if not outdir:
         outdir = os.path.dirname(rawfileinput) or os.getcwd()
     
     scan_number = raw_file_examination(rawfile, auto = True, time = 0.0,debug=False)
+    diag.declared = scan_number
     #init variables for storing parsed data
     ms1list, ms2list, ms3list, errlist , unmatchlist, logs = [], [], [], [], [], []
     #from v0.4 named Tuple of (peaklist,intensity) were changed to 2 separated lists. Include length validation 
@@ -233,11 +448,15 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
     fixms2header = ('entry_no','MS1scan_no', 'MS1_isolationmass', 'MS1_monoisolationmass','chargeState','protonatedmass',
            'MS2scan_no', 'peaklist', 'peakintensity')
     ms2data.append(fixms2header)
-    fixms3header =  ('entry no','MS3scan_no', 'MS2_isolationmass', 'MS2_monoisomass', 'MS2scan_no', 'peaklist', 'peakintensity')
+    fixms3header =  ('entry no','MS2scan_no', 'MS2_isolationmass', 'MS2_monoisomass', 'MS3scan_no', 'peaklist', 'peakintensity')
     ms3data.append(fixms3header)
     #MS2peaklist = namedtuple('MS2peaklist', ('dMass', 'dIntensity'))
     #MS3peaklist = namedtuple('MS3peaklist', ('dMass', 'dIntensity'))
     ms2count, ms3count = 1, 1 
+    peak_summary = _new_peak_summary()
+    charge_summary = _new_charge_summary(bool(charge_comb), dataset_charge)
+    diag.charge = charge_summary
+    ms1_cache = {}
 
     #development area and exception prevention
     if debug:
@@ -252,30 +471,43 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
     for i in range(scan_number):
         #i starts from 0, using j for spectra count
         j = i+1
+        ms_order = rawfile.GetMSOrderForScanNum(j)   #v0.60: read once per scan
+        diag.step(j, ms_order)
         #do nothing for ms1 spectrum
-        if rawfile.GetMSOrderForScanNum(j) == 1:
+        if ms_order == 1:
             if debug:
                 ms1list.append(j)
                 #trace back ms1 spectrum list
             pass
         #extract ms2 label data (processed by Thermo library)
-        elif rawfile.GetMSOrderForScanNum(j) == 2:
+        elif ms_order == 2:
             if debug:
                 ms2list.append(j)
                 #trace back ms2 spectrum list
-            #Extract labeled data
-            peaklist = rawfile.GetLabelData(j)[0][0]
-            peakintensity = rawfile.GetLabelData(j)[0][1]
-            isolationmass = rawfile.GetPrecursorInfoFromScanNum(j)[1]
-            chargestate = rawfile.GetPrecursorInfoFromScanNum(j)[2]
-            protonatedmass = calcproton(isolationmass,chargestate) #Get protonated mass using calcproton(isolatedmass, charge)
+            #Extract peaks (label data for FTMS scans, mass list otherwise)
+            scan_filter = rawfile.GetFilterForScanNum(j) or ""
+            peaklist, peakintensity, peaksource = read_scan_peaks(rawfile, j, scan_filter)
+            if not _tally_peaks(peak_summary["ms2"], j, peaklist, peakintensity, peaksource):
+                diag.add(_status_row(2, j, scan_filter, peaklist, peakintensity, peaksource, False))
+                continue
+            precursorinfo = rawfile.GetPrecursorInfoFromScanNum(j)
+            #v0.59: charge in the agreed order; mass from the mono m/z, or the isolation m/z when the file has none
+            chargestate, massmz, mzsource = _resolve_scan_charge(rawfile, j, precursorinfo, charge_comb,
+                                                                 dataset_charge, ms1_cache, charge_summary)
+            protonatedmass = calcproton(massmz, chargestate, polarity=scan_polarity(scan_filter)) #Get protonated mass using calcproton(isolatedmass, charge)
+            scans = charge_summary["scans"]
+            entry = scans[-1] if scans and scans[-1]["scan"] == j else {"charge_source": CHARGE_SOURCE_REPORTED}
+            diag.add(_status_row(2, j, scan_filter, peaklist, peakintensity, peaksource, True,
+                                 parent_scan=precursorinfo[3], precursor_mz=precursorinfo[0], charge=chargestate,
+                                 mass=protonatedmass, mass_mz_source=mzsource,
+                                 **{k: v for k, v in entry.items() if k not in ("scan", "charge", "mass_mz_source")}))
 
             #Arrange extracted data
             ms2spectrumdata = (
                 ms2count,
-                rawfile.GetPrecursorInfoFromScanNum(j)[3],#parentScanNo, MS1
-                rawfile.GetPrecursorInfoFromScanNum(j)[0],#Isolation mass
-                isolationmass,#monoIsotopic Isolationmass
+                precursorinfo[3],#parentScanNo, MS1
+                precursorinfo[0],#Isolation mass
+                precursorinfo[1],#monoIsotopic Isolationmass
                 chargestate,#chargeState
                 protonatedmass, 
                 j, #MS2scan no
@@ -292,11 +524,16 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
             #ms2 extraction ends
         #extract ms3 label data as well (Note that position of data is not exactly the same) 
         #no validation of peaklists here since MS3 has really few peaks
-        elif rawfile.GetMSOrderForScanNum(j) == 3:
+        elif ms_order == 3:
             if debug:
                 ms3list.append(j)
                 #trace back ms3 spectrum list
-            #peaklist = MS3peaklist((rawfile.GetMassListFromScanNum(j)[0][0]), (rawfile.GetMassListFromScanNum(j)[0][1]))
+            #v0.56: read this scan's own peaks (earlier versions wrote the previous MS2 scan's arrays here)
+            scan_filter = rawfile.GetFilterForScanNum(j) or ""   #v0.60: read here for the polarity (was inside read_scan_peaks)
+            peaklist, peakintensity, peaksource = read_scan_peaks(rawfile, j, scan_filter)
+            if not _tally_peaks(peak_summary["ms3"], j, peaklist, peakintensity, peaksource):
+                diag.add(_status_row(3, j, scan_filter, peaklist, peakintensity, peaksource, False))
+                continue
             ms3spectrumdata = (
                 ms3count,
                 rawfile.GetPrecursorInfoFromScanNum(j)[3],#parent MS2 scan no
@@ -308,10 +545,18 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
                 )
             ms3data.append(ms3spectrumdata)
             ms3count +=1
+            diag.add(_status_row(3, j, scan_filter, peaklist, peakintensity, peaksource, True,
+                                 parent_scan=ms3spectrumdata[1], precursor_mz=ms3spectrumdata[2]))
         else:
             errlist.append(j)        
         i+=1
     print("Extraction finished.")
+    for level in ("ms2", "ms3"):
+        block = peak_summary[level]
+        if block["by_source"]:
+            print(f"[peaks] {level.upper()} peak sources: {block['by_source']}; exported {block['exported']}, skipped without peaks: {len(block['empty'])}")
+    print(f"[charge] MS2 charge sources: {charge_summary['sources']}; comb: {charge_summary['comb_status']}; "
+          f"mass m/z: {charge_summary['mass_mz_source']}")
     rawfile.Close()
     #close reading raw file to release memory after extracting labeled data
     
@@ -357,14 +602,17 @@ def convert_raw_to_csv(rawfileinput, outdir=None, debug=False): #split peak_extr
     else:
         #20250916 try to fix duplicate tmp files issue
     # New: extractor only writes TEMP files; GUI will finalize/rename later.
-        rawstem = pathlib.Path(rawfileinput).stem
+        rawstem = stem   #v0.60 CP-D: the input file stem unless the caller names the outputs (CLI alias)
         #v0.53
         ms2tmp_path = os.path.join(outdir, f"ms2tmp_{rawstem}.csv")
         ms3tmp_path = os.path.join(outdir, f"ms3tmp_{rawstem}.csv")
         # save_to_csv still takes a *stem*; pass the stem without .csv but with full dir
+        diag.stage = "write"
         save_to_csv(ms2tmp_path[:-4], ms2data, debug=debug)
+        diag.wrote("ms2", ms2tmp_path)   #v0.61 R2-F2: named in the diagnostics once written
         save_to_csv(ms3tmp_path[:-4], ms3data, debug=debug)
-        return {"ms2tmp": ms2tmp_path, "ms3tmp": ms3tmp_path}
+        diag.wrote("ms3", ms3tmp_path)
+        return {"ms2tmp": ms2tmp_path, "ms3tmp": ms3tmp_path, "summary": {"peaks": peak_summary, "charge": charge_summary}}
     #export log files...
     versioninfo = ["extractor info", version, last_update]
     logs.append(versioninfo)

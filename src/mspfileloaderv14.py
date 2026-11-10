@@ -1,6 +1,6 @@
 import os
-version = "1.12"   # 20261001 DB1 (T1-b): Manage References window, settings.json, prebuild CLI runner (v1.12 preview)
-last_update = 20261001
+version = "1.14"   # 20261031 CGA-TOLERANCE: CGA precursor / Score A tolerances in ppm or Da (default-off); 1.13 = 20261027 V14-FOLLOWUP: reader result + conversion options in the GUI; 1.12 = 20261001 DB1 (T1-b) Manage References
+last_update = 20261101
 import msprawextractor as mspext
 import mzmlreader as mspmzmlext
 import threading
@@ -15,6 +15,7 @@ import tkinter.simpledialog as simpledialog
 from tkinter import filedialog
 from tkinter import messagebox
 import shutil
+import errno
 import traceback
 import mspvalidator_merger as mspval
 # 20260921 S1 (v1.20 T1): GlyTouCan accession / WURCS run-time fill. Database only — never network at run time
@@ -223,6 +224,346 @@ def _cga_cache_link_trainable(files: dict, outpath: str):
     cached = files.get("_method_v1_cache_CGA")
     if isinstance(cached, dict) and isinstance(cached.get("artifacts"), dict):
         cached["artifacts"]["trainable_csv"] = {"path": os.path.normpath(outpath)}
+
+# ---- CGA-TOLERANCE (20261031): CGA precursor match (T1) and Score A fragment match (T2) tolerances, ppm or Da ------
+# Defaults are the v1.10 values. A CGA run without a tolerance in its payload keeps them, so default runs are unchanged.
+# A Da window is symmetric (±value around the observed mass); the ppm path keeps its v1.10 arithmetic (known issue 10).
+CGA_TOL_UNITS = ("ppm", "Da")
+CGA_PRECURSOR_TOL_DEFAULT = {"value": 20.0, "unit": "ppm"}
+CGA_FRAGMENT_TOL_DEFAULT = {"value": 10.0, "unit": "ppm"}
+
+def _parse_tolerance(value, unit, label="Tolerance"):
+    """GUI entry -> {"value": float > 0, "unit": "ppm" | "Da"}. Raises ValueError with a message for the user."""
+    u = str(unit or "").strip()
+    if u not in CGA_TOL_UNITS:
+        raise ValueError(f"{label}: the unit must be ppm or Da (got {unit!r}).")
+    try:
+        v = float(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}: enter a number (got {value!r}).") from None
+    if not (v > 0) or v == float("inf"):
+        raise ValueError(f"{label}: enter a positive number (got {value!r}).")
+    return {"value": v, "unit": u}
+
+def _trainable_gate_ppm(gate_on, text):
+    """CGA -> Trainable precursor gate widgets -> build_trainable_from_CGA(precursor_gate_ppm=...) (CP-C.4, 20261101).
+    Off -> None (no gate); on -> the ppm as a float, the same value v1.10's float(text) gave for its fixed "10" (10.0).
+    ppm only (Henry: CGA -> Trainable fields stay ppm). Raises ValueError with a message for the user."""
+    if not gate_on:
+        return None
+    return _parse_tolerance(text, "ppm", "CGA \u2192 Trainable precursor gate")["value"]
+
+def _tolerance_label(tol):
+    """{"value": 0.3, "unit": "Da"} -> '0.3 Da' (log lines and notices)."""
+    return f"{float(tol['value']):g} {tol['unit']}"
+
+def _cga_tolerance_kwargs(tolerances):
+    """CGA Setup payload["tolerances"] -> run_pseudolabeling keyword arguments. None / {} -> {} (v1.10 defaults)."""
+    kw = {}
+    prec = (tolerances or {}).get("precursor")
+    if prec:
+        if prec["unit"] == "Da":
+            kw["tol_da"] = float(prec["value"])
+        else:
+            kw["ppm_value"] = float(prec["value"])
+    frag = (tolerances or {}).get("fragment")
+    if frag:
+        if frag["unit"] == "Da":
+            kw["ion_tol_da"] = float(frag["value"])
+        else:
+            kw["ion_ppm"] = float(frag["value"])
+    return kw
+
+# ---- CGA-TOLERANCE CP-C (20261031): tolerances recorded in the CGA method JSON `parameters.cga` ------------------
+# Tree key `_cga_parameters` (CGA family only) = {"run": {...}, "trainable": {...}}; build_method_v1_from_tree emits it
+# as parameters.cga, normalize_method_json restores it on load (validated), and the cached CGA method is kept in step
+# (the autosave after CGA -> Trainable reuses the cache verbatim). Always written by this build; a method JSON from an
+# older build keeps `parameters.cga = {}`. The CGA -> Trainable fields stay ppm-only (Henry 2026-10-31).
+# CP-C.1 (Codex round 1): a trainable record carries the sha256 of its CSV and is used only while the file still has
+# that hash (F1); records are registered only for accepted imports (F1); unusable records are dropped, never fatal (F5).
+CGA_TRAINABLE_TOL_DEFAULTS = {"precursor_gate_ppm": 10.0, "max_abs_ppm": 20.0, "feature_ion_ppm": 10.0}
+PRED_GATE_DEFAULT = {"gate_on": True, "gate_ppm": 10.0}   # prediction tab defaults (v1.10)
+# The ML window cannot see the prepare-dataset tree (experiment_projects is local to that window), so trainable
+# records are also registered here, keyed by (trainable path, sha256): when built in this process, or restored from an
+# accepted CGA method import. Value: list of (record, source), one per distinct record (CP-C.2 R2-F1: conflicting
+# records for the same bytes are kept so the lookup can see the conflict).
+_CGA_TRAINABLE_REGISTRY = {}
+_EMPTY_PARAMETERS = {"mas": {}, "cga": {}, "scoring": {}, "ml": {}}
+_SHA_UNSET = object()   # CP-C.2 R3-F1: "no digest passed" (hash now) vs an explicit None (a capture that failed)
+
+def _norm_path_key(p):
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(p)))) if p else ""
+
+def _pos_num(v):
+    """float(v) if it is a finite number > 0, else None."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):   # CP-C.2 R2-F6: e.g. a JSON integer 10**400
+        return None
+    return f if (f > 0 and f != float("inf")) else None
+
+def _valid_tol(t):
+    return isinstance(t, dict) and t.get("unit") in CGA_TOL_UNITS and _pos_num(t.get("value")) is not None
+
+def _clean_cga_parameters(p):
+    """Keep only well-formed parts of a parameters.cga block (CP-C.1 F5): an unusable part is dropped (= unknown)."""
+    if not isinstance(p, dict):
+        return {}
+    out = {}
+    run = p.get("run")
+    if isinstance(run, dict) and _valid_tol(run.get("precursor_tolerance")) and _valid_tol(run.get("fragment_tolerance")):
+        out["run"] = json.loads(json.dumps(run))
+    tr = p.get("trainable")
+    if (isinstance(tr, dict) and isinstance(tr.get("csv"), str) and tr.get("csv")
+            and isinstance(tr.get("csv_sha256"), str) and tr.get("csv_sha256")
+            and all(_pos_num(tr.get(k)) is not None for k in ("max_abs_ppm", "feature_ion_ppm"))
+            and (tr.get("precursor_gate_ppm") is None or _pos_num(tr.get("precursor_gate_ppm")) is not None)
+            and (tr.get("cga_run") is None or (isinstance(tr.get("cga_run"), dict)
+                                               and _valid_tol(tr["cga_run"].get("precursor_tolerance"))
+                                               and _valid_tol(tr["cga_run"].get("fragment_tolerance"))))):
+        out["trainable"] = json.loads(json.dumps(tr))
+    return out
+
+def _cga_params_sync_cache(files):
+    cached = files.get("_method_v1_cache_CGA")
+    if isinstance(cached, dict):
+        if not isinstance(cached.get("parameters"), dict):          # CP-C.1 F4: null / missing / non-dict
+            cached["parameters"] = json.loads(json.dumps(_EMPTY_PARAMETERS))
+        cached["parameters"]["cga"] = json.loads(json.dumps(files.get("_cga_parameters") or {}))
+
+def _cga_record_run(files, tsv_path, prec_tol, frag_tol):
+    """Record the CGA run's precursor / Score A tolerances on the tree entry (and the cached CGA method)."""
+    if not isinstance(files, dict):
+        return
+    rec = dict(files.get("_cga_parameters") or {})
+    rec["run"] = {
+        "tsv": os.path.normpath(tsv_path) if tsv_path else None,
+        "precursor_tolerance": dict(prec_tol),
+        "fragment_tolerance": dict(frag_tol),
+        "tolerance_non_default": bool(prec_tol != CGA_PRECURSOR_TOL_DEFAULT or frag_tol != CGA_FRAGMENT_TOL_DEFAULT),
+    }
+    files["_cga_parameters"] = rec
+    _cga_params_sync_cache(files)
+
+def _cga_record_tsv(files, tsv_path):
+    """Score B enrichment may hand back a new TSV path: keep the run record pointing at the TSV the tree links."""
+    run = ((files or {}).get("_cga_parameters") or {}).get("run")
+    if isinstance(run, dict) and tsv_path:
+        run["tsv"] = os.path.normpath(tsv_path)
+        _cga_params_sync_cache(files)
+
+def _cga_record_trainable(files, csv_path, cga_tsv, thresholds, neg_opts, precursor_gate_ppm, csv_sha256=_SHA_UNSET):
+    """Record the CGA -> Trainable fields used for `csv_path` (with the CSV's sha256), plus the CGA run tolerances when
+    `cga_tsv` is the TSV of the recorded run (else cga_run = None: that TSV's tolerances are not known).
+    csv_sha256: the hash taken right after the CSV was written (CP-C.2 R2-F2); hashed here only when not passed.
+    An explicit None (the capture failed) stays None: the record is kept for provenance but has no file identity,
+    so it is never registered and never resolves at training (CP-C.3 R3-F1)."""
+    if not isinstance(files, dict):
+        return None
+    rec = dict(files.get("_cga_parameters") or {})
+    run = rec.get("run") if isinstance(rec.get("run"), dict) else None
+    same_tsv = bool(run and cga_tsv and _norm_path_key(run.get("tsv")) == _norm_path_key(cga_tsv)
+                    and _valid_tol(run.get("precursor_tolerance")) and _valid_tol(run.get("fragment_tolerance")))
+    th = thresholds or {}
+    tr = {
+        "csv": os.path.normpath(csv_path) if csv_path else None,
+        "csv_sha256": ((file_sha256(csv_path) if csv_path else None) if csv_sha256 is _SHA_UNSET
+                       else (csv_sha256 or None)),
+        "cga_tsv": os.path.normpath(cga_tsv) if cga_tsv else None,
+        "cga_run": ({"precursor_tolerance": dict(run["precursor_tolerance"]),
+                     "fragment_tolerance": dict(run["fragment_tolerance"]),
+                     "tolerance_non_default": bool(run.get("tolerance_non_default"))} if same_tsv else None),
+        "precursor_gate_ppm": None if precursor_gate_ppm is None else float(precursor_gate_ppm),
+        "max_abs_ppm": float(th.get("max_abs_ppm", 20.0)),
+        "min_ion_score": float(th.get("min_ion_score", 0.0)),
+        "feature_ion_ppm": float(th.get("ion_ppm", 10.0)),
+        "negatives": {"enabled": bool((neg_opts or {}).get("enable")),
+                      "ion_ppm": float((neg_opts or {}).get("ion_ppm", th.get("ion_ppm", 10.0)))},
+    }
+    tr["tolerance_non_default"] = bool(
+        any(tr[k] != v for k, v in CGA_TRAINABLE_TOL_DEFAULTS.items())
+        or (tr["cga_run"] or {}).get("tolerance_non_default"))
+    rec["trainable"] = tr
+    files["_cga_parameters"] = rec
+    _cga_params_sync_cache(files)
+    _cga_registry_add(tr, "built in this session")
+    return tr
+
+def _cga_registry_add(tr, source):
+    if isinstance(tr, dict) and tr.get("csv") and tr.get("csv_sha256"):
+        rec = json.loads(json.dumps(tr))
+        lst = _CGA_TRAINABLE_REGISTRY.setdefault((_norm_path_key(tr["csv"]), tr["csv_sha256"]), [])
+        if all(json.dumps(r, sort_keys=True) != json.dumps(rec, sort_keys=True) for r, _ in lst):
+            lst.append((rec, source))
+
+def _cga_register_loaded(tree_entry, method_path):
+    """Call AFTER a method import is accepted (CP-C.1 F1): registers the restored trainable record, if any."""
+    tr = ((tree_entry or {}).get("_cga_parameters") or {}).get("trainable") if isinstance(tree_entry, dict) else None
+    if isinstance(tr, dict):
+        _cga_registry_add(tr, os.path.normpath(method_path) if method_path else "loaded method")
+
+def _find_cga_record_for_trainable(train_csv, registry=None, search_dirs=(), csv_sha256=None):
+    """Training-side lookup (Henry 2026-10-31: the CGA method JSON is the carrier, no extra file).
+    A record is used only if its csv path AND sha256 match the trainable CSV as it is now (CP-C.1 F1).
+    1) `registry` (default _CGA_TRAINABLE_REGISTRY): trainables built or imported in this process;
+    2) *.method.json files in `search_dirs` whose parameters.cga.trainable matches; two matching files with
+       different records => ambiguous (not used).
+    Registry and folder candidates are pooled; more than one distinct record => ambiguous, none used, with no
+    precedence for an in-session build (CP-C.2 R2-F1, Henry 2026-10-31).
+    csv_sha256: the hash of the bytes training actually read (CP-C.2 R2-F2); hashed here only when not given.
+    Returns (record, source) on success, else (None, reason) with reason "not found" | "stale" | "ambiguous".
+    Pooled / moved / copied trainables are not resolved; a symlink / mapped-drive alias of the path is a miss."""
+    key = _norm_path_key(train_csv)
+    if not key:
+        return None, "not found"
+    sha = csv_sha256 or file_sha256(train_csv)
+    if not sha:
+        return None, "not found"
+    reg = _CGA_TRAINABLE_REGISTRY if registry is None else registry
+    found = [(dict(r), src) for r, src in (reg.get((key, sha)) or [])]
+    stale = any(k[0] == key and k[1] != sha for k in reg)
+    for d in search_dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in names:
+            if not n.lower().endswith(".method.json"):
+                continue
+            p = os.path.join(d, n)
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    m = json.load(f)
+                tr = _clean_cga_parameters(((m.get("parameters") or {}) if isinstance(m.get("parameters"), dict)
+                                            else {}).get("cga")).get("trainable")
+            except Exception:
+                continue
+            if isinstance(tr, dict) and _norm_path_key(tr.get("csv")) == key:
+                if tr.get("csv_sha256") == sha:
+                    found.append((tr, os.path.normpath(p)))
+                else:
+                    stale = True
+    distinct = {json.dumps(t, sort_keys=True) for t, _ in found}
+    if len(distinct) == 1:
+        return dict(found[0][0]), found[0][1]
+    if len(distinct) > 1:
+        return None, "ambiguous"
+    return None, ("stale" if stale else "not found")
+
+def _model_tolerance_prefill(record):
+    """Prediction prefill from a model's recorded trainable fields: only values that differ from the v1.10
+    defaults (Henry Q1). {} => today's behaviour (gate on at 10 ppm, unlabeled dialog empty, no notice).
+    A recorded gate OFF is non-default too (CP-C.1 F3): {"gate_on": False}. Unusable values are ignored (F5)."""
+    out = {}
+    if not isinstance(record, dict):
+        return out
+    if "precursor_gate_ppm" in record and record["precursor_gate_ppm"] is None:
+        out["gate_on"] = False
+    else:
+        g = _pos_num(record.get("precursor_gate_ppm"))
+        if g is not None and g != CGA_TRAINABLE_TOL_DEFAULTS["precursor_gate_ppm"]:
+            out["gate_ppm"] = g
+    f = _pos_num(record.get("feature_ion_ppm"))
+    if f is not None and f != CGA_TRAINABLE_TOL_DEFAULTS["feature_ion_ppm"]:
+        out["feature_ppm"] = f
+    return out
+
+def _read_model_cga_record(model_path):
+    """The `cga_tolerances` block of training_run.json next to a model ({} when absent or unreadable)."""
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(model_path)), "training_run.json")
+        with open(p, "r", encoding="utf-8") as f:
+            blk = (json.load(f).get("training_run") or {}).get("cga_tolerances") or {}
+        return blk if isinstance(blk, dict) else {}
+    except Exception:
+        return {}
+
+def _gate_prefill_update(auto, field_value, gate_on, prefill):
+    """Model switch (CP-C.1 F2/F3, CP-C.2 R2-F3). `auto` = state returned by the previous call: what the automatic
+    prefill set ({"field": str, "gate_on": bool}) and which widgets the user owns ({"field_user": True,
+    "on_user": True}). A widget is replaced only while it still shows the default or the automatic value and the user
+    has never overridden it; once overridden it stays the user's for the life of the ML window (Henry 2026-10-31).
+    Returns (set_field or None, set_gate_on or None, kept_list, new_auto)."""
+    auto = auto or {}
+    pre = prefill or {}
+    cur_field = str(field_value).strip()
+    want_field = _ppm_tag(pre["gate_ppm"]) if "gate_ppm" in pre else _ppm_tag(PRED_GATE_DEFAULT["gate_ppm"])
+    want_on = pre.get("gate_on", PRED_GATE_DEFAULT["gate_on"])
+    field_user = bool(auto.get("field_user")) or cur_field != auto.get("field", _ppm_tag(PRED_GATE_DEFAULT["gate_ppm"]))
+    on_user = bool(auto.get("on_user")) or bool(gate_on) != auto.get("gate_on", PRED_GATE_DEFAULT["gate_on"])
+    set_field = set_on = None
+    kept, new_auto = [], {}
+    if field_user:
+        new_auto["field_user"] = True
+        if cur_field != want_field:
+            kept.append(f"precursor gate {cur_field} ppm")
+    else:
+        if cur_field != want_field:
+            set_field = want_field
+        if "gate_ppm" in pre:
+            new_auto["field"] = want_field
+    if on_user:
+        new_auto["on_user"] = True
+        if bool(gate_on) != want_on:
+            kept.append("precursor gate " + ("on" if gate_on else "off"))
+    else:
+        if bool(gate_on) != want_on:
+            set_on = want_on
+        if "gate_on" in pre:
+            new_auto["gate_on"] = want_on
+    return set_field, set_on, kept, new_auto
+
+def _attach_gate_ownership_traces(field_var, gate_var, auto, guard):
+    """CP-C.3 R3-F2: mark a gate widget as the user's the moment the user writes to it (Tk trace), so an edit that is
+    later restored by hand still counts. `guard["programmatic"]` is True while the prefill code itself writes; those
+    writes are not ownership. Ownership flags live in `auto` (the state _gate_prefill_update keeps) for the life of
+    the ML window. Returns the two callbacks (for tests)."""
+    def _on_field(*_):
+        if not guard.get("programmatic"):
+            auto["field_user"] = True
+
+    def _on_gate(*_):
+        if not guard.get("programmatic"):
+            auto["on_user"] = True
+
+    field_var.trace_add("write", _on_field)
+    gate_var.trace_add("write", _on_gate)
+    return _on_field, _on_gate
+
+def _gate_outcome_matches_model(prefill, gate_applied, gate_ppm):
+    """CP-C.2 R2-F5: does the gate that actually ran match the model's recorded (non-default) gate?
+    None when the model has no non-default gate record; a skipped gate counts as off."""
+    pre = prefill or {}
+    if pre.get("gate_on") is False:
+        return not gate_applied
+    if "gate_ppm" in pre:
+        return bool(gate_applied) and float(gate_ppm) == float(pre["gate_ppm"])
+    return None
+
+def _gate_override_note(prefill, gate_on, gate_ppm):
+    """Notice text when a prediction's precursor gate departs from the model's recorded (non-default) gate."""
+    pre = prefill or {}
+    used = f"{_ppm_tag(gate_ppm)} ppm" if gate_on else "off"
+    if pre.get("gate_on") is False:
+        return None if not gate_on else f"The model was trained with the precursor gate off; this prediction uses {used}."
+    g = pre.get("gate_ppm")
+    if g is None or (gate_on and float(gate_ppm) == float(g)):
+        return None
+    return f"The model was trained with a precursor gate of {_ppm_tag(g)} ppm; this prediction uses {used}."
+
+def _feature_override_note(prefill, ppm_value):
+    """Notice text when the unlabeled feature window departs from the model's recorded (non-default) window."""
+    f = (prefill or {}).get("feature_ppm")
+    if f is None or float(ppm_value) == float(f):
+        return None
+    return (f"The loaded model was trained with a {_ppm_tag(f)} ppm feature window; "
+            f"these unlabeled features use {_ppm_tag(ppm_value)} ppm.")
+
+def _ppm_tag(v):
+    """Exact text for a ppm value (file-name tag and prefill): 20 -> '20' (as v1.10 wrote it), 12.345678 ->
+    '12.345678' (round-trips through float(); CP-C.1 F9)."""
+    f = float(v)
+    return str(int(f)) if f.is_integer() else repr(f)
 
 # ---- DB1 §6 (decisions 7a / 8a / 14a): the prebuild CLI as a subprocess for Manage References ----------------
 # The CLI stays the ONLY network path; this runner never touches Tk. A daemon reader thread pushes stdout lines and
@@ -933,6 +1274,12 @@ def _macos_append_compound_suffix(path, compound_suffix):
 # v1.3 (future) allow multiple methods exist under one sample (need 1.2 update first to satisfy requirements)
 # v1.21 (future) start cleaning unneeded code blocks, move changelog to wiki and other versionfiles.
 # v1.2 (future) fix the tree selection/display logic (would probably bundled with v1.1 update)
+# v1.13 (20261027, V14-FOLLOWUP CP-B.3, Codex round 3): only a confirmed absence (FileNotFoundError from lstat) counts as no earlier diagnostics file (R3-F1)
+# v1.13 (20261027, V14-FOLLOWUP CP-B.2, Codex round 2): a diagnostics file that existed but could not be read before the call is not used after it (R2-F1)
+# v1.13 (20261027, V14-FOLLOWUP CP-B.1, Codex round 1): the reader's own outcome decides before any diagnostics are read (F1); a dict names its diagnostics files, else the file must change during the call (F2); EXDEV copy fallback when promoting across filesystems (F5)
+# v1.13 (20261027, V14-FOLLOWUP CP-C): "Conversion options" dialog before GUI conversion (charge from the MS1 isotope pattern, dataset charge; both off = v1.10 reader calls); settings recorded in the project metadata JSON
+# v1.13 (20261027, V14-FOLLOWUP CP-B): conversion shows the reader outcome/warnings (log; dialog for failed/partial); failed is never promoted; .reader_diag.json/.txt + .scan_status.tsv move with the CSVs under the save name
+# v1.12 (20261013), adding native glycan support at metadata level (real processing is still placeholder)
 # v1.12 (20261001 preview, DB1/T1-b): Manage References window (summary, Select/Set as default/Remember, prebuild + rebuild-log via the CLI subprocess), settings.json, Prepare Dataset row 4, sample right-click reference info. Flag off = v1.10 behaviour.
 # v1.1+ refactoring v1.09.23 fix conversion early fire issue. If conversion at Thermo COM level fails, need to close app to release. Marked for future fix.
 # v1.1 [stable version for publish] fix the old macos crash issue in tkinter, confirmed full pipeline executable on both Windows (fixed package version) and MacOS (py3.12+, latest packages) 
@@ -1193,7 +1540,7 @@ class CGASetupWindow(tk.Toplevel):
 
         ttk.Label(meta_frame, text="Derivatization Type:").grid(row=r, column=0, sticky="w", padx=10, pady=4)
         ttk.Combobox(meta_frame, state="readonly", width=20,
-                    values=["PerMe", "PerMe(Freeend)", "PerMe(Reduced)", "None"],
+                    values=["PerMe", "PerMe(Freeend)", "PerMe(Reduced)", "Native", "Native(Reduced)", "None"],
                     textvariable=self.meta_vars["Derivatization Type"]).grid(row=r, column=1, sticky="w", padx=8, pady=4)
         # tiny reset link
         def _reset_meta():
@@ -1561,6 +1908,31 @@ class CGASetupWindow(tk.Toplevel):
             wraplength=760
         ).grid(row=2, column=1, sticky="we", padx=8, pady=4)
 
+        # 20261031 CGA-TOLERANCE T1/T2: CGA mass tolerances, ppm or Da. Prefilled with the v1.10 defaults on every open.
+        tol_frame = ttk.LabelFrame(self, text="Mass tolerances (CGA matching)")
+        tol_frame.pack(fill="x", padx=12, pady=(6, 0))
+        self.prec_tol_var = tk.StringVar(value=f"{CGA_PRECURSOR_TOL_DEFAULT['value']:g}")
+        self.prec_tol_unit_var = tk.StringVar(value=CGA_PRECURSOR_TOL_DEFAULT["unit"])
+        ttk.Label(tol_frame, text="Precursor match:").grid(row=0, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(tol_frame, textvariable=self.prec_tol_var, width=8).grid(row=0, column=1, sticky="w")
+        ttk.Combobox(tol_frame, textvariable=self.prec_tol_unit_var, values=CGA_TOL_UNITS,
+                     state="readonly", width=5).grid(row=0, column=2, sticky="w", padx=(4, 0))
+        ttk.Label(tol_frame, text=f"default {_tolerance_label(CGA_PRECURSOR_TOL_DEFAULT)}",
+                  foreground="gray").grid(row=0, column=3, sticky="w", padx=10)
+        self.frag_tol_var = tk.StringVar(value=f"{CGA_FRAGMENT_TOL_DEFAULT['value']:g}")
+        self.frag_tol_unit_var = tk.StringVar(value=CGA_FRAGMENT_TOL_DEFAULT["unit"])
+        ttk.Label(tol_frame, text="Score A fragment match:").grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(tol_frame, textvariable=self.frag_tol_var, width=8).grid(row=1, column=1, sticky="w")
+        ttk.Combobox(tol_frame, textvariable=self.frag_tol_unit_var, values=CGA_TOL_UNITS,
+                     state="readonly", width=5).grid(row=1, column=2, sticky="w", padx=(4, 0))
+        ttk.Label(tol_frame, text=f"default {_tolerance_label(CGA_FRAGMENT_TOL_DEFAULT)}",
+                  foreground="gray").grid(row=1, column=3, sticky="w", padx=10)
+        ttk.Label(tol_frame, foreground="gray", justify="left", wraplength=760,
+                  text=("Ion-trap data whose precursor mass is the isolation m/z need wider windows than the "
+                        "defaults (see the user manual). Wider windows here also need the CGA → Trainable "
+                        "fields (precursor gate, max |ppm_error|, ion list ppm) widened.")
+                  ).grid(row=2, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+
         # --- Footer buttons (top row: preparation) ---
         btns_top = ttk.Frame(self)
         btns_top.pack(fill="x", padx=8, pady=(6, 2))
@@ -1666,6 +2038,16 @@ class CGASetupWindow(tk.Toplevel):
                     messagebox.showerror("Score B Workbook", msg)
                     return
 
+            # 20261031 CGA-TOLERANCE T1: validate before anything runs
+            try:
+                prec_tol = _parse_tolerance(self.prec_tol_var.get(), self.prec_tol_unit_var.get(),
+                                            "Precursor match tolerance")
+                frag_tol = _parse_tolerance(self.frag_tol_var.get(), self.frag_tol_unit_var.get(),
+                                            "Score A fragment match tolerance")
+            except ValueError as e:
+                messagebox.showerror("CGA tolerance", str(e), parent=self)
+                return
+
             payload = {
                 "flags": self.collect_flags(),
                 "metadata": {
@@ -1682,6 +2064,7 @@ class CGASetupWindow(tk.Toplevel):
                 "insilico_csv": self.insilico_path_var.get().strip(),
                 "ionlist_path": self.ionlist_path_var.get().strip(),
                 "score_b_workbook_path": scoreb_path,
+                "tolerances": {"precursor": prec_tol, "fragment": frag_tol},   # 20261031 CGA-TOLERANCE
             }
             cb = self.on_start
             if cb:
@@ -1689,6 +2072,9 @@ class CGASetupWindow(tk.Toplevel):
 
         ttk.Button(btns_bottom, text="Start CGA analysis", command=_start).pack(side="left", padx=2)
         ttk.Button(btns_bottom, text="Close", command=self.destroy).pack(side="left", padx=4)
+        # 20261101 CGA-TOLERANCE CP-D.2: the tolerance frame pushed the requested height past 800 px and pack clips the
+        # last-packed widgets first (Start/Close); bottom-anchor these so the flags panel is the one clipped (Henry, Lab PC)
+        for _w in (btns_bottom, btns_top, tol_frame, links_frame): _w.pack_configure(side="bottom", before=flags_frame)
 
 
     def collect_flags(self):
@@ -1756,8 +2142,9 @@ def widget_alive(w):
 
 # Metadata Editor (Shows when conversion of raw/mzml is finished, or filling missing metadata in prepare dataset window)
 class MetadataEditorWindow:
-    def __init__(self, parent, raw_file_list, on_each_metadata_ready_callback, on_finish=None, output_dir=None, skip_conversion=False, input_kind=None):
+    def __init__(self, parent, raw_file_list, on_each_metadata_ready_callback, on_finish=None, output_dir=None, skip_conversion=False, input_kind=None, conversion_options=None):
         self.parent = parent
+        self.conversion_options = dict(conversion_options or CONVERSION_OPTIONS_OFF)  # 20261027 CP-C: precursor-charge options
         self.raw_file_list = raw_file_list
         self.callback = on_each_metadata_ready_callback
         self.on_finish = on_finish
@@ -1799,7 +2186,7 @@ class MetadataEditorWindow:
                 var = tk.StringVar()
                 entry = ttk.Combobox(
                     self.window, textvariable=var,
-                    values=["PerMe(Freeend)", "PerMe(Reduced)", "Others"],  # Add more if needed
+                    values=["PerMe(Freeend)", "PerMe(Reduced)", "Native", "Native(Reduced)" , "Others"],  # Add more if needed, 20261012: Native support
                     state="readonly", width=20
                 )
                 entry.current(0)
@@ -1875,7 +2262,7 @@ class MetadataEditorWindow:
     #20251001 replace
     def on_conversion_complete(self):
         # Status (your existing line)
-        self._safe_set_status("Conversion complete. Ready for metadata.", fg="green")
+        self._safe_set_status(*reader_result_status(getattr(self, "_reader_result", None)))  # 20261027 CP-B: exit 0 keeps the old text
         # Safely reflect current raw path into the (readonly) Entry if it still exists
         try:
             entry = getattr(self, "raw_file_entry", None)
@@ -1938,18 +2325,33 @@ class MetadataEditorWindow:
                 return
 
             self._convert_in_progress = True
+            self._reader_result = None
+            # 20261027 V14-FOLLOWUP CP-B (D-4): the folder the reader actually writes to, captured at call time
+            # (output_dir is None for the first file of a batch, set by generate() for the later ones)
+            reader_name = "mzmlreader" if getattr(self, "input_kind", "raw") == "mzml" else "msprawextractor"
+            conv_outdir = reader_output_folder(raw_file, self.output_dir)
+            conv_started = time.time()
+            conv_before = reader_diag_fingerprint(raw_file, conv_outdir)   # V14F-F2: a file left from an earlier run
             try:
                 # ask extractor to write into the chosen output folder (if any)
                 if getattr(self, "input_kind", "raw") == "mzml":
                     res = mspmzmlext.extract_mzML(raw_file,
                                                   outdir=self.output_dir,
-                                                  debug=True)
+                                                  debug=True,
+                                                  **conversion_reader_kwargs(getattr(self, "conversion_options", None)))
                 else:
                     res = mspext.convert_raw_to_csv(
                         raw_file,
                         outdir=self.output_dir,
-                        debug=True
+                        debug=True,
+                        **conversion_reader_kwargs(getattr(self, "conversion_options", None))
                     )
+
+                # 20261027 CP-B: outcome from the reader's return and its .reader_diag.json; failed is never promoted (D-2)
+                self._reader_result = summarize_reader_result(res, None, raw_file, conv_outdir, conv_started, reader_name,
+                                                              before=conv_before)
+                if not self._reader_result["promote"]:
+                    raise ReaderConversionFailed(self._reader_result["reason"])
 
                 def _norm_path(p: str | None) -> str | None:
                     """Make absolute; if it's a bare name, assume output_dir (else CWD)."""
@@ -1978,11 +2380,18 @@ class MetadataEditorWindow:
                 logger.log(f"[convert] MS3 temp exists immediately after conversion: {os.path.exists(tmp_ms3) if tmp_ms3 else None}")
 
                 self._convert_in_progress = False
+                self._safe_after(0, self._report_reader_result, self._reader_result)
                 self._safe_after(0, self.on_conversion_complete)
 
             except Exception as e:
                 self._convert_in_progress = False
                 logger.log(f"[FATAL] Exception during raw file conversion: {e}")
+                # 20261027 CP-B: the reason from a current .reader_diag.json (a stale one is ignored, D-4)
+                if not isinstance(e, ReaderConversionFailed) or not self._reader_result:
+                    self._reader_result = summarize_reader_result(None, e, raw_file, conv_outdir, conv_started, reader_name,
+                                                                  before=conv_before)
+                for line in reader_result_log_lines(self._reader_result):
+                    logger.log(line)
                 # 20260518 B-10: marshal to Tk main thread (was direct call from worker)
                 self._safe_after(0, lambda: self._enter_error_mode("An error occurred. Please check the log."))
 
@@ -1994,13 +2403,18 @@ class MetadataEditorWindow:
                 except Exception as ce:
                     logger.log(f"[WARNING] Cleanup failed: {ce}")
 
-                self._safe_after(
-                    0,
-                    lambda err=e: messagebox.showerror(
-                        "Thermo Library Error",
-                        f"Raw file could not be processed.\n\nDetails:\n{err}"
+                if isinstance(e, ReaderConversionFailed):
+                    self._safe_after(0, lambda msg=reader_result_message(self._reader_result, raw_file):
+                                     messagebox.showerror("Conversion failed", msg))
+                else:
+                    self._safe_after(
+                        0,
+                        lambda err=e, why=self._reader_result.get("diag_reason"): messagebox.showerror(
+                            "Thermo Library Error",
+                            f"Raw file could not be processed.\n\nDetails:\n{err}"
+                            + (f"\n\nReader diagnostics: {why}" if why else "")
+                        )
                     )
-                )
                 self._safe_after(0, self._update_main_status_for_batch_state)
                 self._safe_after(500, self._attempt_close_after_error)
             finally:
@@ -2141,6 +2555,15 @@ class MetadataEditorWindow:
         # flip main window NOW
         self._safe_after(0, self._update_main_status_for_batch_state)
 
+    def _report_reader_result(self, summary):
+        """20261027 V14-FOLLOWUP CP-B: the reader's outcome and warnings in the log pane; a dialog only for partial
+        (a failed conversion goes through the error path in background_conversion)."""
+        for line in reader_result_log_lines(summary):
+            logger.log(line)
+        if (summary or {}).get("dialog") == "partial":
+            messagebox.showwarning("Partial conversion",
+                                   reader_result_message(summary, getattr(self, "current_raw_file", "")))
+
     def _update_main_status_for_batch_state(self):
         try:
             more_pending = self.current_index < (len(self.raw_file_list) - 1)
@@ -2167,6 +2590,13 @@ class MetadataEditorWindow:
                 logger.log("[generate] blocked: temp paths not ready yet")
                 return
 
+            # 20261027 CP-B (D-2): a failed conversion is never promoted (load_file normally stops it earlier)
+            rr = getattr(self, "_reader_result", None)
+            if rr and not rr.get("promote", True):
+                messagebox.showerror("Conversion failed", reader_result_message(rr, getattr(self, "current_raw_file", "")))
+                logger.log("[generate] blocked: the reader reported a failed conversion")
+                return
+
         if self.output_dir is None:
             selected_dir = filedialog.askdirectory(
                 title="Select folder to save metadata and output files",
@@ -2186,6 +2616,9 @@ class MetadataEditorWindow:
         extractdate = time.strftime("%Y%m%d_%H%M%S")
         self.metadata["Parameters when GlycoMSP launched"] = ["Autofilled by GUI"]
         self.metadata["Date of file extracted from raw file"] = extractdate
+        if not self.skip_conversion:
+            # 20261027 CP-C: the precursor-charge options this conversion used (additive keys)
+            self.metadata.update(conversion_metadata_entries(getattr(self, "conversion_options", None)))
 
         # resolve raw path
         raw_path = ""
@@ -2270,6 +2703,12 @@ class MetadataEditorWindow:
                     self.files["ms3"] = os.path.abspath(final_ms3)
                     self.files.pop("ms2tmp", None)
                     self.files.pop("ms3tmp", None)
+                    # 20261027 CP-B: the reader's diagnostics follow the CSVs under the final save name
+                    rr = getattr(self, "_reader_result", None) or {}
+                    promote_reader_diagnostics(rr.get("paths") or {}, self.output_dir, savename,
+                                               final_ms2, final_ms3, logger)
+                    if rr.get("outcome") == "partial":
+                        logger.log(f"[finalize] partial conversion promoted with its warning; see {savename}.reader_diag.txt")
 
             except Exception as e:
                 logger.log(f"[FATAL] Finalize failed: {e}")
@@ -2515,6 +2954,7 @@ def promote_temp_to_final(src: str, dst: str, logger):
     """Promote temp→final.
     - If same drive/volume: os.replace (atomic).
     - Else: copy2 then remove src (Windows cross-drive).
+    - Rename refused as another filesystem (EXDEV, macOS/Linux volumes): copy2 then remove src.
     """
     dst = os.path.abspath(dst)
     src = os.path.abspath(src)
@@ -2524,12 +2964,338 @@ def promote_temp_to_final(src: str, dst: str, logger):
         raise FileNotFoundError(f"Temp file missing: {src}")
 
     if same_drive(src, dst):
-        os.replace(src, dst)
+        try:
+            os.replace(src, dst)
+        except OSError as e:
+            # 20261027 V14-FOLLOWUP (Codex V14F-F5): on macOS/Linux splitdrive() has no drive, so two volumes
+            # look the same and the rename fails with EXDEV; copy, and remove the source only after the copy
+            if getattr(e, "errno", None) != errno.EXDEV:
+                raise
+            shutil.copy2(src, dst)
+            os.remove(src)
+            logger.log(f"[finalize] Promoted (copy+delete) {src} → {dst} (other filesystem)")
+            return
         logger.log(f"[finalize] Promoted (atomic) {src} → {dst}")
     else:
         shutil.copy2(src, dst)
         os.remove(src)
         logger.log(f"[finalize] Promoted (copy+delete) {src} → {dst} (cross-drive)")
+
+
+# 20261027 V14-FOLLOWUP CP-B: the reader's result in the GUI (ticket WP-A; D-2, D-4). The readers are unchanged:
+# they return a dict with outcome/exit_code/warnings/diagnostics, False when the input cannot be opened, or raise;
+# every case also writes <stem>.reader_diag.json/.txt and <stem>.scan_status.tsv into the folder they wrote to.
+READER_DIAG_FILES = (("json", ".reader_diag.json"), ("txt", ".reader_diag.txt"), ("status_tsv", ".scan_status.tsv"))
+
+
+class ReaderConversionFailed(RuntimeError):
+    """The reader finished but reported failed (or returned False): nothing is promoted (D-2)."""
+
+
+def reader_output_folder(input_path, outdir):
+    """The folder the readers write to: `outdir`, else the input file's folder, else the working folder (as they do)."""
+    return outdir or os.path.dirname(input_path or "") or os.getcwd()
+
+
+DIAG_FINGERPRINT_UNREADABLE = "unreadable"   # a file was there before the call but could not be read
+
+
+def reader_diag_fingerprint(input_path, outdir):
+    """The <stem>.reader_diag.json already in the reader's folder before a call: None (confirmed absent), its sha1,
+    or DIAG_FINGERPRINT_UNREADABLE (its state could not be established: any other lstat error, a broken link, an
+    open/read failure; Codex V14F-R2-F1, R3-F1). Never raises. A file still byte-identical after the call cannot
+    be shown to have been rewritten by it (Codex V14F-F2)."""
+    try:
+        path = os.path.join(outdir, Path(input_path).stem + ".reader_diag.json")
+        try:
+            os.lstat(path)   # not os.path.lexists: it reports every OSError (EACCES, EIO) as "absent"
+        except FileNotFoundError:
+            return None
+        with open(path, "rb") as fh:
+            return hashlib.sha1(fh.read()).hexdigest()
+    except Exception:
+        return DIAG_FINGERPRINT_UNREADABLE
+
+
+def load_reader_diagnostics(input_path, outdir, started, reader=None, json_path=None, before=None):
+    """Read <stem>.reader_diag.json written by this conversion. Returns (diag or None, status).
+
+    status: fresh / missing / unreadable / wrong_type / stale / unchanged / unverifiable. Fresh means: GlycoMSP reader
+    diagnostics, schema 1.x, the expected reader, the input's stem and size, finished no earlier than the second this
+    call started (the reader stamps whole seconds with the same clock), and, when `before` (reader_diag_fingerprint)
+    is given, not byte-identical to the file found before the call; a file that was there but could not be read
+    before the call is "unverifiable". Anything else is not used, so an older file never speaks for this
+    conversion (D-4).
+    """
+    try:
+        stem = Path(input_path).stem
+        path = json_path or os.path.join(outdir, stem + ".reader_diag.json")
+        if not os.path.isfile(path):
+            return None, "missing"
+        if before == DIAG_FINGERPRINT_UNREADABLE:   # freshness cannot be established (V14F-R2-F1)
+            return None, "unverifiable"
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            diag = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return None, "unreadable"
+        if before is not None and hashlib.sha1(raw).hexdigest() == before:
+            return None, "unchanged"
+        if (not isinstance(diag, dict) or diag.get("json_type") != "glycomsp.reader_diagnostics"
+                or not str(diag.get("schema_version", "")).startswith("1.")):
+            return None, "wrong_type"
+        if reader and (diag.get("tool") or {}).get("reader") != reader:
+            return None, "wrong_type"
+        import calendar
+        finished = calendar.timegm(time.strptime(diag["timing"]["finished_utc"], "%Y-%m-%dT%H:%M:%SZ"))
+        if finished < int(started):
+            return None, "stale"
+        info = diag.get("input") or {}
+        if info.get("alias") != stem:
+            return None, "stale"
+        size = info.get("size_bytes")
+        if size is not None and os.path.isfile(input_path) and os.path.getsize(input_path) != size:
+            return None, "stale"
+        diag["_path"] = os.path.abspath(path)
+        return diag, "fresh"
+    except Exception:
+        return None, "unreadable"
+
+
+def _reader_diag_reason(diag):
+    """One line from the diagnostics: the explanation and the failure, if any."""
+    parts = []
+    if diag.get("explanation"):
+        parts.append(str(diag["explanation"]))
+    f = diag.get("failure")
+    if isinstance(f, dict) and f:
+        parts.append(f"stage {f.get('stage')}: {f.get('exception')}: {f.get('message')}")
+    elif f:
+        parts.append(str(f))
+    return " ".join(parts)
+
+
+def summarize_reader_result(res, exc, input_path, outdir, started, reader=None, before=None):
+    """Judge one reader call for the GUI. Never raises.
+
+    res: the reader's return (dict / tuple / False / None); exc: the exception it raised, if any; before: the
+    reader_diag_fingerprint taken before the call. The outcome is settled first and from the return alone: a dict's
+    own outcome, failed for False, None and exceptions (D-2). Nothing read from the diagnostics can change it (Codex
+    V14F-F1); a malformed file is dropped. A dict from a current reader names its diagnostics files and only those
+    are read (none named: "not_written"); otherwise the usual path is read and must have changed during the call
+    (V14F-F2). The diagnostics paths are kept for promotion only when fresh (D-4).
+    """
+    out = {"outcome": None, "exit_code": None, "warnings": [], "reason": "", "diag_reason": "", "promote": True,
+           "dialog": None, "paths": {}, "diag_status": "not_read", "diag_txt": None, "diagnostics_error": None}
+    is_dict = isinstance(res, dict)
+    if is_dict and "outcome" in res:
+        out.update(outcome=res.get("outcome"), exit_code=res.get("exit_code"),
+                   diagnostics_error=res.get("diagnostics_error"))
+    elif not isinstance(res, (dict, list, tuple)):
+        out.update(outcome="failed", exit_code=5)      # False / None / an exception: failed whatever the file says
+    failed = out["outcome"] == "failed"
+    out["promote"] = not failed
+    out["dialog"] = out["outcome"] if out["outcome"] in ("failed", "partial") else None
+
+    if is_dict and "outcome" in res:
+        try:
+            out["warnings"] = list(res.get("warnings") or [])
+        except Exception:
+            out["warnings"] = [f"(unreadable warnings: {res.get('warnings')!r})"]
+
+    diag = None
+    try:
+        if is_dict and "diagnostics" in res:
+            named = res.get("diagnostics")
+            json_path = named.get("json") if isinstance(named, dict) else None
+            diag, status = ((load_reader_diagnostics(input_path, outdir, started, reader, json_path) if json_path
+                             else (None, "not_written")))
+        else:
+            diag, status = load_reader_diagnostics(input_path, outdir, started, reader, before=before)
+        if diag is not None:
+            base = diag["_path"][:-len(".reader_diag.json")]
+            paths = {k: base + sfx for k, sfx in READER_DIAG_FILES if os.path.isfile(base + sfx)}
+            why = _reader_diag_reason(diag)
+            extra = list(diag.get("warnings") or []) if failed and not is_dict else out["warnings"]
+            out.update(paths=paths, diag_txt=paths.get("txt"), diag_reason=why, warnings=extra)
+        out["diag_status"] = status
+    except Exception as e:   # malformed diagnostics are dropped; the outcome above stands
+        diag = None
+        out.update(paths={}, diag_txt=None, diag_reason="", diag_status=f"error: {type(e).__name__}")
+
+    if failed:
+        try:
+            if out["diag_reason"]:
+                out["reason"] = out["diag_reason"]
+            elif exc is not None:
+                out["reason"] = f"{type(exc).__name__}: {exc}"
+            elif is_dict:
+                out["reason"] = "The reader reported a failed conversion."
+            else:
+                out["reason"] = f"The reader returned {res!r}: the input could not be opened."
+            if diag is None:
+                out["reason"] += f" (no current diagnostics file: {out['diag_status']})"
+        except Exception:
+            out["reason"] = "The reader reported a failed conversion."
+    return out
+
+
+def reader_result_log_lines(summary):
+    """Log-pane lines for one conversion."""
+    s = summary or {}
+    if not s.get("outcome"):
+        return ["[reader] outcome: not reported by the reader"]
+    label = s["outcome"] + (" with warnings" if s.get("exit_code") == 3 else "")
+    lines = [f"[reader] outcome: {label} (exit code {s.get('exit_code')})"]
+    lines += [f"[reader] warning: {w}" for w in s.get("warnings") or []]
+    if s.get("outcome") == "failed" and s.get("reason"):
+        lines.append(f"[reader] reason: {s['reason']}")
+    if s.get("diagnostics_error"):
+        lines.append(f"[reader] the diagnostics files could not be written: {s['diagnostics_error']}")
+    if s.get("diag_txt"):
+        lines.append(f"[reader] diagnostics: {s['diag_txt']}")
+    else:
+        lines.append(f"[reader] diagnostics file not used ({s.get('diag_status')})")
+    return lines
+
+
+def reader_result_message(summary, input_path=""):
+    """Dialog text for a failed or partial conversion."""
+    s = summary or {}
+    name = os.path.basename(input_path or "")
+    where = f"\n\nDetails: {s['diag_txt']}" if s.get("diag_txt") else ""
+    if s.get("outcome") == "partial":
+        warn = "".join(f"\n- {w}" for w in s.get("warnings") or [])
+        return (f"{name}: partial conversion (exit code 4). Some spectra could not be decoded and were not exported."
+                f"{warn}\n\nThe CSVs hold the rest and will be saved with this warning.{where}")
+    return (f"{name}: the conversion failed (exit code {s.get('exit_code', 5)}).\n\n{s.get('reason', '')}"
+            f"\n\nNothing is promoted to the output folder; the reader's files stay where it wrote them.{where}")
+
+
+def reader_result_status(summary):
+    """(text, colour) for the editor's status line after a conversion; exit code 0 keeps the old text."""
+    code = (summary or {}).get("exit_code")
+    if code == 3:
+        return "Conversion complete with warnings (see log). Ready for metadata.", "orange"
+    if code == 4:
+        return "Conversion partial (see log). Ready for metadata.", "orange"
+    return "Conversion complete. Ready for metadata.", "green"
+
+
+def promote_reader_diagnostics(paths, out_dir, savename, final_ms2, final_ms3, logger):
+    """Move the reader's diagnostics next to the promoted CSVs as <savename>.reader_diag.json/.txt and
+    <savename>.scan_status.tsv, then rewrite their output references to the final names. Returns {key: dst}.
+    A failure here is logged and never undoes the CSVs."""
+    moved = {}
+    for key, suffix in READER_DIAG_FILES:
+        src = (paths or {}).get(key)
+        if not src or not os.path.isfile(src):
+            continue
+        dst = os.path.join(out_dir, savename + suffix)
+        try:
+            promote_temp_to_final(src, dst, logger)
+            moved[key] = dst
+        except Exception as e:
+            logger.log(f"[WARNING] diagnostics finalize failed ({os.path.basename(src)}): {e}")
+    if "json" in moved:
+        try:
+            from msp_spectrum_record import update_diagnostics_outputs
+            names = {"ms2_csv": os.path.basename(final_ms2), "ms3_csv": os.path.basename(final_ms3)}
+            if "status_tsv" in moved:
+                names["status_tsv"] = os.path.basename(moved["status_tsv"])
+            update_diagnostics_outputs(moved["json"], **names)
+        except Exception as e:
+            logger.log(f"[WARNING] diagnostics references not updated: {e}")
+    return moved
+
+
+# 20261027 V14-FOLLOWUP CP-C: precursor-charge options for GUI conversion (ticket WP-B; dialog text approved by
+# Henry 20261027). The same reader arguments as msp_extract_cli convert --charge-comb / --dataset-charge.
+CONVERSION_OPTIONS_OFF = {"charge_comb": False, "dataset_charge": None}
+DATASET_CHARGE_ERROR = "Dataset charge must be a whole number other than 0 (for example 1 or 2), or blank."
+
+
+def parse_dataset_charge_text(text):
+    """Dialog entry -> dataset charge: blank -> None, otherwise the reader's own rule (non-zero integer, sign ignored).
+    Raises ValueError(DATASET_CHARGE_ERROR)."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    from msp_spectrum_record import validate_dataset_charge
+    try:
+        return validate_dataset_charge(int(s))
+    except (ValueError, TypeError):
+        raise ValueError(DATASET_CHARGE_ERROR) from None
+
+
+def conversion_reader_kwargs(options):
+    """Reader keyword arguments for the chosen options; {} when both are off, so the readers are called as before."""
+    o = options or {}
+    kw = {}
+    if o.get("charge_comb"):
+        kw["charge_comb"] = True
+    if o.get("dataset_charge") is not None:
+        kw["dataset_charge"] = o["dataset_charge"]
+    return kw
+
+
+def conversion_metadata_entries(options):
+    """The metadata keys that record the options (additive)."""
+    o = options or CONVERSION_OPTIONS_OFF
+    return {"Conversion charge comb": bool(o.get("charge_comb")),
+            "Conversion dataset charge": o.get("dataset_charge")}
+
+
+def ask_conversion_options(parent):
+    """Modal "Conversion options" dialog before a GUI conversion. Both options start off every time.
+    Returns {"charge_comb": bool, "dataset_charge": int or None}, or None when the user cancels."""
+    dlg = tk.Toplevel(parent)
+    dlg.title("Conversion options")
+    dlg.resizable(False, False)
+    comb_var = tk.BooleanVar(value=False)
+    charge_var = tk.StringVar(value="")
+    result = {}
+    note = dict(wraplength=460, justify="left", fg="gray30")
+
+    tk.Label(dlg, justify="left",
+             text="Precursor charge for MS2 spectra whose file does not report one.\n"
+                  "Leave both off for the usual conversion.").grid(row=0, column=0, columnspan=2, sticky="w",
+                                                                    padx=12, pady=(12, 8))
+    tk.Checkbutton(dlg, text="Calculate the charge from the MS1 isotope pattern (charge 1–3)",
+                   variable=comb_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=8)
+    tk.Label(dlg, text="Reads the spacing of the precursor's isotope peaks in its parent MS1 scan. Used only where "
+                       "the file gives no charge; a charge the file reports is never changed. Needs profile MS1 "
+                       "(ion-trap RAW; for mzML, MS1 converted without peak picking).",
+             **note).grid(row=2, column=0, columnspan=2, sticky="w", padx=(32, 12), pady=(0, 8))
+    tk.Label(dlg, text="Dataset charge for the rest (blank = off):").grid(row=3, column=0, sticky="w", padx=12)
+    entry = tk.Entry(dlg, textvariable=charge_var, width=6)
+    entry.grid(row=3, column=1, sticky="w", padx=6)
+    tk.Label(dlg, text="One charge for every MS2 spectrum still without one after the step above, e.g. 1. The "
+                       "polarity comes from each scan, so enter 1, not −1. Leave blank if your files report "
+                       "charges.",
+             **note).grid(row=4, column=0, columnspan=2, sticky="w", padx=(32, 12), pady=(0, 8))
+    tk.Label(dlg, text="Applies to every file in this batch; saved in each project's metadata file.",
+             justify="left").grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
+    def on_convert():
+        try:
+            charge = parse_dataset_charge_text(charge_var.get())
+        except ValueError as e:
+            messagebox.showerror("Conversion options", str(e), parent=dlg)
+            return
+        result.update(charge_comb=bool(comb_var.get()), dataset_charge=charge)
+        dlg.destroy()
+
+    buttons = tk.Frame(dlg)
+    buttons.grid(row=6, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12))
+    tk.Button(buttons, text="Convert", command=on_convert).pack(side="left", padx=5)
+    tk.Button(buttons, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
+    dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+    dlg.transient(parent)
+    dlg.grab_set()
+    parent.wait_window(dlg)
+    return dict(result) if result else None
 
 # Spectral file processing block Ends
 # ========================
@@ -2565,6 +3331,10 @@ def launch_metadata_batch():
         except Exception as e:
             messagebox.showerror("pymzML Module Missing", f"Could not import mzmlreader.\n\n{e}")
             return
+        conv_options = ask_conversion_options(root)   # 20261027 CP-C: precursor-charge options, both off by default
+        if conv_options is None:
+            reset_main_status()
+            return
         status_var.set("Converting mzML file to csv...check the metadata assignment window.")
         progress.start()
         MetadataEditorWindow(
@@ -2572,7 +3342,8 @@ def launch_metadata_batch():
             mzml_list,
             on_metadata_ready,
             on_finish=reset_main_status,
-            input_kind="mzml"
+            input_kind="mzml",
+            conversion_options=conv_options
             )
         # 20260519 [B-23-E] removed Preview notification window. mzML is now functional, 
         # the concern of minimal requirements for mzML conversion can be found at user manuals
@@ -2601,9 +3372,14 @@ def launch_metadata_batch():
         return
 
     rawfilelist = selected_files["raw"]
+    conv_options = ask_conversion_options(root)   # 20261027 CP-C: precursor-charge options, both off by default
+    if conv_options is None:
+        reset_main_status()
+        return
     status_var.set("Converting raw file to csv...check the metadata assignment window.")
     progress.start()
-    MetadataEditorWindow(root, rawfilelist, on_metadata_ready, on_finish=reset_main_status)
+    MetadataEditorWindow(root, rawfilelist, on_metadata_ready, on_finish=reset_main_status,
+                         conversion_options=conv_options)
 
 
 # Only the essentials are required; Derivatization may be absent in older files.
@@ -2666,8 +3442,9 @@ def _resolve_metadata_for_sample(files: dict, sample_name: str, csv_path: str | 
 # ============================
 
 #20260414 code review: it is a fallback (safe net) when marker fails. Around line 5500~? this fallback produces ion_scoring_status = "ok(fallback) in AppLogger"
-def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value):
-    """Minimal ion score using validator.findingions + marker.score_counter (anchors-aware)."""
+def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value, tol_da=None):
+    """Minimal ion score using validator.findingions + marker.score_counter (anchors-aware).
+    tol_da (CGA-TOLERANCE T2, 20261031): None => ppm_value window (v1.10); set => ±tol_da Da."""
     from mspvalidator_merger import findingions, expandpeaklist
 
     out = matched_df.copy()
@@ -2680,7 +3457,8 @@ def _fallback_simple_ion_scoring(matched_df, ion_df, ppm_value):
     scores, counts, hits_str = [], [], []
     for _, row in out.iterrows():
         # findingions returns a full listing: [(ion_mz, logI_plus1), ...] length == len(ionlist)
-        hit_pairs = findingions(row, ion_df[["mass"]], ppm_value)
+        hit_pairs = (findingions(row, ion_df[["mass"]], ppm_value) if tol_da is None   # v1.10 call shape kept
+                     else findingions(row, ion_df[["mass"]], ppm_value, tol_da=tol_da))
         matched_mz = [float(mz) for (mz, logi1) in hit_pairs if float(logi1) > 1.0]
         try:
             # prefer your module’s anchors-aware score if present
@@ -3014,6 +3792,16 @@ def normalize_method_json(method_obj: dict, method_path: str, base_dir: str = No
                 tree_entry[f"_glytoucan_resolution_{_gt_fam}"] = dict(_gt_blk)
         except Exception as _gt_e:
             print(f"[glytoucan][WARN] could not restore resolution provenance from {method_path}: {_gt_e}")
+        # 20261031 CGA-TOLERANCE CP-C: restore the recorded CGA tolerances so Export / autosave re-emit them
+        try:
+            _cga_p = ((method_obj.get("parameters") if isinstance(method_obj.get("parameters"), dict) else {})
+                      .get("cga"))
+            _cga_fam = str(((method_obj.get("method") or {}).get("family") or method_family or "")).upper()
+            _cga_p = _clean_cga_parameters(_cga_p)   # CP-C.1 F5: unusable parts dropped (= unknown)
+            if _cga_p and _cga_fam == "CGA":
+                tree_entry["_cga_parameters"] = _cga_p   # registered by the loaders once accepted (CP-C.1 F1)
+        except Exception as _cga_e:
+            print(f"[CGA][WARN] could not restore recorded tolerances from {method_path}: {_cga_e}")
 
     # ----------------------------
     # D) Produce canonical v1 method dict (in-memory)
@@ -3445,6 +4233,7 @@ def open_prepare_dataset_window():
                         # tree_entry is the dict mapping into internal keys: csv/excel/metadata/json/ionlist_path/etc.
                         for k, v in (tree_entry or {}).items():
                             files[k] = v
+                        _cga_register_loaded(tree_entry, active_method_path)   # CGA-TOLERANCE CP-C.1 F1
 
                         files["json"] = active_method_path  # keep active method linked
                 
@@ -5330,7 +6119,8 @@ def open_prepare_dataset_window():
     # 20260417 code review: keep the function name for now is fine
     def run_pseudolabeling(sample_name: str, files: dict, meta_overrides: dict, parent=None,
                         ppm_value: float = 20.0, keep_top_n_per_scan: int = 3,
-                        ion_ppm: float = 10.0, anchors_required: int = 2):
+                        ion_ppm: float = 10.0, anchors_required: int = 2,
+                        tol_da: float | None = None, ion_tol_da: float | None = None):
         import pandas as pd, numpy as np, traceback, os
 
         """
@@ -5395,6 +6185,21 @@ def open_prepare_dataset_window():
 
         libn = libn.sort_values("Mass").reset_index(drop=True)
 
+        # 20261031 CGA-TOLERANCE T1: the precursor window actually used (tol_da set => Da window, ppm_value ignored)
+        prec_tol = ({"value": float(tol_da), "unit": "Da"} if tol_da is not None
+                    else {"value": float(ppm_value), "unit": "ppm"})
+        prec_non_default = prec_tol != CGA_PRECURSOR_TOL_DEFAULT
+        logger.log(f"[CGA] precursor match tolerance: {_tolerance_label(prec_tol)}"
+                   + (f" (NON-DEFAULT; v1.10 default {_tolerance_label(CGA_PRECURSOR_TOL_DEFAULT)})"
+                      if prec_non_default else " (default)"))
+        # 20261031 CGA-TOLERANCE T2: the Score A fragment window actually used (ion_tol_da set => Da, ion_ppm ignored)
+        frag_tol = ({"value": float(ion_tol_da), "unit": "Da"} if ion_tol_da is not None
+                    else {"value": float(ion_ppm), "unit": "ppm"})
+        frag_non_default = frag_tol != CGA_FRAGMENT_TOL_DEFAULT
+        logger.log(f"[CGA] Score A fragment match tolerance: {_tolerance_label(frag_tol)}"
+                   + (f" (NON-DEFAULT; v1.10 default {_tolerance_label(CGA_FRAGMENT_TOL_DEFAULT)})"
+                      if frag_non_default else " (default)"))
+
         # 3) Precursor matching (top-N by |ppm| per scan) → tidy table
         rows = []
         for r in df[[scan_col, mass_col]].dropna().itertuples(index=False):
@@ -5406,6 +6211,7 @@ def open_prepare_dataset_window():
                 ppm=ppm_value,
                 mass_transform=None,  # Mass already protonated in your lib
                 comp_cols=COMP_COLS_BASE,
+                tol_da=tol_da,        # 20261031 CGA-TOLERANCE T1: None => the ppm window above (v1.10)
             )
             if not hits.empty:
                 hits = hits.reindex(hits["ppm_error"].abs().sort_values().index)
@@ -5568,6 +6374,7 @@ def open_prepare_dataset_window():
                     ppm_value=ion_ppm,
                     scan_col="MS2scan_no",
                     ion_mass_col="mass",
+                    tol_da=ion_tol_da,   # 20261031 CGA-TOLERANCE T2: None => ion_ppm window (v1.10)
                 )
                 # unify column names the module might use
                 rename_map = {
@@ -5599,7 +6406,7 @@ def open_prepare_dataset_window():
                 logger.log("[CGA→Train][EXCEPTION] Using fallback ion scoring (simple fraction of logI>1 matches / reference ion count). ")
                 print("[CGA→Train][EXCEPTION] Using fallback ion scoring (simple fraction of logI>1 matches / reference ion count). ")
                 try:
-                    matched = _fallback_simple_ion_scoring(matched, ion_df, ion_ppm)
+                    matched = _fallback_simple_ion_scoring(matched, ion_df, ion_ppm, tol_da=ion_tol_da)
                     ion_scoring_status = "ok(fallback)"
                     n_with_scores = int((matched["ion hit count"] > 0).sum())
                 except Exception:
@@ -5659,6 +6466,7 @@ def open_prepare_dataset_window():
         # 20260921 S1 / Codex R2-F3: the new TSV now exists → publish (or, with None, clear) this family's provenance.
         # A failed write above raises before this line, so the previous result keeps its provenance.
         _glytoucan_record(files, "CGA", _gt_block)   # None => new TSV without fill: clear stale provenance (Codex S1 F2)
+        _cga_record_run(files, outpath, prec_tol, frag_tol)   # 20261031 CGA-TOLERANCE CP-C (method JSON parameters.cga)
 
         # store absolute path so refresh_tree can always find it
         files["pseudolabel_csv"] = outpath
@@ -5671,7 +6479,13 @@ def open_prepare_dataset_window():
             "action": "pseudolabel_run",
             "sample": sample_name,
             "inputs": {"converted_csv": csv_path, "insilico_csv": ins_path, "ionlist": ion_path or "none"},
-            "params": {"ppm_value": ppm_value, "keep_top_n_per_scan": keep_top_n_per_scan, "ion_ppm": ion_ppm},
+            # 20261031 CGA-TOLERANCE: additive keys, always written; ppm_value / ion_ppm are null when a Da window was used
+            "params": {"ppm_value": ppm_value if tol_da is None else None,
+                       "keep_top_n_per_scan": keep_top_n_per_scan,
+                       "ion_ppm": ion_ppm if ion_tol_da is None else None,
+                       "precursor_tolerance": prec_tol,
+                       "fragment_tolerance": frag_tol,
+                       "tolerance_non_default": bool(prec_non_default or frag_non_default)},
             "output": {"pseudolabel_tsv": outpath},
             "summary": {
                 "n_scans": int(len(df)),
@@ -6264,6 +7078,11 @@ def open_prepare_dataset_window():
         if isinstance(_gt, dict):
             v1["artifacts"]["glytoucan_resolution"] = dict(_gt)
 
+        # 20261031 CGA-TOLERANCE CP-C: tolerances actually used (tree key `_cga_parameters`, CGA family only)
+        _cga_p = s.get("_cga_parameters")
+        if family == "CGA" and isinstance(_cga_p, dict) and _cga_p:
+            v1["parameters"]["cga"] = json.loads(json.dumps(_cga_p))
+
         return v1
     # ==
 
@@ -6310,6 +7129,7 @@ def open_prepare_dataset_window():
                 continue
 
             experiment_projects[exp_name]["samples"][sample_name] = tree_entry
+            _cga_register_loaded(tree_entry, path)   # 20261031 CGA-TOLERANCE CP-C.1 F1: accepted imports only
 
             # optional: store the normalized v1 object for later "Save method v1"
             #fixed 20260312 Test-B B1.2: family-keyed cache; family derived from the loaded v1 object
@@ -6586,7 +7406,8 @@ def open_prepare_dataset_window():
                 sample_name=sample_name,
                 files=files,
                 meta_overrides=payload.get("metadata", {}),
-                parent=root
+                parent=root,
+                **_cga_tolerance_kwargs(payload.get("tolerances")),   # 20261031 CGA-TOLERANCE: {} => v1.10 defaults
             )
 
             # Part 2: Score B runtime enrichment
@@ -6618,6 +7439,7 @@ def open_prepare_dataset_window():
 
             if out_tsv:
                 files["pseudolabel_csv"] = out_tsv
+                _cga_record_tsv(files, out_tsv)   # 20261031 CGA-TOLERANCE CP-C: follow a Score B output path
 
             # Always refresh file links first (so builder sees latest insilico/ion/tsv)
             refresh_tree()
@@ -6737,6 +7559,12 @@ def open_prepare_dataset_window():
         ttk.Spinbox(thresh_box, from_=1, to=10, textvariable=topn, width=5).grid(row=0, column=5, sticky="w")
         ttk.Label(thresh_box, text="ion list ppm").grid(row=0, column=6, sticky="e")
         ttk.Entry(thresh_box, textvariable=ion_ppm, width=6).grid(row=0, column=7, sticky="w"); row+=1
+        # 20261101 CGA-TOLERANCE CP-C.4: the precursor gate (on, 10 ppm since v1.10) had no widget, so it could not be
+        # widened with the CGA precursor tolerance. Same variables and defaults, shown on row 1 of this box.
+        ttk.Checkbutton(thresh_box, text="precursor gate", variable=apply_precursor_gate_var).grid(row=1, column=0, sticky="e")
+        ttk.Entry(thresh_box, textvariable=precursor_ppm_var, width=6).grid(row=1, column=1, sticky="w")
+        ttk.Label(thresh_box, text="ppm, measured vs theoretical precursor mass (untick to skip this gate)",
+                  foreground="gray").grid(row=1, column=2, columnspan=6, sticky="w")
 
         # --- Negatives
         neg_box = ttk.LabelFrame(frm, text="5) Negative sampling")
@@ -6816,7 +7644,11 @@ def open_prepare_dataset_window():
                             "min_hits": min_hits.get(), "ion_ppm": ion_ppm.get(),     # NEW: sampling + seed for randomness control
                             "sampling": "random" if neg_sampling_var.get() else "first","seed": int(neg_seed_var.get()),}
                 # NEW: wire UI ➜ function
-                pg_ppm   = float(precursor_ppm_var.get()) if apply_precursor_gate_var.get() else None
+                try:   # 20261101 CGA-TOLERANCE CP-C.4: the gate is a field now; check it before anything is built
+                    pg_ppm = _trainable_gate_ppm(apply_precursor_gate_var.get(), precursor_ppm_var.get())
+                except ValueError as _gate_e:
+                    messagebox.showerror("CGA \u2192 Trainable", str(_gate_e))
+                    return
                 conv_path = converted_csv_var.get().strip() or None
                 #debug line
                 print("[CGA→Train][DEBUG] include_mass_feature UI:", include_mass_feat_var.get())
@@ -6839,6 +7671,10 @@ def open_prepare_dataset_window():
                     #converted_csv_path=converted_csv_path_entry.get().strip() or None,
                 )
                 status.config(text=outpath) 
+                _tr_sha = file_sha256(outpath)   # CGA-TOLERANCE CP-C.2 R2-F2: hash the bytes just written, before any dialog
+                if _tr_sha is None:   # CP-C.3 R3-F1: never re-hashed later; the record will not be usable for training
+                    logger.log("[CGA\u2192Train][WARN] could not hash the trainable CSV just written; its tolerance "
+                               "record will not be used at training")
                 messagebox.showinfo("Done", f"Saved trainable CSV:\n{outpath}\n\nSummary:\nrows={summary['rows']} cols={summary['cols']}\nclasses={summary['classes']}")
                 # 20260417 code review: add trainable csv (CGA route) with tree update
                 files["trainable_csv"] = outpath
@@ -6846,6 +7682,22 @@ def open_prepare_dataset_window():
                 # Codex S1 R5-F1 (20260923): keep the cached CGA method (reused verbatim by the autosave below) linked
                 # to the NEW trainable so path and resolution block are saved together. Runs regardless of the option.
                 _cga_cache_link_trainable(files, outpath)
+                # 20261031 CGA-TOLERANCE CP-C: record the tolerances behind this trainable (method JSON parameters.cga)
+                try:   # CP-C.1 F5: recording must never turn a written trainable into a failure
+                    _tr_rec = _cga_record_trainable(files, outpath, pseudo_var.get().strip(), thresholds, neg_opts, pg_ppm,
+                                                    csv_sha256=_tr_sha)
+                except Exception as _rec_e:
+                    _tr_rec = None
+                    logger.log(f"[CGA→Train][WARN] tolerance record not written: {type(_rec_e).__name__}: {_rec_e}")
+                if _tr_rec:
+                    logger.log(
+                        "[CGA→Train] tolerances: precursor gate "
+                        + ("off" if _tr_rec["precursor_gate_ppm"] is None else f"{_tr_rec['precursor_gate_ppm']:g} ppm")
+                        + f", max |ppm_error| {_tr_rec['max_abs_ppm']:g}, ion list ppm {_tr_rec['feature_ion_ppm']:g}"
+                        + (", CGA run " + _tolerance_label(_tr_rec["cga_run"]["precursor_tolerance"]) + " / "
+                           + _tolerance_label(_tr_rec["cga_run"]["fragment_tolerance"])
+                           if _tr_rec["cga_run"] else ", CGA run tolerances unknown for this TSV")
+                        + (" (NON-DEFAULT)" if _tr_rec["tolerance_non_default"] else " (default)"))
                 # H5 (20260923): the trainable CSV is written -> record this fill as the CGA family's latest provenance.
                 # Option off (None) does NOT clear: the trainable inherits the TSV's values rather than replacing a
                 # fresh annotation, so the round-2 clear-on-new-output rule does not apply here (spec §4, H5 rules).
@@ -7003,6 +7855,9 @@ def open_ml_analysis_window():
     predict_input_path = None                                 
     model_file_path = None
     linked_exp_json = None
+    model_tol_prefill = {}   # 20261031 CGA-TOLERANCE CP-C: non-default values recorded for the loaded model
+    model_tol_auto = {}      # CP-C.1 F2: what the last automatic prefill put in the gate widgets
+    model_tol_guard = {"programmatic": False}   # CP-C.3 R3-F2: True while the prefill writes the gate widgets
     effective_ml_params = {}  # what Train uses
     ml_summary_var = tk.StringVar(value="Params: (using built-ins)")
 
@@ -7136,7 +7991,8 @@ def open_ml_analysis_window():
                             classes: list[str],
                             inputs: Dict[str, Any],
                             hashes: Dict[str, Optional[str]],
-                            versions: Dict[str, str]) -> str:
+                            versions: Dict[str, str],
+                            cga_tolerances: Optional[Dict[str, Any]] = None) -> str:
         os.makedirs(artifact_dir, exist_ok=True)
         payload = {
             "training_run": {
@@ -7150,6 +8006,8 @@ def open_ml_analysis_window():
                 "created_at": datetime.datetime.now().astimezone().isoformat(),
             }
         }
+        # 20261031 CGA-TOLERANCE CP-C: additive, always written ({"status": "not found"} when no record resolved)
+        payload["training_run"]["cga_tolerances"] = cga_tolerances if cga_tolerances is not None else {"status": "not found"}
         out = os.path.join(artifact_dir, "training_run.json")
         with open(out, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -8121,8 +8979,12 @@ def open_ml_analysis_window():
             return
 
         # load
+        # CGA-TOLERANCE CP-C.2 R2-F2: hash the CSV right before and after reading it; equal hashes = the bytes trained on
+        _train_sha_pre = file_sha256(train_csv_path)
         try:
             df = pd.read_csv(train_csv_path)
+            _train_sha_post = file_sha256(train_csv_path)
+            _train_sha = _train_sha_pre if (_train_sha_pre and _train_sha_pre == _train_sha_post) else None
         except Exception as e:
             logger.log(f"[ML][train][ERROR 1] Trainable csv can't be read:{e}")
             messagebox.showerror("Read Error", str(e)); return
@@ -8432,6 +9294,26 @@ def open_ml_analysis_window():
         logger.log(f"[ML] Feature list saved: {features_path}")    
 
         # 20260418 code review to activate train environment json save
+        # 20261031 CGA-TOLERANCE CP-C: tolerances behind this trainable, from its CGA method record (no extra file)
+        # CP-C.1 F1: the record is used only if the trainable CSV still has the sha256 it had when it was built
+        try:
+            if not _train_sha:   # CP-C.2 R2-F2: the file changed while it was read (or could not be hashed)
+                _cga_tr, _cga_src = None, "trainable CSV changed during read"
+            else:
+                _cga_tr, _cga_src = _find_cga_record_for_trainable(
+                    train_csv_path, csv_sha256=_train_sha,
+                    search_dirs=sorted({d for d in (os.path.dirname(train_csv_path or ""),
+                                                    os.path.dirname(linked_exp_json or "")) if d}))
+        except Exception as _lk_e:   # CP-C.1: the lookup can never stop a training run
+            _cga_tr, _cga_src = None, f"lookup failed ({type(_lk_e).__name__})"
+        if _cga_tr:
+            _cga_blk = {"status": "found", "source": _cga_src, "trainable": _cga_tr}
+            logger.log(f"[ML][Train] CGA tolerance record found ({_cga_src})"
+                       + (" - NON-DEFAULT tolerances" if _cga_tr.get("tolerance_non_default") else " - defaults"))
+        else:
+            _cga_blk = {"status": _cga_src or "not found"}
+            logger.log(f"[ML][Train] CGA tolerance record: {_cga_blk['status']} (MAS, pooled, moved, rebuilt or "
+                       "older-build trainable); prediction fields will not be prefilled")
         try:
             snapshot_training_run(                                                           
                 artifact_dir=os.path.dirname(base),           
@@ -8439,9 +9321,9 @@ def open_ml_analysis_window():
                 column_order=list(X_train.columns),
                 classes=list(le.classes_),                                                   
                 inputs={"train_csv": train_csv_path, "linked_exp": linked_exp_json},
-                hashes={"train_csv": file_sha256(train_csv_path) if train_csv_path else      
-        None},                                                                               
+                hashes={"train_csv": _train_sha},   # CP-C.2 R2-F2: hash of the bytes read (None if they changed)                                                                               
                 versions=collect_versions(),                                                 
+                cga_tolerances=_cga_blk,
             )         
             logger.log(f"[ML][Train] records save at {base} ")                                                                       
         except Exception as e:                                    
@@ -8482,7 +9364,44 @@ def open_ml_analysis_window():
         path = filedialog.askopenfilename(title="Select Model File",filetypes=[("Model files", "*.joblib *.pkl *.skops"), ("All files", "*.*")])
         if path:
             model_file_path = os.path.abspath(path)
-            messagebox.showinfo("Model Loaded", f"Model loaded from:\n{model_file_path}")
+            # 20261031 CGA-TOLERANCE CP-C: prefill prediction fields from the model's recorded trainable tolerances
+            # (non-default values only; no record => today's behaviour). A gate value this code prefilled for an
+            # earlier model and the user left alone goes back to the default.
+            # CP-C.1 F2/F3: a widget the user changed is kept; a recorded gate OFF unticks the gate.
+            _rec = _read_model_cga_record(model_file_path)
+            model_tol_prefill.clear()
+            try:   # CP-C.2 R2-F6: an unusable record never stops loading a model
+                model_tol_prefill.update(_model_tolerance_prefill(_rec.get("trainable")))
+            except Exception as _pf_e:
+                logger.log(f"[ML][Predict] model tolerance record unusable ({type(_pf_e).__name__}); no prefill")
+            _set_field, _set_on, _kept, _new_auto = _gate_prefill_update(
+                model_tol_auto, pred_precursor_ppm_var.get(), apply_pred_precursor_gate_var.get(), model_tol_prefill)
+            model_tol_guard["programmatic"] = True   # CP-C.3 R3-F2: these writes are not the user's
+            try:
+                if _set_field is not None:
+                    pred_precursor_ppm_var.set(_set_field)
+                if _set_on is not None:
+                    apply_pred_precursor_gate_var.set(_set_on)
+            finally:
+                model_tol_guard["programmatic"] = False
+            model_tol_auto.clear()
+            model_tol_auto.update(_new_auto)
+            _notes = []
+            if model_tol_prefill.get("gate_on") is False:
+                _notes.append("precursor gate off")
+            if "gate_ppm" in model_tol_prefill:
+                _notes.append(f"precursor gate {_ppm_tag(model_tol_prefill['gate_ppm'])} ppm")
+            if "feature_ppm" in model_tol_prefill:
+                _notes.append(f"unlabeled feature window {_ppm_tag(model_tol_prefill['feature_ppm'])} ppm")
+            _msg = f"Model loaded from:\n{model_file_path}"
+            if _notes:
+                _msg += ("\n\nThis model was trained with non-default tolerances. Prefilled: "
+                         + "; ".join(_notes) + ".")
+                logger.log("[ML][Predict] model tolerance record: prefilled " + "; ".join(_notes))
+            if _kept:
+                _msg += "\n\nYour own setting was kept: " + "; ".join(_kept) + "."
+                logger.log("[ML][Predict] kept user setting: " + "; ".join(_kept))
+            messagebox.showinfo("Model Loaded", _msg)
 
     def select_predict_input():
         nonlocal predict_input_path
@@ -8492,6 +9411,8 @@ def open_ml_analysis_window():
             messagebox.showinfo("Prediction file selected", f"Data loaded from:\n{predict_input_path}")
 
     def run_prediction():
+        _tol_override = False   # 20261031 CGA-TOLERANCE CP-C (set by the gate check below)
+        _gate_applied = False   # CP-C.1 F6: True only once the precursor gate has actually run
 
         try:
             import joblib
@@ -8786,6 +9707,12 @@ def open_ml_analysis_window():
                 logger.log(f"[ML][Predict][fallback] invalid Precursor gate ppm, set to default = {gate_ppm}")
                 print(f"[ML][Predict][fallback] invalid Precursor gate ppm, set to default = {gate_ppm}")
 
+            # 20261031 CGA-TOLERANCE CP-C: visible notice when the run departs from the model's recorded gate
+            _note = _gate_override_note(model_tol_prefill, gate_on, gate_ppm)
+            _tol_override = _note is not None
+            if _note:
+                logger.log(f"[ML][Predict][NOTICE] {_note}")
+                messagebox.showinfo("Tolerance differs from the model", _note)
             gate_suffix = f"_PG{int(gate_ppm)}ppm" if gate_on else "_noPG"
             method_suffix = ms1_suffix + gate_suffix
 
@@ -9088,10 +10015,14 @@ def open_ml_analysis_window():
                     gate_counts_path = (out_dir / (Path(predict_input_path).stem + "_PG_counts.csv")).as_posix()
                     gate_counts.to_csv(gate_counts_path, index=False)
                     if logger: logger.log(f"[ML][Predict][gate] Summary of passed class count is saved → {gate_counts_path}")
+                    _gate_applied = True   # CP-C.1 F6
 
                 except Exception as _e:
                     # Gate skipped → just report everything
                     if logger: logger.log(f"[Predict] Precursor gate skipped: {_e}")
+                    if "gate_ppm" in model_tol_prefill and logger:   # CGA-TOLERANCE CP-C.2 R2-F5
+                        logger.log(f"[ML][Predict][NOTICE] the model was trained with a precursor gate of "
+                                   f"{_ppm_tag(model_tol_prefill['gate_ppm'])} ppm, but no gate was applied in this run")
                     pred_df_for_report = pred_df.copy()
             else:
                 pred_df_for_report = pred_df.copy()
@@ -9147,6 +10078,19 @@ def open_ml_analysis_window():
             )
             if isinstance(run_sum, dict):
                 run_sum["method_suffix"] = method_suffix
+                # 20261031 CGA-TOLERANCE CP-C: additive, always written
+                # CP-C.1 F6: requested vs applied; the comparison covers the precursor gate only (the feature
+                # window is set when the unlabeled CSV is built and is not known here)
+                run_sum["model_tolerances"] = {"prefilled": dict(model_tol_prefill),
+                                               "gate_requested": bool(gate_on),
+                                               "gate_ppm_requested": gate_ppm if gate_on else None,
+                                               "gate_applied": bool(_gate_applied),
+                                               "gate_ppm_used": gate_ppm if _gate_applied else None,
+                                               "gate_request_differs_from_model": bool(_tol_override),
+                                               # CP-C.2 R2-F5: the gate that actually ran vs the model (None = no record)
+                                               "gate_outcome_matches_model": _gate_outcome_matches_model(
+                                                   model_tol_prefill, _gate_applied, gate_ppm),
+                                               "feature_window": "not checked here (set when the unlabeled CSV is built)"}
 
             arts = write_prediction_report(
                 out_dir=out_dir,
@@ -9368,11 +10312,22 @@ def open_ml_analysis_window():
             return
 
         # --- Feature: PPM source (ask user explicitly) ---
-        ppm_value = simpledialog.askinteger(
-            "PPM Tolerance", "Enter PPM tolerance (e.g., 20):", minvalue=1, maxvalue=200
+        # 20261031 CGA-TOLERANCE CP-C: decimals allowed, upper limit 500 ppm (Henry), prefilled only from a loaded
+        # model's non-default training feature window; ppm only (no Da for the feature window).
+        _feat_prefill = model_tol_prefill.get("feature_ppm")
+        ppm_value = simpledialog.askfloat(
+            "PPM Tolerance",
+            "Enter PPM tolerance (e.g., 20):" if _feat_prefill is None else
+            f"Enter PPM tolerance (prefilled with the loaded model's training feature window, "
+            f"{_ppm_tag(_feat_prefill)} ppm):",
+            minvalue=1, maxvalue=500, initialvalue=_feat_prefill
         )
         if ppm_value is None:
             return
+        _note = _feature_override_note(model_tol_prefill, ppm_value)
+        if _note:
+            logger.log(f"[Unlabeled][NOTICE] {_note}")
+            messagebox.showinfo("Tolerance differs from the model", _note)
 
         # --- Feature: JSON format (support both v1 list and legacy dict) ---
         raw_samples = exp.get("samples") or {}
@@ -9478,12 +10433,12 @@ def open_ml_analysis_window():
                 # --- Feature: Output naming ({csv_stem}_unlabeled_ppm{ppm}.csv) ---
                 out_dir = Path(raw_csv).resolve().parent
                 base    = Path(raw_csv).stem
-                out_path = out_dir / f"{base}_unlabeled_ppm{ppm_value}.csv"
+                out_path = out_dir / f"{base}_unlabeled_ppm{_ppm_tag(ppm_value)}.csv"   # 20 -> "ppm20" as in v1.10
 
                 # --- Feature: Collision guard (append sample_id if path reused) ---
                 if str(out_path) in seen_out:
                     safe_id = re.sub(r'[^A-Za-z0-9._-]+', '_', sample_id)
-                    out_path = out_dir / f"{base}__{safe_id}_unlabeled_ppm{ppm_value}.csv"
+                    out_path = out_dir / f"{base}__{safe_id}_unlabeled_ppm{_ppm_tag(ppm_value)}.csv"
 
                 # write
                 feats.to_csv(str(out_path), index=False, encoding="utf-8")
@@ -9615,6 +10570,8 @@ def open_ml_analysis_window():
     apply_pred_precursor_gate_var = tk.BooleanVar(value=True)
     pred_precursor_ppm_var        = tk.StringVar(value="10")
     insilico_csv_var              = tk.StringVar(value="")
+    # 20261031 CGA-TOLERANCE CP-C.3 R3-F2: user edits of the gate widgets are recorded as they happen
+    _attach_gate_ownership_traces(pred_precursor_ppm_var, apply_pred_precursor_gate_var, model_tol_auto, model_tol_guard)
 
     # === PRED GATE: UI frame ===
     _next = predict_tab.grid_size()[1]  # safe next free row
@@ -9681,7 +10638,7 @@ def open_manage_references_window():
         mgr.lift()
         return mgr
     win = tk.Toplevel(root)
-    win.title(f"Manage References \u2014 GlycoMSP v{version} preview")
+    win.title(f"Manage References \u2014 GlycoMSP v{version} publication build")   # 20261101 CGA-TOLERANCE: was "preview" (Henry)
     _GT_UI["manager"] = win
     runner = _GT_UI.get("runner") or _GtCliRunner()
     _GT_UI["runner"] = runner
@@ -9992,7 +10949,7 @@ def set_main_status(text, fg=None):
 
     
 root.protocol("WM_DELETE_WINDOW", on_closing)
-root.title("GlycoMSP File Manager GUI v1.12 (20261001 preview)")  # 20261001 DB1 (T1-b): v1.12 = Manage References; 20260923 S1 was v1.11
+root.title("GlycoMSP File Manager GUI v1.14 (20261101 publication build)")  # 20261101 CGA-TOLERANCE: v1.14, "preview" -> "publication build" (Henry); 20261027 V14-FOLLOWUP: v1.13; 20261001 DB1 (T1-b): v1.12 = Manage References; 20260923 S1 was v1.11
 root.geometry("800x560")
 root.minsize(800, 560)
 

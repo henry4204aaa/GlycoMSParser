@@ -4,6 +4,7 @@ GlycoMSParser.code-workspace
 tmpdata/
 # Jupyter
 .ipynb_checkpoints/
+.DS_Store
 
 # Logs / temporary outputs
 *.log

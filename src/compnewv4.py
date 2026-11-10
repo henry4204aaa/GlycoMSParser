@@ -1,5 +1,5 @@
-version = "1.07"
-last_update = 20260517
+version = "1.08"
+last_update = 20261027
 #test concept of glycan in silico enumeration
 # see functions from def glycancompositionrestraints(glycantype, arms=2, options=None, profiler_version = 1) in mspcomposition.py
 
@@ -34,6 +34,7 @@ last_update = 20260517
 #version changelog:
 #v1.2 (future): add O-man and fix hybrid NG generation logic
 #v1.1 (future): finished version for publication
+#v1.08: native (underivatized) precursor mass in precursormassv4; "Native(Reduced)" alias (V14-FOLLOWUP CP-A, 20261027)
 #v1.07: fix fucrange tuple syntax in NGcore() (critical); fix compcheck() return type handling                                      
 #       in NGlaunch()/OGlaunch() (critical); fix arm3 tuple length for OG core type 0 (critical);                                   
 #       fix HexA loop variable shadowing in terminal_NG() (medium); add allowHexA to NG_flags    
@@ -71,6 +72,7 @@ _DERIV_ALIASES = {
 _DERIV_ALIASES.update({
     "perme(reduced)": "PerMe_reduced",
     "perme(freeend)": "PerMe",
+    "native(reduced)": "Native_reduced",  # 20261027 CP-A: GUI value; fell through to the PerMe-reduced default before
 })
 
 
@@ -114,7 +116,9 @@ def _normalize_derivatization(flags):
     elif tag == "PerMe_reduced":
         deri, reduced = "PerMe", True
     elif tag == "Native":
-        deri, reduced = "Native", False  # adapt if you support Native masses
+        deri, reduced = "Native", False
+    elif tag == "Native_reduced":
+        deri, reduced = "Native", True
 
     # Explicit boolean override wins if present
     if "reduced" in flags:
@@ -336,10 +340,34 @@ def precursormassv4(composition, deri="PerMe", reduced=False, mode='+',
 
         if debug:
             print(f"precursormassv4 PerMe, mode={mode}, reduced={reduced}")
+    elif deri == "Native":
+        # 20261027 V14-FOLLOWUP CP-A: underivatized residues, monoisotopic (Henry checked against GlycoMod 20261027)
+        M =  (f * 146.05791     # dHex (Fuc)
+              + a * 162.05282   # Hex
+              + b * 203.07937   # HexNAc
+              + c * 291.09542   # NeuAc
+              + d * 307.09033   # NeuGc
+              + e * 250.06887   # KDN
+              + 18.01056)       # free reducing end (+H2O)
+        if reduced:
+            M += 2.01565        # alditol (+2H)
+        M += hexA * 176.03209   # HexA
+        # Native groups are flat additions and the result is always singly charged [M+H]+ / [M-H]-:
+        # the PerMe so3/po3h corrections and the so3 == 2 halving above do not apply (Henry 20261027)
+        M += so3 * 79.95682     # SO3
+        M += po3h * 79.96633    # HPO3
+        # proton 1.00728 here; the PerMe branch keeps its 1.0073 (Henry 20261027)
+        if mode == '+':
+            M += 1.00728
+        else:
+            M -= 1.00728
+
+        if debug:
+            print(f"precursormassv4 Native, mode={mode}, reduced={reduced}")
     else:
         M = 0
         if debug:
-            print("precursormassv4 still not support native glycan mass calculation--")
+            print(f"precursormassv4 has no mass rule for deri={deri!r}; returning 0")
     return M
 
 

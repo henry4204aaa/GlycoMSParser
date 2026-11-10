@@ -1,8 +1,8 @@
 from __future__ import annotations
 #Python3.9 compatibility fix (not working haha)
 #part of it was copied from GPT5 answer based on the discussion
-version = "1.09"
-last_update = 20260411
+version = "1.10"   # 20261031 CGA-TOLERANCE: optional Da windows (find_compositions_for_mass tol_da); defaults unchanged
+last_update = 20261031
 import numpy as np
 import csv
 import mspvalidator_merger as validator
@@ -174,9 +174,12 @@ def find_compositions_for_mass(
     ppm: float = 20.0,
     mass_transform=None,  # e.g., "M+H", "M+Na", a numeric offset, or a callable
     comp_cols=("Hex", "HexNAc", "NeuAc", "NeuGc", "KDN", "Fuc"),
+    tol_da=None,
 ):
     """
     Return ALL in-silico rows within ±ppm of obs_mass, with deltas.
+    tol_da: absolute window in Da (±tol_da around obs_mass). None (default) keeps the ppm window
+      unchanged; when set, `ppm` is ignored. CGA-TOLERANCE T1 (20261031), for ion-trap isolation-m/z data.
     mass_transform lets you align the library mass domain to your observed domain:
       - "M+H", "M+Na", "M+K", "M+NH4"
       - a numeric offset (e.g., 1.007276)
@@ -190,7 +193,10 @@ def find_compositions_for_mass(
     # 2) Sort BY the transformed masses (needed for searchsorted)
     order        = np.argsort(theo_x)
     theo_sorted  = theo_x[order]
-    tol = abs(obs_mass) * float(ppm) / 1e6
+    if tol_da is None:
+        tol = abs(obs_mass) * float(ppm) / 1e6
+    else:
+        tol = float(tol_da)
     lo = np.searchsorted(theo_x, obs_mass - tol, side="left")
     hi = np.searchsorted(theo_x, obs_mass + tol, side="right")
 
@@ -319,12 +325,15 @@ def attach_ion_score_on_matched(
     score_col: str = "ion score",
     hitcount_col: str = "ion hit count",
     hitlist_col: str = "ion hits m/z",
+    tol_da: float | None = None,
 ):
+    # 20261031 CGA-TOLERANCE T2: tol_da=None keeps the ppm fragment window (v1.10); set => ±tol_da Da, ppm ignored
     out = _coerce_peaks(matched_df.copy())
     ionlist_mz, iondf_for_find, ion_mass_col = _prepare_ion_df(ion_df, mass_col=ion_mass_col)
 
     def _score_row(row):
-        hits_out = findingions(row, iondf_for_find, ppm_value)
+        hits_out = (findingions(row, iondf_for_find, ppm_value) if tol_da is None   # v1.10 call shape kept
+                    else findingions(row, iondf_for_find, ppm_value, tol_da=tol_da))
         if not hits_out:
             return 0.0, 0, ""
         elem = hits_out[0]

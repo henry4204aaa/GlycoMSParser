@@ -5,7 +5,7 @@ glycan MS/MS data: RAW/mzML → MS2-indexed tables → MAS / CGA annotation →
 selected-fragment-ion feature matrices → local Random Forest training and
 scan-level prediction reports.
 
-Current version: **v1.12** (preview, 2026-10-01) — v1.10 remains the published, manuscript-cited release; see [`CHANGELOG.md`](CHANGELOG.md)
+Current version: **v1.14** (2026-11-10, publication build for the manuscript revision) — v1.10 (2026-06-26) is the release cited by the original submission; see [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -39,9 +39,23 @@ LC–MS/MS datasets.
   user-curated Excel workbook. Score B was *not* used in the main analyses and is
   provided as an optional advanced feature. See
   [`docs/score_b_design.md`](docs/score_b_design.md).
-- **GlyTouCan / WURCS references (optional, v1.11/v1.12 preview)** — annotate compositions
+- **GlyTouCan / WURCS references (optional, since v1.11)** — annotate compositions
   with GlyTouCan accessions and WURCS strings from a local reference database that a
-  CLI populates once per dataset; filling at run time never contacts the network; v1.12 adds a *Manage References* window to select, build and inspect the database from the GUI.
+  CLI populates once per dataset; filling at run time never contacts the network; a *Manage References* window selects, builds and inspects the database from the GUI (v1.12).
+- **Conversion diagnostics (v1.13)** — every RAW/mzML conversion writes a per-scan
+  status table and a diagnostics report (outcome, exported/skipped spectra, known and
+  unknown precursor charges); spectra without an instrument-assigned charge are kept
+  and marked instead of stopping the conversion; optional charge estimation from the
+  MS1 isotope pattern.
+- **Native (underivatized) glycans (v1.13)** — correct precursor masses for *Native* and
+  *Native(Reduced)* in the CGA route, positive or negative mode.
+- **Configurable mass tolerances (v1.14)** — CGA precursor and Score A fragment
+  tolerances in ppm or Da, so low-resolution (ion-trap) MS2 data can be annotated;
+  defaults (20 ppm / 10 ppm) reproduce v1.10, and non-default values are recorded in
+  the method JSON and carried into training and prediction.
+- **Command-line tools** — `msp_extract_cli.py` (conversion and RAW probe),
+  `msp_CLI_precursor_mass.py` (theoretical precursor mass), and controlled
+  validation scripts under [`tools/validation/`](tools/validation/).
 
 Composition notation follows the project convention:
 
@@ -97,10 +111,15 @@ Typical workflow:
 5. Train or apply a Random Forest model.
 6. Export prediction results and the scan-level report.
 
+For ion-trap (low-resolution MS2) data, set *Precursor match* / *Score A fragment
+match* in *CGA Setup* (for example 300 ppm / 0.3 Da) and widen the *ion list ppm*
+in *CGA → Trainable*; see the user manual §7.2. Negative-mode native N-glycan ion
+lists are provided in [`templates/`](templates/).
+
 For the full GUI walkthrough, see the **user manual** (maintained separately) and the
 documentation wiki under [`docs/`](docs/).
 
-### Optional: GlyTouCan / WURCS references (v1.11/v1.12 preview)
+### Optional: GlyTouCan / WURCS references
 
 0. (v1.12) Open *Prepare Dataset → Manage References…* to select a database — for example the snapshot in references/ — or to run the prebuild from the GUI with a live log. The command-line tool below remains the scriptable route.
 1. Populate the local reference database once per dataset (network required):
@@ -127,7 +146,9 @@ The default training configuration matches the manuscript:
   <http://doi.org/10.50821/GLYCOPOST-GPST000224>
 - **Reproducibility archive (code + reference workbook + U-937 reanalysis files
   where redistribution is permitted):** Zenodo —
-  <https://doi.org/10.5281/zenodo.20823042>
+  <https://doi.org/10.5281/zenodo.20823042> (v1.10). A new version of the record
+  for v1.14, with the external-dataset validation runs, is being prepared under
+  the same concept DOI.
 - The reference Score B workbook for positive-ion-mode permethylated N-glycans is
   provided with GlycoMSP and in the Zenodo package.
 
@@ -150,7 +171,7 @@ these identifiers. GlycoMSP never registers structures with GlyTouCan.
 ## Citation
 
 > Tseng, H.-C. *GlycoMSP enables traceable glycan MS/MS annotation and local
-> machine-learning-ready dataset construction.* Manuscript submitted to
+> machine-learning-ready dataset construction.* Manuscript under revision at
 > *Bioinformatics Advances* (2026).
 
 A formal citation will be added once the reference is available. Until then, please
