@@ -1,7 +1,7 @@
 # Known Issues
 
 **DRAFT — internal reference**
-**Generated:** 2026-03-18 | **Updated:** 2026-03-31; Issues 16–20 added 2026-10-20 (READER-DIAG CP-E); Issue 22 added 2026-10-27 (V14-FOLLOWUP CP-A); Issues 17, 18, 21 status and Issues 23–26 added 2026-10-27 (V14-FOLLOWUP CP-D); Issue 17 rationale and Issue 27 added 2026-10-30 (V14-FOLLOWUP manual acceptance); Issue 27 status and Issue 28 added 2026-11-01 (CGA-TOLERANCE CP-D)
+**Generated:** 2026-03-18 | **Updated:** 2026-03-31; Issues 16–20 added 2026-10-20 (READER-DIAG CP-E); Issue 22 added 2026-10-27 (V14-FOLLOWUP CP-A); Issues 17, 18, 21 status and Issues 23–26 added 2026-10-27 (V14-FOLLOWUP CP-D); Issue 17 rationale and Issue 27 added 2026-10-30 (V14-FOLLOWUP manual acceptance); Issue 27 status and Issue 28 added 2026-11-01 (CGA-TOLERANCE CP-D); Issues 30–34 added 2026-11-18 (TESTS-PUBLIC)
 **Sources:** ARCHITECTURE_VALIDATION.md (2026-03-18), CGA_SCORING_ANALYSIS.md (2026-02-06), session history, v14 analysis (2026-03-31)
 
 ---
@@ -466,6 +466,71 @@ Found during the fix (2026-11-01): CGA → Trainable also applied a second, hidd
 ### Description
 
 For each ion, every peak inside the ion's window appends one hit; nothing marks a peak or an ion as used. Case 1: several peaks in one ion's window count that ion several times (`ion hits m/z` repeats it). Case 2: one peak inside the windows of two ions closer than twice the window counts for both. Brain fixture (zebrafish PerMe, Orbitrap, 282 ions): case 1 0 % of matched rows at 20 ppm / 10 ppm, 31.8 % at 300 ppm / 0.3 Da; case 2 in 323 scans at 10 ppm, 1,285 at 0.3 Da, 8,844 at 0.5 Da (of 23,193). Same loop as Issue 15 (B-38).
+
+---
+
+## Issue 30: The Prediction Command Line Cannot Load a Model With the Pinned skops (TESTS-PUBLIC, v1.10 code)
+
+**Modules:** `msp_CLI_predict_skops.py`, `msp_CLI_joblibtoskops_compat.py` (both call `skops.io.load(..., trusted=True)`). Grep to confirm the lines. Filed 2026-11-18 (TESTS-PUBLIC CP-B).
+**Severity:** Medium: the command-line prediction path does not run at all with the pinned library; the GUI is not affected.
+**Status:** Open. Not fixed before the manuscript submission (Henry, 2026-11-18); planned for v1.15. Tripwire: `tests/test_ml_features_train_predict.py::test_cli_loads_a_model_saved_with_the_pinned_skops` is a strict expected failure and will fail loudly once the CLI is fixed, so that the marker is removed on purpose.
+**Workaround:** predict in the GUI (Predict tab), which loads the file with the types it lists; or install skops older than 0.10 for the command line (`pip install "skops<0.10"`).
+
+### Description
+
+skops 0.10 and later reject `trusted=True` with `TypeError: trusted must be a list of strings`. `src/requirements.txt` pins skops 0.13.0, so a clean install following the documented requirements cannot run `msp_CLI_predict_skops.py` or the compatibility converter. The GUI works because it passes the untrusted types reported by `skops.io.get_untrusted_types` for the file.
+
+---
+
+## Issue 31: The Prediction Command Line Drops the Mass Feature by Default (TESTS-PUBLIC, v1.10 code)
+
+**Modules:** `msp_CLI_predict_skops.py` (`--drop-cols`, default `MS2scan_no protonatedmass`). Filed 2026-11-18 (TESTS-PUBLIC CP-B).
+**Severity:** Medium for a model trained with the mass feature (which production training requires).
+**Status:** Open. Not fixed before submission; planned for v1.15. Recorded as a CHARACTERISATION test (what the command line does today, not a claim that it is desired).
+**Workaround:** predict in the GUI; or pass `--drop-cols` with an explicit list that does not name the mass column the model was trained with.
+
+### Description
+
+The default drop list removes `protonatedmass`. A model trained with the mass feature then misses that column, and the missing column is filled with zero, which is also the value of the mass feature for Non-glycan rows, so the predictions are made on a changed input without any message.
+
+---
+
+## Issue 32: The Prediction Command Line Writes Integer Class Labels (TESTS-PUBLIC, v1.10 code)
+
+**Modules:** `msp_CLI_predict_skops.py`; GUI training (`_labelencoder.joblib` sidecar). Filed 2026-11-18 (TESTS-PUBLIC CP-B).
+**Severity:** Low to Medium: output is not human-readable and can be misread.
+**Status:** Open. Not fixed before submission; planned for v1.15. Recorded as a CHARACTERISATION test.
+**Workaround:** predict in the GUI; or map the integers back with the saved `_labelencoder.joblib` (`LabelEncoder.inverse_transform`).
+
+### Description
+
+The GUI trains the Random Forest on LabelEncoder integers and saves the encoder next to the model. The command line never reads the sidecar, so its output column holds the integer codes instead of the glycan composition labels.
+
+---
+
+## Issue 33: A Zero or Negative Peak Intensity Stops Feature Building (TESTS-PUBLIC, v1.10 code)
+
+**Modules:** `ml_ng_utils.py` (`build_features_from_peaks_log10_plus1`). Filed 2026-11-18 (TESTS-PUBLIC CP-B).
+**Severity:** Low as far as known: a RAW or mzML conversion writes the intensities of detected peaks; whether any dataset carries a zero or negative value has not been checked.
+**Status:** Open. Not fixed before submission; planned for v1.15.
+**Workaround:** remove peaks with intensity ≤ 0 from the converted CSV before training or prediction.
+
+### Description
+
+The guard `if I < 0: I = 0.0` is followed by `math.log10(I)`, so a matched peak with intensity 0 or a negative one raises `ValueError: math domain error` and the whole run stops; the guard cannot take effect. A miss correctly gives the baseline 1.0.
+
+---
+
+## Issue 34: Four Different Default Confidence Thresholds (tau) in the Code (TESTS-PUBLIC, v1.10 code)
+
+**Modules:** `mspfileloaderv14.py` (training default 0.65 with margin 0.05; Predict-tab fallback 0.60), `prediction_report.py` (`ReportParams` 0.60), `ml_ng_utils.py` (`predict_with_threshold` 0.55). Grep to confirm the lines. Filed 2026-11-18 (TESTS-PUBLIC CP-B).
+**Severity:** Low: the rule that is applied is the margin-aware demotion in v14 (`demote = (y_pred != majority) & (maxp < tau) & (p_major >= maxp - margin)`); the other values are defaults of paths that are not reached or are overridden.
+**Status:** Open. Not changed before submission; planned for v1.15 (one documented default). Both copies of the v14 demotion expression are tested by reading the source text.
+**Workaround:** set tau and margin explicitly in the GUI and record them (they are written to the run summary).
+
+### Description
+
+`CLAUDE.md` and the GUI state tau = 0.65. The Predict tab falls back to 0.60 when the entry cannot be read, the prediction report object defaults to 0.60, and `predict_with_threshold` defaults to 0.55 but is only called by `tau_sweep_summary`, which the GUI does not call. A script that uses one of the library defaults gets a different cut-off than the GUI.
 
 ---
 

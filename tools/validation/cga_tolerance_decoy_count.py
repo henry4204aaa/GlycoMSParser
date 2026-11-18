@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CGA-TOLERANCE decoy count — chance-match baseline for widened CGA mass tolerances (standalone, counts only).
 
-Method (handoff/CGA_TOLERANCE_decoy_method_20261031.md): match the same MS2 scans against a DECOY library made by
+Method (tools/validation/README.md): match the same MS2 scans against a DECOY library made by
 shifting every library mass by +3.37 Da (an arbitrary offset that avoids residue, isotope and charge spacings),
 with the same tolerance. Every decoy hit is chance, so the decoy count estimates the chance matches among the
 real-library ones. Optionally the same for fragments: the ion list is shifted by the same offset and Score A is

@@ -7,6 +7,48 @@ GlycoMSP is developed **additively**: the default behaviour of the published
 v1.10 is preserved, and new behaviour ships behind explicit options, so results
 produced with v1.10 remain reproducible.
 
+## [1.14.1] – 2026-11-18
+
+Test release accompanying the manuscript revision. No change to the
+application: `src/` is identical to 1.14. This version adds the automated test
+suite and the validation tools to the public repository and documents five
+defects the new tests found.
+
+### Added
+- **Automated test suite** in `tests/` — 626 tests run from a clean checkout
+  (2 skipped, 1 expected failure, 0 failed) on synthetic, seeded inputs; no
+  dataset files are needed. `tests/README.md` explains how to run them, which
+  tests are synthetic, and which development-only tests are withheld
+  (`tests/public_exclude.txt`) together with the recipe for regenerating their
+  reference outputs. `docs/TEST_REGISTER.md` lists every test file with its
+  purpose, the modules it exercises and whether its last run was confirmed by
+  hand.
+- **End-to-end machine-learning tests** (`tests/test_ml_features_train_predict.py`):
+  feature extraction, Random Forest training, skops round trip, command-line
+  prediction, the confidence rule and the prediction report, checked against
+  known inputs; nine deliberate breakages of the product code are all detected.
+- **Composition-enumeration tests** (`tests/test_compnewv4_enumeration.py`) for
+  the in-silico library: N- and O-glycan composition sets, ranges, switches and
+  modes.
+- **Validation tools** in `tools/validation/`: the decoy-library count and
+  Score A peak-counting checks (31 tests, `tests/test_cga_tolerance_decoy_count.py`)
+  and `rf_timing.py`, which times the Random Forest training step exactly as the
+  GUI runs it and writes a report with the machine and library versions.
+
+### Known limitations (found by the new tests; fixes planned for 1.15)
+- The command-line prediction tool cannot load models with the pinned skops
+  version (it calls `load(..., trusted=True)`, rejected by skops ≥ 0.10).
+  Workaround: predict from the GUI, or install `skops<0.10`. The GUI is
+  unaffected and was used for every result reported in the manuscript.
+- The command-line tool's default `--drop-cols` removes the precursor-mass
+  feature from models trained with it, and it writes integer class labels
+  instead of composition names (it does not read the label-encoder file).
+- A fragment with zero or negative intensity stops feature building with a
+  math-domain error.
+- Four different confidence (τ) defaults exist across the GUI, the report
+  parameters and a helper function; the GUI's margin-aware rule is the one in
+  use. Documented as issues 30–34 in `docs/known-issues.md`.
+
 ## [1.14] – 2026-11-01
 
 Publication build for the manuscript revision: the first version that can

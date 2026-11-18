@@ -1,0 +1,11 @@
+# Files in tests/ that stay in the development repository and are NOT part of the public set
+# (Henry, TESTS-PUBLIC step 0, 2026-11-10). One path per line, relative to the repository root.
+# Reasons are in tests/README.md ("Not part of the public set").
+tests/test_smoke_02_raw_to_csv.py
+tests/test_smoke_02a_mzml_to_csv.py
+tests/test_smoke_03_metadata_json.py
+tests/test_smoke_04_mas_to_trainable.py
+tests/test_smoke_06_ml_training.py
+tests/test_smoke_08_cga_insilico.py
+tests/test_smoke_09_cga_composition_fitting.py
+tests/test_json_upgrade.py

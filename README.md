@@ -5,7 +5,7 @@ glycan MS/MS data: RAW/mzML → MS2-indexed tables → MAS / CGA annotation →
 selected-fragment-ion feature matrices → local Random Forest training and
 scan-level prediction reports.
 
-Current version: **v1.14** (2026-11-10, publication build for the manuscript revision) — v1.10 (2026-06-26) is the release cited by the original submission; see [`CHANGELOG.md`](CHANGELOG.md)
+Current version: **v1.14.1** (2026-11-18: test release — adds the automated test suite and validation tools; the application is unchanged from v1.14, the publication build for the manuscript revision) — v1.10 (2026-06-26) is the release cited by the original submission; see [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -56,6 +56,9 @@ LC–MS/MS datasets.
 - **Command-line tools** — `msp_extract_cli.py` (conversion and RAW probe),
   `msp_CLI_precursor_mass.py` (theoretical precursor mass), and controlled
   validation scripts under [`tools/validation/`](tools/validation/).
+- **Automated tests (v1.14.1)** — `python -m pytest tests` runs 626 synthetic-input
+  tests from a clean checkout; see [`tests/README.md`](tests/README.md) and the
+  register [`docs/TEST_REGISTER.md`](docs/TEST_REGISTER.md).
 
 Composition notation follows the project convention:
 
