@@ -116,11 +116,13 @@ Typical workflow:
 
 For ion-trap (low-resolution MS2) data, set *Precursor match* / *Score A fragment
 match* in *CGA Setup* (for example 300 ppm / 0.3 Da) and widen the *ion list ppm*
-in *CGA → Trainable*; see the user manual §7.2. Negative-mode native N-glycan ion
+in *CGA → Trainable*; see the user manual §3.8. Negative-mode native N-glycan ion
 lists are provided in [`templates/`](templates/).
 
-For the full GUI walkthrough, see the **user manual** (maintained separately) and the
-documentation wiki under [`docs/`](docs/).
+For the full GUI walkthrough, see the **user manual v1.1** for GlycoMSP 1.14.1
+([`docs/glycomsp_user_manual_v1.1.md`](docs/glycomsp_user_manual_v1.1.md), PDF
+[`docs/GlycoMSP_user_manual_v1.1.pdf`](docs/GlycoMSP_user_manual_v1.1.pdf); v1.0 for v1.10
+is kept alongside) and the documentation wiki under [`docs/`](docs/).
 
 ### Optional: GlyTouCan / WURCS references
 

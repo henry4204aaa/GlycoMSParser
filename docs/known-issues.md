@@ -1,12 +1,14 @@
 # Known Issues
 
 **DRAFT — internal reference**
-**Generated:** 2026-03-18 | **Updated:** 2026-03-31; Issues 16–20 added 2026-10-20 (READER-DIAG CP-E); Issue 22 added 2026-10-27 (V14-FOLLOWUP CP-A); Issues 17, 18, 21 status and Issues 23–26 added 2026-10-27 (V14-FOLLOWUP CP-D); Issue 17 rationale and Issue 27 added 2026-10-30 (V14-FOLLOWUP manual acceptance); Issue 27 status and Issue 28 added 2026-11-01 (CGA-TOLERANCE CP-D); Issues 30–34 added 2026-11-18 (TESTS-PUBLIC)
+**Generated:** 2026-03-18 | **Updated:** 2026-03-31; Issues 16–20 added 2026-10-20 (READER-DIAG CP-E); Issue 22 added 2026-10-27 (V14-FOLLOWUP CP-A); Issues 17, 18, 21 status and Issues 23–26 added 2026-10-27 (V14-FOLLOWUP CP-D); Issue 17 rationale and Issue 27 added 2026-10-30 (V14-FOLLOWUP manual acceptance); Issue 27 status and Issue 28 added 2026-11-01 (CGA-TOLERANCE CP-D); Issues 30–34 added 2026-11-18 (TESTS-PUBLIC); Issue 1 marked resolved and stale, Issue 10 direction corrected, Issue 29 added 2026-11-20 (MANUAL-1.14.1)
 **Sources:** ARCHITECTURE_VALIDATION.md (2026-03-18), CGA_SCORING_ANALYSIS.md (2026-02-06), session history, v14 analysis (2026-03-31)
 
 ---
 
-## Issue 1: score_counter Anchor Shadowing (Active Production Bug)
+## Issue 1: score_counter Anchor Shadowing (Resolved — this entry is stale)
+
+**Status (2026-11-20): Resolved. The text below describes code that no longer exists and is kept for the record only.** The anchor-gated second definition of `score_counter` was removed (source comment `B-24-L2`, `msp_insilicomarker_withGPT.py:612-613`). The active scorer is the simple hit fraction at `msp_insilicomarker_withGPT.py:295-298`: hits divided by the ion-list size, limited to the range 0 to 1. No anchor gate runs, so Score A is not set to 0 for a scan without anchor ions. The `anchors_required` parameter at `mspfileloaderv14.py:6122` is accepted and never read. Lines confirmed by grep on 2026-11-20 (MANUAL-1.14.1). The user manual v1.1 describes Score A without an anchor gate (§4.1).
 
 **Module:** `msp_insilicomarker_withGPT.py`
 **Lines:** 293 (simple version), 1241 (anchor-gated version)
@@ -48,7 +50,7 @@ ARCHITECTURE.md incorrectly tagged the line-1241 function as `[DEAD]` logic — 
 
 ARCHITECTURE.md referred to `ANCHOR_IONS` (dict). The actual name is `ANCHORS` (list) at line 1235. `ANCHOR_TOL` at line 1236 is the associated tolerance. There is no `anchor_required` parameter anywhere in the module.
 
-**Status:** Known, working as designed (anchor enforcement is intentional), but was undocumented and misclassified.
+**Status (historical, superseded by the note at the top of this entry):** Known, working as designed (anchor enforcement is intentional), but was undocumented and misclassified.
 
 ---
 
@@ -227,7 +229,7 @@ These are intentionally different use-cases (inference floor vs report acceptanc
 ## Issue 10: PPM Asymmetry in peaks_ppm
 
 **Module:** `mspvalidator_merger.py`
-**Line:** ~353–400
+**Line:** `peaks_ppm` starts at line 375 (grep to confirm)
 **Severity:** Low — minor systematic error, consistent across all comparisons
 
 ### Description
@@ -243,7 +245,7 @@ The symmetric formula would use:
 denominator = reference_ion
 ```
 
-The asymmetric formula causes slightly narrower effective tolerance when the observed peak is higher than the reference. Since this applies uniformly to all comparisons, it affects scores consistently rather than selectively. See [CGA_SCORING_ANALYSIS.md](../CGA_SCORING_ANALYSIS.md) Section 7 for full analysis.
+The asymmetric formula makes the window marginally **wider** above the ion than below it, not narrower. For a peak above the reference the error is `(peak − ref) / peak`, and dividing by the larger value gives a smaller ppm error, so a peak slightly beyond `ref × (1 + ppm/10^6)` still matches. The difference is below 0.3 ppm at a 500 ppm window. (Direction corrected 2026-11-20, MANUAL-1.14.1; this entry said "narrower" before.) Since this applies uniformly to all comparisons, it affects scores consistently rather than selectively. See [CGA_SCORING_ANALYSIS.md](../CGA_SCORING_ANALYSIS.md) Section 7 for full analysis.
 
 ---
 
@@ -469,6 +471,24 @@ For each ion, every peak inside the ion's window appends one hit; nothing marks 
 
 ---
 
+## Issue 29: Prediction Reports Show Zero Probabilities and Accepted 0, Whether Thresholding Is On or Off
+
+**Modules:** `mspfileloaderv14.py` (hand-off to the reporter: `_parse_vec`, `ReportParams`), `prediction_report.py` (`summarize_predictions`). Grep to confirm the lines. Filed 2026-11-20 (MANUAL-1.14.1); the limitation is listed in `CHANGELOG.md` 1.14 under known limitations.
+**Severity:** The predictions are not affected. The confidence figures of the report (summaries, per-row columns, review queues) are not usable.
+**Status:** Open. Fix planned for 1.15.
+
+### Description
+
+Prediction run summaries and the per-row report columns (`max_proba`, `second_proba`, `margin`, `entropy`) show 0.000, with Accepted 0, whether thresholding is on or off: the reporter cannot parse the stored probability vectors and substitutes zeros. With thresholding off the summary also shows τ 0 and margin 1. With thresholding on it shows the τ and margin that were set. Predicted labels, per-class counts and the threshold relabelling are correct. Fix planned for 1.15.
+
+### Trace note (2026-11-20; static trace and a test of the two functions outside the GUI, not run in the GUI)
+
+- **τ 0, margin 1, Accepted 0.** With the checkbox off the GUI passes `ReportParams(tau=0.0, margin=1.0)` (`mspfileloaderv14.py:10067-10072`). `summarize_predictions` accepts a row only when its margin is at least the configured margin (`prediction_report.py:115-118`), and no margin reaches 1.
+- **Probability statistics 0.000.** `proba_vector` holds one numpy array per row (`mspfileloaderv14.py:9685`). `_parse_vec` (`mspfileloaderv14.py:10032-10045`) parses `str(array)`, which has no commas, so both `json.loads` and `ast.literal_eval` fail and the vector is replaced by zeros (`:10047-10052`). `max_proba`, `margin` and `entropy` are then 0.000 for every row.
+- **Thresholding on.** In the test, the zero vectors did not depend on the threshold setting: with thresholding on (τ 0.65, margin 0.10) the summary carried τ 0.65 and margin 0.10, every row was below τ and Accepted was also 0. The description above was widened to both settings on this evidence (Henry, 2026-11-20). The on case has not been run in the GUI. The per-row columns `max_proba`, `second_proba`, `margin` and `entropy` of `predictions_with_conf.csv`, the `class_summary.csv` means and the `to_review_*.csv` queues read the same zero vectors. The predicted labels and the relabelling by the confidence threshold use the model's probabilities directly and are not affected.
+
+---
+
 ## Issue 30: The Prediction Command Line Cannot Load a Model With the Pinned skops (TESTS-PUBLIC, v1.10 code)
 
 **Modules:** `msp_CLI_predict_skops.py`, `msp_CLI_joblibtoskops_compat.py` (both call `skops.io.load(..., trusted=True)`). Grep to confirm the lines. Filed 2026-11-18 (TESTS-PUBLIC CP-B).
@@ -543,4 +563,5 @@ The guard `if I < 0: I = 0.0` is followed by `math.log10(I)`, so a matched peak 
 | `make_trainable_dataframe` documented as existing in ml_ng_utils | 2026-03-18 | Confirmed does not exist; removed from wiki |
 | `ANCHOR_IONS` / `anchor_required` documented as existing | 2026-03-18 | Actual names: `ANCHORS` (list), no `anchor_required` parameter |
 | `score_counter` line 1241 tagged [DEAD] | 2026-03-18 | Confirmed active via Python late binding |
+| Anchor-gated `score_counter` (Issue 1) | recorded 2026-11-20 | Second definition removed (source comment `B-24-L2`); the simple fraction at `msp_insilicomarker_withGPT.py:295-298` is the active scorer. The two rows above on `score_counter` and `ANCHORS` describe the earlier code |
 | Score B "not imported by any active module" | 2026-03-31 | Score B now integrated via `msp_CGA_structscore.py`, imported by `mspfileloaderv14.py` |
